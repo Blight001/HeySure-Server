@@ -1,0 +1,37 @@
+# HeySure-Server (Python + FastAPI)
+
+# Virtual environments
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# Pytest / mypy
+.pytest_cache/
+.mypy_cache/
+
+# Data and runtime
+data/
+logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Alembic / build
+*.egg
+build/
+dist/

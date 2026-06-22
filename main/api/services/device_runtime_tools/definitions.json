@@ -1,0 +1,574 @@
+[
+  {
+    "name": "shell.run",
+    "file": "shell.run.sh",
+    "runtime": "shell",
+    "description": "执行一条 shell 命令并返回输出（设备 shell 运行时）。默认在工作区运行；cwd 可传工作区内相对或绝对路径。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "要执行的命令行。"
+        },
+        "cwd": {
+          "type": "string",
+          "description": "工作目录；相对路径按工作区解析。"
+        },
+        "shell": {
+          "type": "string",
+          "description": "Windows 下解释器：cmd/powershell/pwsh，默认 cmd。"
+        },
+        "timeout_ms": {
+          "type": "number",
+          "description": "硬超时（毫秒）。"
+        }
+      },
+      "required": [
+        "command"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "keyboard.type",
+    "file": "keyboard.type.py",
+    "description": "在当前焦点处输入文本（Python/pyautogui）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "要输入的文本"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "keyboard.press",
+    "file": "keyboard.press.py",
+    "description": "按下组合键，如 ctrl+c（Python/pyautogui）。keys 可为字符串或数组。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "keys": {
+          "description": "如 'ctrl+c' 或 ['ctrl','c']"
+        }
+      },
+      "required": [
+        "keys"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "mouse.move",
+    "file": "mouse.move.py",
+    "description": "移动鼠标到 (x, y)（Python/pyautogui）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "mouse.click",
+    "file": "mouse.click.py",
+    "description": "在 (x, y) 单击（缺省在当前位置）。button: left/right/middle。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "button": {
+          "type": "string"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "mouse.double_click",
+    "file": "mouse.double_click.py",
+    "description": "在 (x, y) 双击（缺省在当前位置）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "mouse.right_click",
+    "file": "mouse.right_click.py",
+    "description": "在 (x, y) 右键单击（缺省在当前位置）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "mouse.scroll",
+    "file": "mouse.scroll.py",
+    "description": "滚动鼠标滚轮，amount 正为上、负为下（Python/pyautogui）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "amount"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "mouse.drag",
+    "file": "mouse.drag.py",
+    "description": "从 (x1,y1) 拖拽到 (x2,y2)（Python/pyautogui）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "x1": {
+          "type": "number"
+        },
+        "y1": {
+          "type": "number"
+        },
+        "x2": {
+          "type": "number"
+        },
+        "y2": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "clipboard.get",
+    "file": "clipboard.get.py",
+    "description": "读取剪贴板文本（Python/pyperclip）。",
+    "input_schema": {
+      "type": "object"
+    },
+    "permissions": []
+  },
+  {
+    "name": "clipboard.set",
+    "file": "clipboard.set.py",
+    "description": "写入剪贴板文本（Python/pyperclip）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "process.list",
+    "file": "process.list.py",
+    "description": "列出进程（pid/name/cpu/mem，Python/psutil）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "name_contains": {
+          "type": "string",
+          "description": "可选：按名称子串过滤"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "process.kill",
+    "file": "process.kill.py",
+    "description": "结束指定 pid 的进程（Python/psutil）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "pid": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "pid"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "text.input",
+    "file": "text.input.py",
+    "description": "向当前焦点处一次性粘贴大段文本（剪贴板 + Ctrl+V，Python）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "paste": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "fs.list",
+    "file": "fs.list.py",
+    "description": "列出工作区某路径下的文件/子目录（Python）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "相对工作区路径，默认 '.'"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "fs.read",
+    "file": "fs.read.py",
+    "description": "读取工作区中某文件内容（Python，默认上限 200KB）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "maxBytes": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "fs.write",
+    "file": "fs.write.py",
+    "description": "在工作区中创建/覆盖一个文件（Python，属写入操作）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "git.diff",
+    "file": "git.diff.py",
+    "description": "查看工作区（或子目录）当前的 git diff（Python/subprocess）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "type": "string",
+          "description": "相对工作区的仓库目录"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "display.box",
+    "file": "display.box.py",
+    "description": "在桌面最上层短暂显示一个半透明高亮框（Python/tkinter），到时自动消失。用途：标记 AI 识别到的屏幕区域。需要 tkinter（Windows 自带；Linux 需 python3-tk）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "left": {
+          "type": "number",
+          "description": "左上角 X（像素）"
+        },
+        "top": {
+          "type": "number",
+          "description": "左上角 Y（像素）"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "duration": {
+          "type": "number",
+          "description": "显示毫秒数，默认 1000"
+        },
+        "color": {
+          "type": "string",
+          "description": "颜色，默认 red"
+        },
+        "label": {
+          "type": "string",
+          "description": "可选标签文字"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "screen.capture",
+    "file": "screen.capture.py",
+    "description": "整屏截图（Python/mss）。返回 JPEG dataUrl，服务器自动存到 Screenshots 并按需发用户。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "display": {
+          "type": "number",
+          "description": "显示器序号，默认 0"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "screen.capture_region",
+    "file": "screen.capture_region.py",
+    "description": "截取屏幕矩形区域（Python/mss）。返回 JPEG dataUrl，服务器自动存盘。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "screen.info",
+    "file": "screen.info.py",
+    "description": "列出显示器及分辨率（Python/mss）。",
+    "input_schema": {
+      "type": "object"
+    },
+    "permissions": []
+  },
+  {
+    "name": "vision.capture",
+    "file": "vision.capture.py",
+    "description": "采集整屏用于视觉理解（Python/mss）。返回 JPEG dataUrl，服务器存盘并发用户。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "display": {
+          "type": "number"
+        },
+        "send_to_user": {
+          "type": "boolean"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "vision.capture_mouse",
+    "file": "vision.capture_mouse.py",
+    "description": "采集鼠标周围区域用于视觉理解（Python/mss + pyautogui）。返回 JPEG dataUrl。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "radius": {
+          "type": "number",
+          "description": "半径，默认 200"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "window.list",
+    "file": "window.list.py",
+    "description": "列出可见顶层窗口标题（Python；Win 用 pygetwindow，Linux 用 wmctrl）。",
+    "input_schema": {
+      "type": "object"
+    },
+    "permissions": []
+  },
+  {
+    "name": "window.focus",
+    "file": "window.focus.py",
+    "description": "把标题匹配的窗口切到前台（Python；Win pygetwindow，Linux wmctrl -a）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "window.close",
+    "file": "window.close.py",
+    "description": "按标题关闭窗口（Python；Win pygetwindow，Linux wmctrl -c）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ]
+    },
+    "permissions": []
+  },
+  {
+    "name": "ui.inspect",
+    "file": "ui.inspect.py",
+    "description": "读取前台窗口的 UI Automation 控件树（Python/uiautomation，仅 Windows）。返回每个控件的 name/control_type/automation_id/rect。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "max": {
+          "type": "number"
+        },
+        "max_depth": {
+          "type": "number"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "ui.click",
+    "file": "ui.click.py",
+    "description": "按 UI Automation 控件定位并点击（Python/uiautomation，仅 Windows）。优先 InvokePattern，不支持则真实点击控件中心。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "automation_id": {
+          "type": "string"
+        },
+        "control_type": {
+          "type": "string"
+        },
+        "max_depth": {
+          "type": "number"
+        }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "speech.speak",
+    "file": "speech.speak.py",
+    "description": "文字转语音朗读（Python/pyttsx3，跨平台 SAPI/espeak）。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "rate": {
+          "type": "number"
+        },
+        "volume": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "permissions": []
+  }
+]

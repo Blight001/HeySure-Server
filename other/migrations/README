@@ -1,0 +1,12 @@
+Alembic migrations for HeySure server.
+
+This directory is the single source of schema truth (see doc/db-migrations.md).
+Run all commands from the `server/` directory:
+
+  alembic upgrade head        # apply migrations (uses settings.database_url)
+  alembic revision --autogenerate -m "describe change"
+  alembic check               # fail if models drift from migrations
+  alembic downgrade -1        # roll back one revision
+
+env.py resolves the PostgreSQL database URL from api.core.settings (or the
+ALEMBIC_DATABASE_URL environment override). Other databases are rejected.
