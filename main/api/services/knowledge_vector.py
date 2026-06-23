@@ -37,7 +37,7 @@ from api.core.settings import settings
 from api.core.config import user_shared_knowledge_dir
 from api.database import engine
 from api.http_client import ai_http_post
-from api.models import AssistantAIConfig, KnowledgeEntry, User
+from api.models import AssistantAIConfig, User
 from api.services.model_presets import resolve_model_preset
 
 try:
@@ -119,7 +119,7 @@ def _topic_path(user_id: int, file_path: str) -> str:
 
 
 def _read_topic_body(user_id: int, row_or_meta: Any) -> str:
-    """Try to read body from file_path (works with KnowledgeEntry or dict-like)."""
+    """Try to read body from file_path (works with dict-like entry metadata)."""
     try:
         fp = getattr(row_or_meta, "file_path", None) or (row_or_meta.get("file_path") if isinstance(row_or_meta, dict) else None)
         if not fp:
@@ -458,42 +458,37 @@ def semantic_search_knowledge(
     if not embs:
         return []
 
-    # We need metadata (title etc). Prefer loading from KnowledgeEntry table when present,
-    # else fall back to parsing the md files.
+    # We need metadata (title etc). Prefer file-based entries (KnowledgeBase scan) as source of truth.
+    # Fall back to DB rows only if needed. Pure embeddings map is last resort.
     candidates: List[Tuple[str, List[float], Dict[str, Any]]] = []
     try:
-        with Session(engine) as session:
-            rows = session.exec(
-                select(KnowledgeEntry).where(
-                    KnowledgeEntry.user_id == int(user_id),
-                    KnowledgeEntry.status == "active",
-                )
-            ).all()
-            for r in rows:
-                mid = str(r.memory_id)
-                emb = embs.get(mid)
-                if not emb or not emb.get("vector"):
-                    continue
-                meta = {
-                    "memory_id": mid,
-                    "title": r.title,
-                    "triggers": r.triggers,
-                    "summary": r.summary,
-                    "scope": r.scope,
-                    "scope_target": r.scope_target,
-                    "file_path": r.file_path,
-                    "updated_at": r.updated_at or 0,
-                    "use_count": r.use_count or 0,
-                }
-                candidates.append((mid, emb["vector"], meta))
+        # Try file-driven metadata first (no hard dep on KnowledgeEntry table)
+        from api.services.librarian_service import _load_user_knowledge_entries as _load_entries
+        file_rows = _load_entries(int(user_id))
+        for e in file_rows:
+            if str(e.get("status") or "active") != "active":
+                continue
+            mid = str(e.get("memory_id") or "")
+            emb = embs.get(mid)
+            if not emb or not emb.get("vector"):
+                continue
+            meta = {
+                "memory_id": mid,
+                "title": e.get("title", ""),
+                "triggers": ",".join(e.get("triggers") or []) if isinstance(e.get("triggers"), list) else e.get("triggers"),
+                "summary": e.get("summary", ""),
+                "scope": e.get("scope", "global"),
+                "scope_target": e.get("scope_target"),
+                "file_path": e.get("file_path", ""),
+                "updated_at": e.get("updated_at") or 0,
+                "use_count": e.get("use_count", 0),
+            }
+            candidates.append((mid, emb["vector"], meta))
     except Exception:
-        # Fallback: scan files (less metadata)
-        # For simplicity in pure-file mode we can skip or implement light parse
         pass
 
     if not candidates:
-        # Try pure file scan for embeddings that have no KnowledgeEntry row yet
-        # (rare after sync)
+        # Pure embedding files with minimal meta (KnowledgeEntry table removed)
         for mid, emb in embs.items():
             if not emb.get("vector"):
                 continue

@@ -6,8 +6,9 @@
 - 提供"咨询"（consult）：按 query 在 active 条目中检索
 - 提供"主题列表"（list_topics）：渐进披露，只返标题+触发词
 
-文件存储：<workspace_root>/KnowledgeBase/topics/<slug>.md
-索引：KnowledgeEntry 表
+文件存储：<workspace_root>/KnowledgeBase/topics/<slug>.md 以及 inheritance_thoughts/**/SKILL.md
+真相源：KnowledgeBase/ 下的 Markdown 文件（直接读取，不依赖 KnowledgeEntry 表）
+索引：纯文件驱动 + KnowledgeBase/index.json（文件扫描重建）
 注册表：<workspace_root>/KnowledgeBase/index.json（前端可选浏览）
 
 参考：Claude Code Skills 的 progressive disclosure（先标题，再按需读全文）。
@@ -27,7 +28,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -35,7 +36,7 @@ from sqlmodel import Session, select
 
 from ..database import engine
 from ..integrations import clawhub
-from ..models import AssistantAIConfig, KnowledgeEntry, User
+from ..models import AssistantAIConfig, User
 from ..sio import sio
 from ..core.config import user_shared_knowledge_dir
 from . import kb_store
@@ -322,32 +323,34 @@ def _read_text(path: str) -> Optional[str]:
 # ---------- 索引文件 ----------
 
 def _rebuild_index(user_id: int) -> None:
-    """重写 KnowledgeBase/index.json（只含 active+pending，archived/rejected 不进）。"""
+    """重写 KnowledgeBase/index.json（只含 active+pending，archived/rejected 不进）。
+    现在主要从文件扫描重建，DB 作为可选补充。
+    """
     try:
         root = _kb_root(user_id)
-        with Session(engine) as session:
-            rows = session.exec(
-                select(KnowledgeEntry).where(
-                    KnowledgeEntry.user_id == user_id,
-                    KnowledgeEntry.status.in_(["active", "pending"]),
-                ).order_by(KnowledgeEntry.created_at.desc())
-            ).all()
-            items = [
-                {
-                    "memory_id": r.memory_id,
-                    "title": r.title,
-                    "triggers": _split_csv(r.triggers),
-                    "scope": r.scope,
-                    "scope_target": r.scope_target,
-                    "status": r.status,
-                    "confidence": r.confidence,
-                    "file_path": r.file_path,
-                    "use_count": r.use_count,
-                    "summary": r.summary,
-                    "updated_at": r.updated_at,
-                }
-                for r in rows
-            ]
+        items: List[Dict[str, Any]] = []
+        # File scan primary
+        try:
+            file_ents = _load_user_knowledge_entries(user_id)
+            for e in file_ents:
+                if e.get("status") not in ("active", "pending"):
+                    continue
+                items.append({
+                    "memory_id": e.get("memory_id"),
+                    "title": e.get("title"),
+                    "triggers": e.get("triggers") or [],
+                    "scope": e.get("scope", "global"),
+                    "scope_target": e.get("scope_target"),
+                    "status": e.get("status"),
+                    "confidence": e.get("confidence", 1.0),
+                    "file_path": e.get("file_path"),
+                    "use_count": e.get("use_count", 0),
+                    "summary": e.get("summary"),
+                    "updated_at": e.get("updated_at"),
+                })
+        except Exception:
+            pass
+        # No DB fallback — pure file scan (KnowledgeEntry table removed)
         path = os.path.join(root, _INDEX_FILE)
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"items": items, "updated_at": time.time()}, f, ensure_ascii=False, indent=2)
@@ -357,6 +360,162 @@ def _rebuild_index(user_id: int) -> None:
 
 def _split_csv(value: str) -> List[str]:
     return [piece.strip() for piece in str(value or "").split(",") if piece.strip()]
+
+
+# ---------- File-driven knowledge entries (KnowledgeBase/ is the only source; KnowledgeEntry table removed) ----------
+
+def _split_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
+    """Parse simple --- key: value frontmatter (supports basic list-like strings)."""
+    src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not src.startswith("---\n"):
+        return {}, src
+    end = src.find("\n---\n", 4)
+    if end < 0:
+        return {}, src
+    head = src[4:end]
+    body = src[end + 5:]
+    meta: Dict[str, Any] = {}
+    for line in head.split("\n"):
+        if ":" in line:
+            key, _, value = line.partition(":")
+            meta[key.strip()] = value.strip()
+    return meta, body.lstrip("\n")
+
+
+def _parse_triggers_field(raw: Any) -> List[str]:
+    """Normalize triggers/keywords from frontmatter or legacy to list."""
+    if isinstance(raw, list):
+        return [str(t).strip() for t in raw if str(t).strip()]
+    s = str(raw or "").strip()
+    if s.startswith("[") and s.endswith("]"):
+        inner = s[1:-1]
+        parts = [p.strip().strip("\"'") for p in inner.split(",")]
+        return [p for p in parts if p]
+    if not s:
+        return []
+    return [p.strip() for p in re.split(r"[,，;；\n]+", s) if p.strip()]
+
+
+def _load_user_knowledge_entries(user_id: int) -> List[Dict[str, Any]]:
+    """Scan KnowledgeBase/topics/*.md and installed SKILL.md to produce entry dicts.
+
+    Pure file scan for listing/reading (KnowledgeEntry table removed).
+    File is the source of truth. Scope/status parsed from frontmatter when present.
+    """
+    entries: List[Dict[str, Any]] = []
+    root = _kb_root(user_id)
+
+    # topics/ procedural knowledge
+    topics_dir = os.path.join(root, _TOPICS_DIR)
+    if os.path.isdir(topics_dir):
+        try:
+            for fname in os.listdir(topics_dir):
+                if not fname.lower().endswith(".md"):
+                    continue
+                rel = f"{_TOPICS_DIR}/{fname}".replace("\\", "/")
+                p = _topic_path(user_id, rel)
+                raw = _read_text(p)
+                if not raw:
+                    continue
+                meta, body = _split_frontmatter(raw)
+                memory_id = str(meta.get("memory_id") or "").strip()
+                if not memory_id:
+                    slug = os.path.splitext(fname)[0]
+                    memory_id = f"topic:{slug}"
+                title = str(meta.get("title") or os.path.splitext(fname)[0])
+                triggers = _parse_triggers_field(meta.get("triggers") or meta.get("keywords") or "")
+                status = str(meta.get("status") or "active")
+                scope = str(meta.get("scope") or "global")
+                summary = str(meta.get("summary") or (body or "")[:200]).strip()
+                try:
+                    mtime = os.path.getmtime(p)
+                except OSError:
+                    mtime = time.time()
+                entries.append({
+                    "memory_id": memory_id,
+                    "title": title,
+                    "triggers": triggers,
+                    "scope": scope,
+                    "scope_target": meta.get("scope_target"),
+                    "status": status,
+                    "confidence": float(meta.get("confidence") or 1.0),
+                    "use_count": 0,
+                    "last_used_at": None,
+                    "file_path": rel,
+                    "summary": summary,
+                    "source_job_id": meta.get("source_job_id"),
+                    "source_generation": meta.get("source_generation"),
+                    "source_ai_config_id": meta.get("source_ai_config_id"),
+                    "source_message_id": meta.get("source_message_id"),
+                    "created_at": float(meta.get("created_at") or mtime),
+                    "updated_at": float(meta.get("updated_at") or mtime),
+                })
+        except Exception as exc:
+            logger.info(f"_load_user_knowledge_entries topics failed user={user_id}: {exc}")
+
+    # skills from inheritance_thoughts (via clawhub state)
+    try:
+        installed = _clawhub_installed_items(user_id)
+        for item in installed:
+            slug = str(item.get("slug") or "").strip()
+            if not slug:
+                continue
+            rel_path = str(item.get("path") or "").strip().rstrip("/\\")
+            if not rel_path:
+                continue
+            skill_rel = (rel_path + "/SKILL.md").replace("\\", "/")
+            skill_abs = _topic_path(user_id, skill_rel)
+            if not os.path.exists(skill_abs):
+                continue
+            memory_id = f"skill:{slug}"
+            name = str(item.get("displayName") or slug)
+            summary = str(item.get("summary") or item.get("description") or "")
+            installed_at = float(item.get("installed_at") or 0)
+            entries.append({
+                "memory_id": memory_id,
+                "title": name,
+                "triggers": [],
+                "scope": "global",
+                "scope_target": None,
+                "status": "active",
+                "confidence": 1.0,
+                "use_count": 0,
+                "last_used_at": None,
+                "file_path": skill_rel,
+                "summary": summary,
+                "source_job_id": None,
+                "source_generation": None,
+                "source_ai_config_id": None,
+                "source_message_id": None,
+                "created_at": installed_at or time.time(),
+                "updated_at": installed_at or time.time(),
+            })
+    except Exception as exc:
+        logger.info(f"_load_user_knowledge_entries skills failed user={user_id}: {exc}")
+
+    return entries
+
+
+def _entry_dict_from_file_entry(e: Dict[str, Any], *, with_body: bool = False, user_id: Optional[int] = None) -> Dict[str, Any]:
+    """Convert internal file entry to API shape (add body if requested)."""
+    out = {k: e.get(k) for k in [
+        "memory_id", "title", "triggers", "scope", "scope_target", "status",
+        "confidence", "use_count", "last_used_at", "file_path", "summary",
+        "source_job_id", "source_generation", "source_ai_config_id", "source_message_id",
+        "created_at", "updated_at"
+    ]}
+    if with_body and user_id is not None:
+        try:
+            fp = e.get("file_path") or ""
+            if fp:
+                path = _topic_path(user_id, fp)
+                raw = _read_text(path)
+                if raw is not None:
+                    _m, body = _split_frontmatter(raw)
+                    out["body"] = body
+        except Exception:
+            out["body"] = ""
+    return out
 
 
 def _inheritance_thoughts_root(user_id: int) -> str:
@@ -657,11 +816,13 @@ def _sync_skill_to_knowledge_entry(
     *,
     ai_config_id: Optional[int] = None,
     status: str = "active",
-) -> None:
-    """将一个 skill 写入 / 更新 KnowledgeEntry（幂等）。"""
+) -> Dict[str, Any]:
+    """将一个 skill 登记（文件已存在时）。纯文件驱动，不再写 KnowledgeEntry 表。
+    返回 entry dict 用于调用方。
+    """
     memory_id = f"skill:{slug}"
 
-    # Sanitize file_path: must be relative path under KnowledgeBase, no leading / or ..
+    # Sanitize file_path
     safe_path = str(skill_md_path or "").strip().lstrip("/\\")
     if ".." in safe_path.replace("\\", "/").split("/"):
         safe_path = ""
@@ -669,52 +830,40 @@ def _sync_skill_to_knowledge_entry(
         safe_path = safe_path.rstrip("/\\") + "/SKILL.md"
     skill_md_path = safe_path
 
-    # 读文件提取触发词
     raw = _read_text(_topic_path(user_id, skill_md_path)) if skill_md_path else None
     triggers = _extract_skill_triggers(raw or "", name)
-    # upsert KnowledgeEntry
-    with Session(engine) as session:
-        row = session.exec(
-            select(KnowledgeEntry).where(
-                KnowledgeEntry.user_id == user_id,
-                KnowledgeEntry.memory_id == memory_id,
-            )
-        ).first()
-        now = time.time()
-        if row is None:
-            row = KnowledgeEntry(
-                memory_id=memory_id,
-                user_id=user_id,
-                title=name,
-                triggers=triggers,
-                summary=summary,
-                file_path=skill_md_path,
-                scope="global",
-                status=status,
-                confidence=1.0,
-                created_at=installed_at,
-                updated_at=now,
-            )
-        else:
-            row.title = name
-            row.triggers = triggers
-            row.summary = summary
-            row.file_path = skill_md_path
-            row.status = status
-            row.updated_at = now
-        session.add(row)
-        session.commit()
-        session.refresh(row)
+    now = time.time()
+
+    # Build a dict (file-backed "entry")
+    entry_dict = {
+        "memory_id": memory_id,
+        "title": name,
+        "triggers": triggers if isinstance(triggers, list) else _parse_triggers_field(triggers),
+        "scope": "global",
+        "scope_target": None,
+        "status": status,
+        "confidence": 1.0,
+        "use_count": 0,
+        "last_used_at": None,
+        "file_path": skill_md_path,
+        "summary": summary,
+        "source_job_id": None,
+        "source_generation": None,
+        "source_ai_config_id": None,
+        "source_message_id": None,
+        "created_at": installed_at,
+        "updated_at": now,
+    }
 
     try:
-        _sync_topic_embedding(user_id=user_id, row=row, ai_config_id=ai_config_id, force=True)
+        _sync_topic_embedding(user_id=user_id, row=entry_dict, ai_config_id=ai_config_id, force=True)
     except Exception as exc:
         logger.info("skill file-embedding sync failed slug=%s: %s", slug, exc)
 
     return {
         "installed": True,
         "slug": slug,
-        "entry": _entry_to_dict(row, with_body=False),
+        "entry": _entry_to_dict(entry_dict, with_body=False, user_id=user_id),
     }
 
 
@@ -2230,75 +2379,92 @@ def propose(
     )
     _safe_write(_topic_path(user_id, file_rel), md)
 
-    with Session(engine) as session:
-        librarian_id = get_librarian_config_id(user_id)
-        row = KnowledgeEntry(
-            memory_id=memory_id,
-            user_id=user_id,
-            title=title,
-            triggers=",".join(triggers_norm),
-            scope=scope_norm,
-            scope_target=scope_target_norm,
-            file_path=file_rel,
-            summary=_short_summary(scenario, steps),
-            status=status,
-            confidence=confidence,
-            source_job_id=str(source.get("job_id") or "") or None,
-            source_generation=int(source.get("generation") or 0) or None,
-            source_ai_config_id=int(source.get("ai_config_id") or ai_config_id or 0) or None,
-            source_message_id=int(source.get("message_id") or 0) or None,
-            librarian_ai_config_id=librarian_id,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(row)
-        session.commit()
-        session.refresh(row)
+    librarian_id = get_librarian_config_id(user_id)
+    # Pure file-backed entry dict (no KnowledgeEntry table)
+    entry_dict = {
+        "memory_id": memory_id,
+        "title": title,
+        "triggers": triggers_norm,
+        "scope": scope_norm,
+        "scope_target": scope_target_norm,
+        "file_path": file_rel,
+        "summary": _short_summary(scenario, steps),
+        "status": status,
+        "confidence": confidence,
+        "use_count": 0,
+        "last_used_at": None,
+        "source_job_id": str(source.get("job_id") or "") or None,
+        "source_generation": int(source.get("generation") or 0) or None,
+        "source_ai_config_id": int(source.get("ai_config_id") or ai_config_id or 0) or None,
+        "source_message_id": int(source.get("message_id") or 0) or None,
+        "created_at": now,
+        "updated_at": now,
+    }
 
     _rebuild_index(user_id)
-    entry_dict = _entry_to_dict(row, with_body=False)
     try:
-        _sync_topic_embedding(user_id=user_id, row=row, ai_config_id=librarian_id or None, force=True)
+        _sync_topic_embedding(user_id=user_id, row=entry_dict, ai_config_id=librarian_id or None, force=True)
     except Exception as exc:
-        logger.info("file-embedding sync after propose failed %s: %s", row.memory_id, exc)
+        logger.info("file-embedding sync after propose failed %s: %s", memory_id, exc)
     _emit_proposal_event(user_id, "librarian:proposal_resolved", entry_dict)
     return entry_dict
 
 
 def archive(*, user_id: int, memory_id: str) -> Dict[str, Any]:
-    """归档：从 active 移到 archived，文件移到 archives/ 子目录。"""
-    with Session(engine) as session:
-        row = session.exec(
-            select(KnowledgeEntry).where(
-                KnowledgeEntry.user_id == user_id,
-                KnowledgeEntry.memory_id == memory_id,
-            )
-        ).first()
-        if not row:
-            raise ValueError("memory not found")
-        # 移动文件
-        src = _topic_path(user_id, row.file_path)
-        bucket = time.strftime("%Y-%m", time.localtime())
-        dest_rel = f"{_ARCHIVE_DIR}/{bucket}/{os.path.basename(row.file_path)}"
-        dest = _topic_path(user_id, dest_rel)
-        try:
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            if os.path.exists(src):
-                os.replace(src, dest)
-        except Exception as exc:
-            logger.exception(f"move file failed: {exc}")
-        row.status = "archived"
-        row.file_path = dest_rel
-        row.updated_at = time.time()
-        session.add(row)
-        session.commit()
-        session.refresh(row)
-        try:
-            _sync_topic_embedding(user_id=user_id, row=row, force=True)
-        except Exception as exc:
-            logger.info("file-embedding sync after archive failed %s: %s", row.memory_id, exc)
-        out = _entry_to_dict(row, with_body=False)
-    _rebuild_index(user_id)
+    """归档：从 active 移到 archived，文件移到 archives/ 子目录。
+    纯文件操作（KnowledgeEntry 表已移除）。
+    """
+    # Try file-based locate
+    target = None
+    try:
+        for e in _load_user_knowledge_entries(user_id):
+            if e.get("memory_id") == memory_id and e.get("status") == "active":
+                target = e
+                break
+    except Exception:
+        target = None
+
+    src_rel = target.get("file_path") if target else None
+
+    if not src_rel:
+        raise ValueError("memory not found")
+
+    src = _topic_path(user_id, src_rel)
+    bucket = time.strftime("%Y-%m", time.localtime())
+    dest_rel = f"{_ARCHIVE_DIR}/{bucket}/{os.path.basename(src_rel)}"
+    dest = _topic_path(user_id, dest_rel)
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.exists(src):
+            os.replace(src, dest)
+    except Exception as exc:
+        logger.exception(f"move file failed: {exc}")
+
+    # Pure file operation. Build dict for return + embedding sync.
+    now = time.time()
+    out = {
+        "memory_id": memory_id,
+        "file_path": dest_rel,
+        "status": "archived",
+        "updated_at": now,
+    }
+
+    entry_dict = dict(out)
+    entry_dict.update({
+        "title": memory_id,
+        "triggers": [],
+        "scope": "global",
+        "summary": "",
+    })
+    try:
+        _sync_topic_embedding(user_id=user_id, row=entry_dict, force=True)
+    except Exception as exc:
+        logger.info("file-embedding sync after archive failed %s: %s", memory_id, exc)
+
+    try:
+        _rebuild_index(user_id)
+    except Exception:
+        pass
     return out
 
 
@@ -2314,39 +2480,36 @@ def consult(
 
     Stage 1: 触发词与标题的关键词重叠打分
     Stage 2: 在 active + 满足 scope 的条目里取 top-k
+    现在直接扫描 KnowledgeBase/ 文件，不再 SELECT KnowledgeEntry 表。
     """
     query_norm = (query or "").strip()
     if not query_norm:
         return []
     q_tokens = _tokenize(query_norm)
 
-    with Session(engine) as session:
-        rows = session.exec(
-            select(KnowledgeEntry).where(
-                KnowledgeEntry.user_id == user_id,
-                KnowledgeEntry.status == "active",
-            )
-        ).all()
-        scored: List[tuple[float, KnowledgeEntry]] = []
-        for r in rows:
-            if not _scope_match(r, scope, ai_config_id):
-                continue
-            score = _score_entry(r, q_tokens, query_norm)
-            if score <= 0:
-                continue
-            scored.append((score, r))
-        scored.sort(key=lambda x: (-x[0], -x[1].updated_at))
-        top = scored[: max(1, int(k))]
+    try:
+        rows = _load_user_knowledge_entries(user_id)
+    except Exception:
+        rows = []
+    scored: List[tuple[float, Dict[str, Any]]] = []
+    for r in rows:
+        if r.get("status") != "active":
+            continue
+        if not _scope_match(r, scope, ai_config_id):
+            continue
+        score = _score_entry(r, q_tokens, query_norm)
+        if score <= 0:
+            continue
+        scored.append((score, r))
+    scored.sort(key=lambda x: (-x[0], -float(x[1].get("updated_at") or 0)))
+    top = scored[: max(1, int(k))]
 
-        # 更新 use_count
-        now = time.time()
-        for _, r in top:
-            r.use_count += 1
-            r.last_used_at = now
-            session.add(r)
-        session.commit()
+    # use_count 统计：文件优先模式下可选写回简易 stats（此处简化不强制落盘，保持 0）
+    # 如需持久，可在此维护 KnowledgeBase/.knowledge_stats.json
+    now = time.time()
+    # (no DB mutation; file is source)
 
-        return [_entry_to_dict(r, with_body=True, user_id=user_id) for _, r in top]
+    return [_entry_to_dict(r, with_body=True, user_id=user_id) for _, r in top]
 
 
 def list_topics(
@@ -2355,34 +2518,40 @@ def list_topics(
     scope: Optional[str] = None,
     status: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """渐进披露：只返标题 + 触发词 + 摘要，不返正文。"""
+    """渐进披露：只返标题 + 触发词 + 摘要，不返正文。
+    现在从 KnowledgeBase/ 文件直接读取（topics + skills），不再依赖 KnowledgeEntry 表。
+    """
     target_status = status or "active"
     if target_status not in _VALID_STATUSES and target_status != "all":
         raise ValueError(f"invalid status: {target_status}")
     out: List[Dict[str, Any]] = []
     if target_status in {"active", "all"} and (scope in {None, "", "global"}):
         out.extend(_builtin_entries(user_id=user_id, with_body=False))
-    with Session(engine) as session:
-        stmt = select(KnowledgeEntry).where(KnowledgeEntry.user_id == user_id)
-        if target_status != "all":
-            stmt = stmt.where(KnowledgeEntry.status == target_status)
-        rows = session.exec(stmt.order_by(KnowledgeEntry.updated_at.desc())).all()
-        for r in rows:
-            if not _scope_match(r, scope, None):
+    # File-first: scan KnowledgeBase
+    try:
+        file_entries = _load_user_knowledge_entries(user_id)
+        for e in file_entries:
+            if target_status != "all" and e.get("status") != target_status:
+                continue
+            if not _scope_match(e, scope, None):
                 continue
             out.append({
-                "memory_id": r.memory_id,
-                "title": r.title,
-                "triggers": _split_csv(r.triggers),
-                "scope": r.scope,
-                "scope_target": r.scope_target,
-                "status": r.status,
-                "confidence": r.confidence,
-                "use_count": r.use_count,
-                "summary": r.summary,
-                "updated_at": r.updated_at,
+                "memory_id": e["memory_id"],
+                "title": e.get("title", ""),
+                "triggers": e.get("triggers") or [],
+                "scope": e.get("scope", "global"),
+                "scope_target": e.get("scope_target"),
+                "status": e.get("status", "active"),
+                "confidence": e.get("confidence", 1.0),
+                "use_count": e.get("use_count", 0),
+                "summary": e.get("summary", ""),
+                "updated_at": e.get("updated_at"),
             })
-        return out
+    except Exception as exc:
+        logger.info(f"list_topics file scan failed: {exc}")
+    # Fallback: if somehow no file entries but old DB rows exist (transition), keep minimal
+    # (intentionally light; main path is files)
+    return out
 
 
 def brief(
@@ -2401,49 +2570,48 @@ def brief(
     2. 取 top-k；逐条压缩为 "- 【title】(memory_id)：summary"（最长 200 字符）
     3. 总字符上限 max_chars；不超则拼接，超则截尾并加省略
     4. 若全无命中返回空串（不强行注入空 Brief）
+    现在基于文件扫描（_load_user_knowledge_entries）。
     """
     text_for_match = f"{task_title or ''} {task_instruction or ''}".strip()
     if not text_for_match:
         return ""
     lower = text_for_match.lower()
 
-    with Session(engine) as session:
-        rows = session.exec(
-            select(KnowledgeEntry).where(
-                KnowledgeEntry.user_id == user_id,
-                KnowledgeEntry.status == "active",
-            )
-        ).all()
-        scored: List[tuple[float, KnowledgeEntry]] = []
-        for r in rows:
-            if not _scope_match(r, None, ai_config_id):
-                continue
-            # brief 必须靠"声明式触发词命中"（类 Skills 风格），杜绝标题
-            # 子串误命中带来的假阳性；否则 consult 才走更宽的 token 匹配。
-            triggers = [t.lower() for t in _split_csv(r.triggers) if t.strip()]
-            trigger_hits = sum(1 for t in triggers if t and t in lower)
-            if trigger_hits <= 0:
-                continue
-            score = trigger_hits * 3.0
-            scored.append((score, r))
-        scored.sort(key=lambda x: (-x[0], -x[1].updated_at))
-        top = scored[: max(1, int(k))]
-        if not top:
-            return ""
+    try:
+        rows = _load_user_knowledge_entries(user_id)
+    except Exception:
+        rows = []
+    scored: List[tuple[float, Dict[str, Any]]] = []
+    for r in rows:
+        if r.get("status") != "active":
+            continue
+        if not _scope_match(r, None, ai_config_id):
+            continue
+        # brief 必须靠"声明式触发词命中"
+        triggers = [t.lower() for t in (r.get("triggers") or []) if str(t).strip()]
+        trigger_hits = sum(1 for t in triggers if t and t in lower)
+        if trigger_hits <= 0:
+            continue
+        score = trigger_hits * 3.0
+        scored.append((score, r))
+    scored.sort(key=lambda x: (-x[0], -float(x[1].get("updated_at") or 0)))
+    top = scored[: max(1, int(k))]
+    if not top:
+        return ""
 
-        lines: List[str] = []
-        used = 0
-        for _, r in top:
-            summary = (r.summary or "").replace("\n", " ").strip()
-            if len(summary) > 200:
-                summary = summary[:200] + "…"
-            line = f"- 【{r.title}】({r.memory_id})：{summary}"
-            if used + len(line) + 1 > max_chars:
-                lines.append("- …其余条目可在控制台知识库中进一步查询")
-                break
-            lines.append(line)
-            used += len(line) + 1
-        return "\n".join(lines)
+    lines: List[str] = []
+    used = 0
+    for _, r in top:
+        summary = str(r.get("summary") or "").replace("\n", " ").strip()
+        if len(summary) > 200:
+            summary = summary[:200] + "…"
+        line = f"- 【{r.get('title','')}】({r.get('memory_id','')})：{summary}"
+        if used + len(line) + 1 > max_chars:
+            lines.append("- …其余条目可在控制台知识库中进一步查询")
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
 
 
 def read(
@@ -2454,16 +2622,15 @@ def read(
     builtin = _builtin_entry(memory_id, user_id=user_id, with_body=True)
     if builtin is not None:
         return builtin
-    with Session(engine) as session:
-        row = session.exec(
-            select(KnowledgeEntry).where(
-                KnowledgeEntry.user_id == user_id,
-                KnowledgeEntry.memory_id == memory_id,
-            )
-        ).first()
-        if not row:
-            raise ValueError("memory not found")
-        return _entry_to_dict(row, with_body=True, user_id=user_id)
+    # File-only lookup (KnowledgeEntry table removed)
+    try:
+        entries = _load_user_knowledge_entries(user_id)
+        for e in entries:
+            if e.get("memory_id") == memory_id:
+                return _entry_to_dict(e, with_body=True, user_id=user_id)
+    except Exception as exc:
+        logger.info(f"read file scan failed: {exc}")
+    raise ValueError("memory not found")
 
 
 
@@ -2476,33 +2643,45 @@ def _tokenize(text: str) -> List[str]:
     return [m.lower() for m in _WORD_PATTERN.findall(text or "")]
 
 
-def _scope_match(row: KnowledgeEntry, scope: Optional[str], ai_config_id: Optional[int]) -> bool:
-    if row.scope == "global":
+def _scope_match(row: Any, scope: Optional[str], ai_config_id: Optional[int]) -> bool:
+    # Support both ORM row and plain dict (file-based entries)
+    if isinstance(row, dict):
+        rscope = str(row.get("scope") or "global")
+        rtarget = row.get("scope_target")
+    else:
+        rscope = str(getattr(row, "scope", "global") or "global")
+        rtarget = getattr(row, "scope_target", None)
+    if rscope == "global":
         return True
     if scope:
         if scope == "global":
-            return row.scope == "global"
-        if scope == "ai" and row.scope == "ai":
-            return str(row.scope_target or "") == str(ai_config_id or "")
-        if scope == "project" and row.scope == "project":
-            return True  # 项目级先放过，未来加 project_id 匹配
-    if row.scope == "ai" and ai_config_id is not None:
-        return str(row.scope_target or "") == str(ai_config_id)
+            return rscope == "global"
+        if scope == "ai" and rscope == "ai":
+            return str(rtarget or "") == str(ai_config_id or "")
+        if scope == "project" and rscope == "project":
+            return True
+    if rscope == "ai" and ai_config_id is not None:
+        return str(rtarget or "") == str(ai_config_id)
     return False
 
 
-def _score_entry(row: KnowledgeEntry, q_tokens: List[str], query_text: str) -> float:
+def _score_entry(row: Any, q_tokens: List[str], query_text: str) -> float:
     if not q_tokens:
         return 0.0
-    hay_pieces = [
-        row.title or "",
-        row.triggers or "",
-        row.summary or "",
-    ]
+    if isinstance(row, dict):
+        title = row.get("title") or ""
+        trigs_raw = row.get("triggers") or ""
+        summary = row.get("summary") or ""
+    else:
+        title = getattr(row, "title", "") or ""
+        trigs_raw = getattr(row, "triggers", "") or ""
+        summary = getattr(row, "summary", "") or ""
+    hay_pieces = [title, trigs_raw, summary]
     hay = " ".join(hay_pieces).lower()
     score = 0.0
     # 触发词命中权重更高
-    triggers = [t.lower() for t in _split_csv(row.triggers)]
+    triggers = _parse_triggers_field(trigs_raw) if not isinstance(trigs_raw, list) else trigs_raw
+    triggers = [str(t).lower() for t in triggers if t]
     for t in triggers:
         if t and t in query_text.lower():
             score += 2.0
@@ -2515,11 +2694,13 @@ def _score_entry(row: KnowledgeEntry, q_tokens: List[str], query_text: str) -> f
 
 
 def _entry_to_dict(
-    row: KnowledgeEntry,
+    row: Any,
     *,
     with_body: bool = False,
     user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        return _entry_dict_from_file_entry(row, with_body=with_body, user_id=user_id)
     out: Dict[str, Any] = {
         "memory_id": row.memory_id,
         "title": row.title,

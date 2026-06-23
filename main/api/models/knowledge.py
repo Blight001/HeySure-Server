@@ -23,11 +23,14 @@ class Memory(SQLModel, table=True):
 
 
 class KnowledgeEntry(SQLModel, table=True):
-    """传承知识库索引。真相在文件（KnowledgeBase/topics/<slug>.md），
-    DB 仅做检索加速。
+    """已弃用（KnowledgeEntry 表已从运行时移除）。
 
-    与 Memory 表的关系：KnowledgeEntry 是面向"程序性记忆（怎么做某事）"
-    的 superset。Memory 表保留兼容旧 memory.* MCP 调用，不在此重建。
+    知识条目（topics / 传承技能）的真相源是账号的 KnowledgeBase/ 目录下的 Markdown 文件。
+    所有 list/read/consult/propose/archive 等操作现在完全基于文件系统 + embeddings/ 目录。
+
+    此模型定义保留仅为历史迁移/检查脚本使用。生产中可安全 DROP TABLE knowledgeentry。
+
+    与 Memory 表的关系：Memory 仍独立用于旧的 memory.* 工具。
     """
 
     id: Optional[int] = Field(default=None, primary_key=True)

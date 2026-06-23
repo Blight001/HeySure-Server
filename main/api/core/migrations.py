@@ -803,7 +803,7 @@ def _migrate_assistantaiconfig_strip_endpoint_mcp_tools() -> None:
     """
     from ..database import engine
     from sqlalchemy import inspect, text
-    from connector_runtime.dispatch.desktop_agent_tools import is_endpoint_tool_config_name
+    from connector_runtime.dispatch.desktop_device_tools import is_endpoint_tool_config_name
 
     insp = inspect(engine)
     if "assistantaiconfig" not in set(insp.get_table_names()):
@@ -943,7 +943,7 @@ def _migrate_assistantaiconfig_prune_unknown_mcp_tools() -> None:
     """
     from ..database import engine
     from sqlalchemy import inspect, text
-    from connector_runtime.dispatch.desktop_agent_tools import is_endpoint_tool_config_name
+    from connector_runtime.dispatch.desktop_device_tools import is_endpoint_tool_config_name
 
     valid = _live_registered_tool_names()
     # Safety guard: a degraded / empty registry must never wipe every config.

@@ -8,7 +8,7 @@ Markdown 文件，并让文件成为运行时的真相源：
     ├── mcp/<namespace>/<tool>.md  固有技能：每个 MCP 工具的介绍与参数
     ├── system/<key>.md            固有思路：每个系统提示一个 md
     ├── skills/                    传承技能（沿用 inheritance_thoughts 落盘，目录占位）
-    └── topics/<slug>.md           传承知识（KnowledgeEntry，已是 md）
+    └── topics/<slug>.md           传承知识（纯文件驱动）
 
 设计原则（安全优先）：
 
@@ -32,7 +32,7 @@ from sqlmodel import Session, select
 
 from ..core.config import _ai_dir_slug, user_shared_knowledge_dir
 from ..database import engine
-from ..models import AssistantAIConfig, KnowledgeEntry, Memory, User
+from ..models import AssistantAIConfig, Memory, User
 from ..models import defaults as _defaults
 
 logger = logging.getLogger(__name__)
@@ -735,18 +735,14 @@ def _parse_triggers_field(raw: Any) -> str:
 
 
 def sync_topics_from_files(user_id: int, *, session: Optional[Session] = None) -> int:
-    """扫描 topics/*.md，将文件作为真相源 upsert KnowledgeEntry。
+    """扫描 topics/*.md ，确保文件被索引（重建 index）并同步 embedding。
 
-    对于手动放入 topics/ 的 md 文件，此函数让它们自动进入索引。
-    - frontmatter 有 memory_id → 以它为主键；否则用文件名生成 topic:{slug}
-    - 文件 mtime 比 row.updated_at 新时才重新写入
-    返回本次 upsert 的条目数。
+    纯文件驱动，不再写入 KnowledgeEntry 表。
+    返回本次处理的条目数（文件数量）。
     """
     from .knowledge_vector import ensure_file_embedding as _ensure_file_embedding
 
-    own = session is None
-    sess = session or Session(engine)
-    synced = 0
+    processed = 0
     try:
         for path in _list_md(user_id, TOPICS_DIR):
             raw = _read_text(path)
@@ -761,9 +757,6 @@ def sync_topics_from_files(user_id: int, *, session: Optional[Session] = None) -
 
             title = str(meta.get("title") or os.path.splitext(os.path.basename(path))[0])
             triggers = _parse_triggers_field(meta.get("triggers") or "")
-            scope = str(meta.get("scope") or "global")
-            status = str(meta.get("status") or "active")
-            confidence = float(meta.get("confidence") or 1.0)
             summary = str(meta.get("summary") or body[:200]).strip()
 
             kb_root = _kb_root(user_id)
@@ -778,86 +771,30 @@ def sync_topics_from_files(user_id: int, *, session: Optional[Session] = None) -
                 file_mtime = 0.0
 
             now = time.time()
-            row = sess.exec(
-                select(KnowledgeEntry).where(
-                    KnowledgeEntry.user_id == int(user_id),
-                    KnowledgeEntry.memory_id == memory_id,
-                )
-            ).first()
-
-            if row is None:
-                row = KnowledgeEntry(
-                    memory_id=memory_id,
+            try:
+                _ensure_file_embedding(
                     user_id=int(user_id),
+                    memory_id=memory_id,
                     title=title,
-                    triggers=triggers,
+                    triggers=triggers if isinstance(triggers, str) else ",".join(triggers or []),
                     summary=summary,
+                    body_text=body,
                     file_path=rel_path,
-                    scope=scope,
-                    status=status,
-                    confidence=confidence,
-                    created_at=float(meta.get("created_at") or file_mtime or now),
-                    updated_at=now,
+                    force=False,
                 )
-                sess.add(row)
-                sess.commit()
-                sess.refresh(row)
-                synced += 1
-                try:
-                    _ensure_file_embedding(
-                        user_id=int(user_id),
-                        memory_id=memory_id,
-                        title=title,
-                        triggers=triggers,
-                        summary=summary,
-                        body_text=body,
-                        file_path=rel_path,
-                    )
-                except Exception as exc:
-                    logger.info("sync_topics embedding (new) %s: %s", memory_id, exc)
-            elif file_mtime > (row.updated_at or 0):
-                row.title = title
-                row.triggers = triggers
-                row.summary = summary
-                row.file_path = rel_path
-                row.status = status
-                row.confidence = confidence
-                row.updated_at = now
-                sess.add(row)
-                sess.commit()
-                sess.refresh(row)
-                synced += 1
-                try:
-                    _ensure_file_embedding(
-                        user_id=int(user_id),
-                        memory_id=memory_id,
-                        title=title,
-                        triggers=triggers,
-                        summary=summary,
-                        body_text=body,
-                        file_path=rel_path,
-                        force=True,
-                    )
-                except Exception as exc:
-                    logger.info("sync_topics embedding (update) %s: %s", memory_id, exc)
+            except Exception as exc:
+                logger.info("sync_topics embedding %s: %s", memory_id, exc)
+
+            processed += 1
     except Exception as exc:
-        try:
-            sess.rollback()
-        except Exception:
-            pass
         logger.info("sync_topics_from_files user=%s failed: %s", user_id, exc)
-    finally:
-        if own:
-            sess.close()
-    return synced
+    return processed
 
 
 def sync_skills_from_directory(user_id: int) -> int:
-    """扫描 inheritance_thoughts/ 下所有 SKILL.md，补全未索引的技能条目。
+    """扫描 inheritance_thoughts/ 下所有 SKILL.md，确保 embedding 等就绪。
 
-    覆盖 backfill_skill_knowledge_entries 未处理的场景：
-    - 手动放置的 SKILL.md（未经 API）
-    - 文件修改后向量过期（mtime 检查）
+    纯文件驱动（KnowledgeEntry 表已移除）。
     返回本次处理的条目数。
     """
     from .librarian_service import (
@@ -870,7 +807,6 @@ def sync_skills_from_directory(user_id: int) -> int:
     thoughts_root = _inheritance_thoughts_root(user_id)
     kb_root = _kb_root(user_id)
 
-    # 从 clawhub_skills.json 建立 file_path → slug 映射
     try:
         state = _load_clawhub_state(user_id)
         installed: Dict[str, Any] = state.get("installed") or {}
@@ -882,7 +818,7 @@ def sync_skills_from_directory(user_id: int) -> int:
         if p:
             path_to_slug[(p + "/SKILL.md").replace("\\", "/")] = slug
 
-    synced = 0
+    processed = 0
     for dirpath, _dirs, files in os.walk(thoughts_root):
         if "SKILL.md" not in files:
             continue
@@ -893,24 +829,8 @@ def sync_skills_from_directory(user_id: int) -> int:
             continue
 
         slug = path_to_slug.get(rel_path)
-
         if slug:
-            memory_id = f"skill:{slug}"
-            with Session(engine) as session:
-                existing = session.exec(
-                    select(KnowledgeEntry).where(
-                        KnowledgeEntry.user_id == int(user_id),
-                        KnowledgeEntry.memory_id == memory_id,
-                    )
-                ).first()
-            if existing is not None:
-                try:
-                    file_mtime = os.path.getmtime(skill_md_abs)
-                except OSError:
-                    continue
-                if file_mtime <= (existing.updated_at or 0):
-                    continue
-            meta_entry = installed[slug]
+            meta_entry = installed.get(slug, {})
             try:
                 card = _skill_card_metadata(dirpath, str(meta_entry.get("displayName") or slug))
             except Exception:
@@ -925,20 +845,11 @@ def sync_skills_from_directory(user_id: int) -> int:
                     installed_at=float(meta_entry.get("installed_at") or os.path.getmtime(skill_md_abs)),
                     status="active",
                 )
-                synced += 1
+                processed += 1
             except Exception as exc:
                 logger.info("sync_skills_from_directory slug=%s: %s", slug, exc)
         else:
-            # 不在 clawhub_skills.json 中 — 手动放置的文件，按 file_path 查重
-            with Session(engine) as session:
-                existing = session.exec(
-                    select(KnowledgeEntry).where(
-                        KnowledgeEntry.user_id == int(user_id),
-                        KnowledgeEntry.file_path == rel_path,
-                    )
-                ).first()
-            if existing is not None:
-                continue
+            # unregistered manual
             try:
                 rel_dir = os.path.relpath(dirpath, thoughts_root).replace("\\", "/")
             except ValueError:
@@ -958,30 +869,20 @@ def sync_skills_from_directory(user_id: int) -> int:
                     installed_at=os.path.getmtime(skill_md_abs),
                     status="active",
                 )
-                synced += 1
+                processed += 1
             except Exception as exc:
                 logger.info("sync_skills_from_directory unregistered rel=%s: %s", rel_path, exc)
-    return synced
+    return processed
 
 
 def backfill_skill_knowledge_entries(user_id: int) -> None:
-    """把 inheritance_thoughts 里的已安装技能批量写入 KnowledgeEntry（缺失时才写）。"""
+    """确保 inheritance_thoughts 里的已安装技能有 embedding 等（文件驱动）。"""
     from .librarian_service import (
         _load_clawhub_state, _sync_skill_to_knowledge_entry,
     )
     state = _load_clawhub_state(user_id)
     installed = state.get("installed") or {}
     for slug, meta in installed.items():
-        memory_id = f"skill:{slug}"
-        with Session(engine) as session:
-            existing = session.exec(
-                select(KnowledgeEntry).where(
-                    KnowledgeEntry.user_id == user_id,
-                    KnowledgeEntry.memory_id == memory_id,
-                )
-            ).first()
-        if existing:
-            continue
         try:
             p = str(meta.get("path") or "").strip()
             skill_md_path = (p.rstrip("/\\") + "/SKILL.md") if p else ""
@@ -998,9 +899,9 @@ def backfill_skill_knowledge_entries(user_id: int) -> None:
 
 
 def ensure_user_kb(user_id: int, *, session: Optional[Session] = None) -> None:
-    """Ensure the KB root exists and export DB-backed content on demand.
+    """Ensure the KB root exists and seed files (personas, system, mcp, memories, etc.).
 
-    Category directories are created only when a file is actually written.
+    Knowledge topics/skills are now purely file-based (no KnowledgeEntry DB).
     """
     try:
         user_id = int(user_id)

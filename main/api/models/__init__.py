@@ -12,7 +12,7 @@ Sub-modules:
 - ai_config    — AssistantAIConfig (per-AI configuration)
 - ai_runtime   — AITaskJob / AIRuntimeStatus / TokenUsageSnapshot
 - project      — EvolutionProject (multi-AI collaboration containers)
-- knowledge    — Memory / KnowledgeEntry
+- knowledge    — Memory (KnowledgeEntry table removed; knowledge is file-based)
 - communication — AIMessage
 """
 
@@ -140,7 +140,7 @@ __all__ = [
     "EvolutionProjectCreate",
     "EvolutionProjectUpdate",
     # knowledge
-    "KnowledgeEntry",
+    # "KnowledgeEntry",  # table removed from active use; definition kept for migration tools only
     "Memory",
     "WorldActorMeta",
     # communication

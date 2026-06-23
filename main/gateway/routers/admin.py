@@ -48,7 +48,6 @@ from api.models import (
     ChatRun,
     ChatSession,
     EvolutionProject,
-    KnowledgeEntry,
     Memory,
     TokenUsageSnapshot,
     User,
@@ -1142,7 +1141,7 @@ _CLEANUP_CATEGORIES: dict[str, tuple] = {
     "ai_messages": (AIMessage, TokenUsageSnapshot),
     # 知识库与记忆：知识条目 / 记忆
     # （旧表如 evolutioninput、knowledgeembedding 会被 drop_unused_tables 自动删除）
-    "knowledge": (KnowledgeEntry, Memory),
+    "knowledge": (Memory,),  # KnowledgeEntry table has been removed (knowledge now file-based under KnowledgeBase/)
     # 协作项目
     "projects": (EvolutionProject,),
 }
