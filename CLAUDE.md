@@ -108,7 +108,7 @@ server/
 | `bots.py` | `/bots` | QQ / 飞书机器人配置 |
 | `execute.py` | `/execute` | 执行操作 |
 | `temp_images.py` | `/tmp-images` | 临时图片上传与访问 |
-| `repo_update.py` | `/repo` | Git webhook 触发更新 |
+| `repo_update.py` | `/repo` | Git 仓库检测并直接拉取更新 |
 
 ## "改 X 去哪里"
 

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -20,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 try:
     import customtkinter as ctk
@@ -36,6 +39,12 @@ WEB_DIR = ROOT_DIR / "web"
 ENV_FILE = ROOT_DIR / ".env"
 VENV_PYTHON = SERVER_DIR / "venv" / "Scripts" / "python.exe"
 WEB_URL = "http://127.0.0.1:58150"
+PYTHON_DOWNLOAD_URL = "https://www.python.org/downloads/windows/"
+NODE_DOWNLOAD_URL = "https://nodejs.org/en/download"
+POSTGRES_DOWNLOAD_URL = "https://www.postgresql.org/download/windows/"
+POSTGRES_RECOMMENDED = "PostgreSQL 16"
+PYTHON_RECOMMENDED = "Python 3.11 或 3.12"
+NODE_RECOMMENDED = "Node.js 22 LTS 或更新的 LTS 版本"
 
 
 def _parse_env_file(path: Path) -> Dict[str, str]:
@@ -86,6 +95,149 @@ def build_env() -> Dict[str, str]:
 
 def get_python_executable() -> str:
     return str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+
+
+def _command_exists(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def _run_version(command: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+        )
+        text = (result.stdout or result.stderr).strip()
+        return text.splitlines()[0] if text else "可用"
+    except Exception:
+        return "可用"
+
+
+def _postgres_endpoint(database_url: str) -> tuple[str, int]:
+    parsed = urlparse(database_url.replace("postgresql+psycopg://", "postgresql://", 1))
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 5432
+    return host, port
+
+
+def _can_connect(host: str, port: int, timeout: float = 1.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _ensure_postgres_database(database_url: str, admin_user: str, admin_password: str) -> str:
+    parsed = urlparse(database_url.replace("postgresql+psycopg://", "postgresql://", 1))
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 5432
+    app_user = unquote(parsed.username or "heysure")
+    app_password = unquote(parsed.password or "heysure")
+    app_database = unquote((parsed.path or "/heysure").lstrip("/") or "heysure")
+
+    import psycopg
+    from psycopg import sql
+
+    admin_dsn = (
+        f"postgresql://{admin_user}:{admin_password}@{host}:{port}/postgres"
+    )
+    with psycopg.connect(admin_dsn, connect_timeout=8, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (app_user,))
+            if cur.fetchone() is None:
+                cur.execute(
+                    sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                        sql.Identifier(app_user),
+                        sql.Literal(app_password),
+                    )
+                )
+            else:
+                cur.execute(
+                    sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD {}").format(
+                        sql.Identifier(app_user),
+                        sql.Literal(app_password),
+                    )
+                )
+
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (app_database,))
+            if cur.fetchone() is None:
+                cur.execute(
+                    sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                        sql.Identifier(app_database),
+                        sql.Identifier(app_user),
+                    )
+                )
+            else:
+                cur.execute(
+                    sql.SQL("ALTER DATABASE {} OWNER TO {}").format(
+                        sql.Identifier(app_database),
+                        sql.Identifier(app_user),
+                    )
+                )
+
+            cur.execute(
+                sql.SQL("GRANT ALL PRIVILEGES ON DATABASE {} TO {}").format(
+                    sql.Identifier(app_database),
+                    sql.Identifier(app_user),
+                )
+            )
+
+    target_dsn = (
+        f"postgresql://{admin_user}:{admin_password}@{host}:{port}/{app_database}"
+    )
+    with psycopg.connect(target_dsn, connect_timeout=8, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(sql.Identifier(app_user)))
+            cur.execute(sql.SQL("GRANT ALL ON SCHEMA public TO {}").format(sql.Identifier(app_user)))
+
+    return f"PostgreSQL database is ready: {app_database} owned by {app_user}."
+
+
+def _database_is_reachable(database_url: str) -> tuple[bool, str]:
+    if not database_url:
+        return False, "\u7f3a\u5c11 DATABASE_URL\uff0c\u8bf7\u5148\u590d\u5236 .env.example \u4e3a .env \u5e76\u914d\u7f6e\u6570\u636e\u5e93\u8fde\u63a5\u4e32\u3002"
+    try:
+        host, port = _postgres_endpoint(database_url)
+    except Exception as exc:
+        return False, f"DATABASE_URL \u683c\u5f0f\u65e0\u6cd5\u89e3\u6790\uff1a{exc}"
+
+    if not _can_connect(host, port):
+        return False, f"\u65e0\u6cd5\u8fde\u63a5 PostgreSQL\uff1a{host}:{port}\u3002\u8bf7\u786e\u8ba4\u5df2\u5b89\u88c5\u5e76\u542f\u52a8 {POSTGRES_RECOMMENDED}\u3002"
+
+    dsn = database_url.replace("postgresql+psycopg://", "postgresql://", 1)
+    try:
+        import psycopg
+
+        with psycopg.connect(dsn, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return True, f"PostgreSQL \u767b\u5f55\u6210\u529f\uff1a{host}:{port}"
+    except ModuleNotFoundError:
+        return True, f"PostgreSQL \u7aef\u53e3\u53ef\u8fde\u63a5\uff1a{host}:{port}\u3002\u672a\u5b89\u88c5 psycopg\uff0c\u6682\u672a\u9a8c\u8bc1\u8d26\u53f7\u5bc6\u7801\u3002"
+    except Exception as exc:
+        raw = str(exc)
+        safe_raw = raw.encode("ascii", "backslashreplace").decode("ascii")
+        lowered = raw.lower()
+        if "password authentication failed" in lowered or "password" in lowered:
+            hint = "PostgreSQL \u5bc6\u7801\u8ba4\u8bc1\u5931\u8d25\uff1a\u8bf7\u786e\u8ba4 .env \u91cc\u7684 DATABASE_URL \u5bc6\u7801\uff0c\u4e0e PostgreSQL \u4e2d heysure \u7528\u6237\u7684\u5b9e\u9645\u5bc6\u7801\u4e00\u81f4\u3002\u53ef\u7528 ALTER USER heysure WITH PASSWORD 'heysure'; \u91cd\u7f6e\u3002"
+        elif ("database" in lowered and "does not exist" in lowered) or ("???" in raw and "???" in raw):
+            hint = "PostgreSQL \u6570\u636e\u5e93\u4e0d\u5b58\u5728\uff1a\u8bf7\u521b\u5efa\u6570\u636e\u5e93 heysure\uff0c\u5e76\u628a owner \u8bbe\u4e3a heysure\u3002"
+        elif ("role" in lowered and "does not exist" in lowered) or ("??" in raw and "???" in raw):
+            hint = "PostgreSQL \u7528\u6237\u4e0d\u5b58\u5728\uff1a\u8bf7\u521b\u5efa\u7528\u6237 heysure\uff0c\u5e76\u8bbe\u7f6e\u5bc6\u7801 heysure\u3002"
+        elif "authentication failed" in lowered or "no pg_hba.conf entry" in lowered:
+            hint = "PostgreSQL \u8ba4\u8bc1\u914d\u7f6e\u5931\u8d25\uff1a\u8bf7\u68c0\u67e5\u7528\u6237\u540d\u3001\u5bc6\u7801\u3001\u6570\u636e\u5e93\u540d\uff0c\u4ee5\u53ca pg_hba.conf \u662f\u5426\u5141\u8bb8\u672c\u673a\u5bc6\u7801\u767b\u5f55\u3002"
+        elif '"heysure"' in raw:
+            hint = "PostgreSQL \u5df2\u63a5\u53d7 heysure \u7528\u6237\u767b\u5f55\uff0c\u4f46\u5f88\u53ef\u80fd\u6ca1\u6709 heysure \u6570\u636e\u5e93\u3002\u8bf7\u4f7f\u7528 postgres \u7ba1\u7406\u5458\u521b\u5efa\u6570\u636e\u5e93 heysure\uff0cowner \u8bbe\u4e3a heysure\u3002"
+        else:
+            hint = "PostgreSQL \u5df2\u542f\u52a8\uff0c\u4f46\u8d26\u53f7/\u6570\u636e\u5e93\u767b\u5f55\u9a8c\u8bc1\u5931\u8d25\u3002\u8bf7\u68c0\u67e5 DATABASE_URL\u3001\u7528\u6237\u3001\u5bc6\u7801\u3001\u6570\u636e\u5e93\u540d\u548c\u6743\u9650\u3002"
+        return False, f"{hint}\nOriginal error: {safe_raw}"
 
 
 def timestamp() -> str:
@@ -231,7 +383,7 @@ SERVICES: tuple[ServiceSpec, ...] = (
         "🖥️ Web 控制台",
         "#22c55e",
         launch_mode="command",
-        command=("cmd.exe", "/c", "run.bat"),
+        command=("cmd.exe", "/c", str(WEB_DIR / "run.bat")),
         cwd=WEB_DIR,
         requires_database=False,
         open_url=WEB_URL,
@@ -452,6 +604,33 @@ class ServicePane:
             return
 
         env = build_env()
+        if self.spec.requires_database:
+            ok, detail = _database_is_reachable(env.get("DATABASE_URL", ""))
+            if not ok:
+                self.set_status("数据库未连接", "#b91c1c")
+                self.append(detail, "error")
+                self.controller.show_setup_dialog(
+                    "PostgreSQL 未连接",
+                    detail + "\n\n如果已经安装 PostgreSQL，请优先按上面的提示修复账号、密码、数据库和权限；如果尚未安装，再打开下载页安装。",
+                    [("\u81ea\u52a8\u521b\u5efa\u6570\u636e\u5e93", self.controller.show_postgres_init_dialog), ("\u6253\u5f00 PostgreSQL \u4e0b\u8f7d\u9875", POSTGRES_DOWNLOAD_URL)],
+                )
+                return
+
+        if self.spec.key == "web":
+            missing = []
+            if not _command_exists("node"):
+                missing.append("Node.js")
+            if not _command_exists("npm"):
+                missing.append("npm")
+            if missing:
+                self.set_status("缺少 Node.js", "#b91c1c")
+                self.append(f"缺少前端运行环境：{', '.join(missing)}。请安装 {NODE_RECOMMENDED}。", "error")
+                self.controller.show_setup_dialog(
+                    "缺少前端运行环境",
+                    f"Web 控制台需要 {NODE_RECOMMENDED}。安装 Node.js 后重新打开启动器即可。",
+                    [("打开 Node.js 下载页", NODE_DOWNLOAD_URL)],
+                )
+                return
         if self.spec.requires_database and not env.get("DATABASE_URL"):
             self.set_status("缺少 DATABASE_URL", "#b91c1c")
             self.append("请先在 .env 里配置 DATABASE_URL，或者参考 .env.example 补齐数据库配置。", "error")
@@ -712,6 +891,7 @@ class LauncherApp:
         self.current_service_key: Optional[str] = None
         self.installing = False
         self.install_target_key = "gateway"
+        self.setup_dialog: Optional[ctk.CTkToplevel] = None
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(100, self._drain_queue)
@@ -734,10 +914,12 @@ class LauncherApp:
             **big_btn, command=self.toggle_all
         )
         self.install_button = ctk.CTkButton(left, text="📦 安装依赖", fg_color="#334155", hover_color="#475569", text_color="#e0f2fe", **big_btn, command=self.install_dependencies)
+        self.env_check_button = ctk.CTkButton(left, text="环境检查", fg_color="#475569", hover_color="#64748b", text_color="#e0f2fe", **big_btn, command=self.run_environment_check)
         self.open_web_button = ctk.CTkButton(left, text="🌐 打开 Web", fg_color="#166534", hover_color="#15803d", text_color="#ecfdf5", **big_btn, command=self.open_web_page)
 
         self.btn_toggle_all.pack(side="left", padx=(0, 4))
         self.install_button.pack(side="left", padx=(0, 4))
+        self.env_check_button.pack(side="left", padx=(0, 4))
         self.open_web_button.pack(side="left", padx=(0, 4))
 
         # 弹性 spacer（height=1 不改变栏目/按钮高度），将重启按钮推到最右侧
@@ -1022,6 +1204,206 @@ class LauncherApp:
                 hover_color="#15803d",
                 text_color="#ecfdf5"
             )
+
+    def show_setup_dialog(self, title: str, message: str, actions: list[tuple[str, object]]) -> None:
+        if self.setup_dialog is not None and self.setup_dialog.winfo_exists():
+            try:
+                self.setup_dialog.focus()
+            except Exception:
+                pass
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        self.setup_dialog = dialog
+        dialog.title(title)
+        dialog.geometry("560x260")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color="#0f172a")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text=title,
+            text_color="#f8fafc",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+        ).pack(anchor="w", padx=22, pady=(20, 8))
+
+        ctk.CTkLabel(
+            dialog,
+            text=message,
+            text_color="#cbd5e1",
+            justify="left",
+            wraplength=510,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        ).pack(anchor="w", padx=22, pady=(0, 16))
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(fill="x", padx=22, pady=(4, 18))
+
+        for label, action in actions:
+            if callable(action):
+                command = action
+            else:
+                command = lambda u=str(action): self.open_url(u)
+            ctk.CTkButton(
+                buttons,
+                text=label,
+                fg_color="#2563eb",
+                hover_color="#1d4ed8",
+                command=command,
+            ).pack(side="left", padx=(0, 8))
+
+        def _close_dialog() -> None:
+            self.setup_dialog = None
+            dialog.destroy()
+
+        dialog.protocol("WM_DELETE_WINDOW", _close_dialog)
+        ctk.CTkButton(
+            buttons,
+            text="关闭",
+            fg_color="#334155",
+            hover_color="#475569",
+            command=_close_dialog,
+        ).pack(side="right")
+
+    def show_postgres_init_dialog(self) -> None:
+        if self.setup_dialog is not None and self.setup_dialog.winfo_exists():
+            try:
+                self.setup_dialog.destroy()
+            except Exception:
+                pass
+            self.setup_dialog = None
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("\u81ea\u52a8\u521b\u5efa PostgreSQL \u6570\u636e\u5e93")
+        dialog.geometry("560x310")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color="#0f172a")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text="\u81ea\u52a8\u521b\u5efa\u6570\u636e\u5e93",
+            text_color="#f8fafc",
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
+        ).pack(anchor="w", padx=22, pady=(20, 8))
+
+        ctk.CTkLabel(
+            dialog,
+            text="\u8bf7\u8f93\u5165 PostgreSQL \u7ba1\u7406\u5458\u8d26\u53f7\u548c\u5bc6\u7801\u3002\u9ed8\u8ba4\u7ba1\u7406\u5458\u8d26\u53f7\u901a\u5e38\u662f postgres\u3002\u7a0b\u5e8f\u4f1a\u521b\u5efa/\u4fee\u590d heysure \u7528\u6237\u548c heysure \u6570\u636e\u5e93\u3002",
+            text_color="#cbd5e1",
+            justify="left",
+            wraplength=510,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        ).pack(anchor="w", padx=22, pady=(0, 14))
+
+        form = ctk.CTkFrame(dialog, fg_color="transparent")
+        form.pack(fill="x", padx=22, pady=(0, 12))
+        ctk.CTkLabel(form, text="\u7ba1\u7406\u5458\u8d26\u53f7", text_color="#cbd5e1").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        admin_user = ctk.CTkEntry(form, width=320)
+        admin_user.insert(0, "postgres")
+        admin_user.grid(row=0, column=1, sticky="ew", padx=(12, 0), pady=(0, 8))
+        ctk.CTkLabel(form, text="\u7ba1\u7406\u5458\u5bc6\u7801", text_color="#cbd5e1").grid(row=1, column=0, sticky="w")
+        admin_password = ctk.CTkEntry(form, width=320, show="*")
+        admin_password.grid(row=1, column=1, sticky="ew", padx=(12, 0))
+        form.grid_columnconfigure(1, weight=1)
+
+        status = ctk.CTkLabel(dialog, text="", text_color="#fbbf24", wraplength=510, justify="left")
+        status.pack(anchor="w", padx=22, pady=(0, 8))
+
+        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons.pack(fill="x", padx=22, pady=(4, 18))
+
+        def finish(ok: bool, message: str) -> None:
+            status.configure(text=message, text_color="#34d399" if ok else "#f87171")
+            pane = self.current_pane()
+            pane.append(message, "success" if ok else "error")
+            if ok:
+                self.root.after(700, dialog.destroy)
+
+        def run_create() -> None:
+            user = admin_user.get().strip() or "postgres"
+            password = admin_password.get()
+            if user.lower() == "heysure":
+                status.configure(text="这里需要 PostgreSQL 管理员账号，通常是 postgres，不是 heysure。", text_color="#f87171")
+                return
+            if not password:
+                status.configure(text="\u8bf7\u8f93\u5165 PostgreSQL \u7ba1\u7406\u5458\u5bc6\u7801\u3002", text_color="#f87171")
+                return
+            status.configure(text="\u6b63\u5728\u8fde\u63a5 PostgreSQL \u5e76\u521b\u5efa\u6570\u636e\u5e93...", text_color="#fbbf24")
+            create_button.configure(state="disabled")
+
+            def worker() -> None:
+                try:
+                    msg = _ensure_postgres_database(build_env().get("DATABASE_URL", ""), user, password)
+                    ok, detail = _database_is_reachable(build_env().get("DATABASE_URL", ""))
+                    final = msg if ok else detail
+                    self.root.after(0, lambda: finish(ok, final))
+                except Exception as exc:
+                    raw = str(exc).encode("ascii", "backslashreplace").decode("ascii")
+                    self.root.after(0, lambda: finish(False, f"\u81ea\u52a8\u521b\u5efa\u5931\u8d25\uff1a{raw}"))
+                finally:
+                    self.root.after(0, lambda: create_button.configure(state="normal"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        create_button = ctk.CTkButton(
+            buttons,
+            text="\u521b\u5efa/\u4fee\u590d\u6570\u636e\u5e93",
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            command=run_create,
+        )
+        create_button.pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            buttons,
+            text="\u53d6\u6d88",
+            fg_color="#334155",
+            hover_color="#475569",
+            command=dialog.destroy,
+        ).pack(side="right")
+        admin_password.focus()
+
+    def run_environment_check(self) -> None:
+        pane = self.current_pane()
+        env = build_env()
+        pane.append("开始环境检查...", "meta")
+
+        py_version = _run_version([get_python_executable(), "--version"])
+        pane.append(f"Python：{py_version} ({get_python_executable()})", "success")
+
+        if VENV_PYTHON.exists():
+            pane.append("后台虚拟环境：已找到 server\\venv。", "success")
+        else:
+            pane.append("后台虚拟环境：未找到。点击“安装依赖”可自动创建并安装。", "warning")
+
+        db_ok, db_detail = _database_is_reachable(env.get("DATABASE_URL", ""))
+        pane.append(db_detail, "success" if db_ok else "error")
+        if not db_ok:
+            self.show_setup_dialog(
+                "PostgreSQL 需要处理",
+                db_detail + "\n\n请安装 PostgreSQL 16，创建 heysure 用户和 heysure 数据库，然后重新启动后台服务。",
+                [("\u81ea\u52a8\u521b\u5efa\u6570\u636e\u5e93", self.show_postgres_init_dialog), ("\u6253\u5f00 PostgreSQL \u4e0b\u8f7d\u9875", POSTGRES_DOWNLOAD_URL)],
+            )
+
+        if _command_exists("node"):
+            pane.append(f"Node.js：{_run_version(['node', '--version'])}", "success")
+        else:
+            pane.append(f"Node.js：未检测到。请安装 {NODE_RECOMMENDED}。", "error")
+
+        if _command_exists("npm"):
+            pane.append(f"npm：{_run_version(['cmd.exe', '/c', 'npm', '--version'])}", "success")
+        else:
+            pane.append("npm：未检测到。请重新安装 Node.js LTS。", "error")
+
+        if (WEB_DIR / "node_modules").exists():
+            pane.append("前端依赖：已找到 web\\node_modules。", "success")
+        else:
+            pane.append("前端依赖：未找到。启动 Web 时会自动执行 npm install。", "warning")
+
+        pane.append("环境检查完成。", "meta")
 
     def install_dependencies(self) -> None:
         if self.installing:

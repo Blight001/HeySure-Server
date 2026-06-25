@@ -78,6 +78,7 @@ from api.chat_runtime.chat_runtime_helpers import (
     _run_set_status,
     _run_should_stop,
     _session_total_tokens,
+    build_runtime_system_prompt_and_tools,
 )
 
 from api.core.config import DEFAULT_CHAT_MAX_STEPS
@@ -1344,141 +1345,32 @@ def _run_worker_impl(
             task_payload = _load_task_payload_by_session(bg, user_id, ai_config_id, session_id)
             task_job = _load_task_job_by_session(bg, user_id, ai_config_id, session_id)
             is_task_runtime = bool(task_payload) or str(session_id or "").startswith("session_task_")
-            effective_tool_allowlist = _parse_allowed_tools(cfg.mcp_tools if cfg else None)
-            effective_tool_allowlist.update(MCP_INTROSPECTION_TOOLS)
-            effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, user_id))
-            # Endpoint (desktop / browser) tools are governed by the per-(AI,
-            # agent-type) permission scope, not cfg.mcp_tools.
-            effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, user_id))
-            if ai_config_id is not None:
-                # System-injected AI-to-AI messages must remain answerable even
-                # when a task or config narrows the general MCP tool allowlist.
-                effective_tool_allowlist.add("message.send_to_ai")
-            # Server toolbox tools granted by toolbox scope (primary for these tools)
-            try:
-                from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
-                effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, user_id)
-            except Exception:
-                pass
-            # Per-bot tool requirements (e.g. Feishu adds context-trim) live
-            # on the adapter so adding/removing a bot's required tools no
-            # longer touches the chat worker.
-            from connector_runtime.bots import iter_bots as _iter_bots
-            from connector_runtime.bots.base import channel_for_session_id as _channel_for_session_id
-            _session_channel = _channel_for_session_id(str(session_id or ""), _iter_bots())
-            if _session_channel:
-                _bot = next((b for b in _iter_bots() if b.channel == _session_channel), None)
-                if _bot is not None:
-                    effective_tool_allowlist.update(_bot.extra_required_mcp_tools())
+            # Token-limit override is independent of the tool allow-list / prompt
+            # assembly below, so it is resolved here and left out of the shared builder.
             token_threshold_override = None
             if task_payload:
-                override_tools = task_payload.get("override_mcp_tools")
-                if isinstance(override_tools, dict) and bool(override_tools.get("enabled")):
-                    tools = override_tools.get("tools")
-                    if isinstance(tools, list):
-                        effective_tool_allowlist = {
-                            str(tool).strip() for tool in tools if isinstance(tool, str) and str(tool).strip()
-                        }
-                        from connector_runtime.dispatch.desktop_device_tools import strip_endpoint_tool_config_names
-                        from api.mcp_tool_aliases import fully_clean_tool_names
-
-                        effective_tool_allowlist = fully_clean_tool_names(effective_tool_allowlist)
-                        effective_tool_allowlist = strip_endpoint_tool_config_names(
-                            with_workspace_read_by_name_compat(effective_tool_allowlist)
-                        )
-                        effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, user_id))
-                        effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, user_id))
-                        if ai_config_id is not None:
-                            effective_tool_allowlist.add("message.send_to_ai")
-                    try:
-                        from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
-                        effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, user_id)
-                    except Exception:
-                        pass
                 override_token = task_payload.get("override_token_limit")
                 if isinstance(override_token, dict) and bool(override_token.get("enabled")):
                     try:
                         token_threshold_override = max(1, int(override_token.get("value") or 1))
                     except Exception:
                         token_threshold_override = None
-            # Task runtime must always allow task system tools.
-            if is_task_runtime:
-                effective_tool_allowlist.update(TASK_RUNTIME_REQUIRED_TOOLS)
-            # Dynamic MCP discovery must remain available even when task runtime
-            # narrows the operational tool allowlist.
-            effective_tool_allowlist.update(MCP_INTROSPECTION_TOOLS)
 
-            # Server toolbox MCP tools now come from the toolbox DeviceMcpScope.
-            # 勾选工具箱 MCP 权限后，绑定的 AI 即可使用对应工具。
-            try:
-                from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
-                effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, user_id)
-            except Exception:
-                pass
-
-            # Apply current binding state (library / toolbox) so unbound governance
-            # tools do not appear in the visible MCP catalog sent to the model.
-            effective_tool_allowlist = _filter_tools_for_current_bindings(
-                effective_tool_allowlist, user_id, ai_config_id
+            # Single source of truth shared with the live /system-prompt-preview
+            # endpoint: identical dynamic MCP catalog + task sections, so the prompt
+            # shown to the user is exactly the prompt the model receives (no drift
+            # where a tool is listed in the preview but missing from the real prompt).
+            system_prompt, effective_tool_allowlist = build_runtime_system_prompt_and_tools(
+                bg,
+                user,
+                ai_kind=ai_kind,
+                ai_config_id=ai_config_id,
+                session_id=session_id,
+                merged_system_prompt=merged_system_prompt,
+                cfg=cfg,
+                base_system_prompt=system_prompt,
+                task_payload=task_payload,
             )
-
-            # 最后再彻底清理一次老名字，防止任何路径残留
-            from api.mcp_tool_aliases import fully_clean_tool_names
-            effective_tool_allowlist = fully_clean_tool_names(effective_tool_allowlist)
-
-            if merged_system_prompt:
-                system_prompt = merged_system_prompt
-            if is_task_runtime:
-                # Keep only one effective workspace section in task runtime prompt.
-                system_prompt = _append_prompt_section(
-                    _strip_prompt_section(system_prompt, "AI 工作目录"),
-                    "AI 工作目录",
-                    get_project_root(user_id, ai_config_id),
-                )
-                # Remove legacy task-runtime prompt sections; task constraints are enforced server-side.
-                system_prompt = _strip_task_runtime_sections(system_prompt)
-                # Steer the planned task flow: plan -> phased execution -> summarized end.
-                # Editable as a 固有思想 system prompt (task_plan_flow_prompt);
-                # falls back to the built-in default when no override exists.
-                task_plan_flow_text = kb_store.effective_system_value(
-                    user_id, "task_plan_flow_prompt", TASK_PLAN_FLOW_PROMPT
-                ).strip() or TASK_PLAN_FLOW_PROMPT
-                system_prompt = _append_prompt_section(
-                    _strip_prompt_section(system_prompt, "任务规划流程"),
-                    "任务规划流程",
-                    task_plan_flow_text,
-                )
-
-            # Up-front MCP tool catalog: list every callable tool (name + short
-            # description) so the model can locate one directly, then load the
-            # precise schema in a single mcp.describe_tool call. Mirrors mature
-            # agent runtimes.
-            # Always strip any stale catalog first (prevents accumulation from previous
-            # injections or loaded prompts that had repeated sections).
-            system_prompt = _strip_prompt_section(system_prompt, "动态 MCP 说明")
-            system_prompt = _strip_prompt_section(system_prompt, "可用MCP工具")
-
-            mcp_catalog_active = bool(effective_tool_allowlist) and (
-                cfg is None or getattr(cfg, "mcp_enabled", False)
-            )
-            if mcp_catalog_active:
-                # Dynamically-allocated desktop/browser agent tools are resolved
-                # here (online agents narrowed by per-agent scope) and handed to
-                # the catalog explicitly so live agent tools are always listed.
-                endpoint_catalog_tools = endpoint_tools_for_config(ai_config_id, user_id)
-                endpoint_catalog_tools |= endpoint_bridge_tools_for_config(ai_config_id, user_id)
-                catalog_body = (
-                    "以下是你当前可调用的全部 MCP 工具（名称 + 简介，`!` 表示有副作用）。"
-                    "直接从这里定位需要的工具。\n"
-                    "确定工具后，用一次 mcp.describe_tool 取参数 schema 再调用："
-                    "可在 tools 数组里一次传多个工具名，或用 query 关键词搜索相关工具。\n\n"
-                    + _build_dynamic_mcp_explanation(effective_tool_allowlist, endpoint_catalog_tools, user_id, ai_config_id)
-                )
-                system_prompt = _append_prompt_section(
-                    _strip_prompt_section(system_prompt, "动态 MCP 说明"),
-                    "动态 MCP 说明",
-                    catalog_body,
-                )
 
             msg_stmt = select(ChatMessage).where(
                 ChatMessage.user_id == user_id,

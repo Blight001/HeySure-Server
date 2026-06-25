@@ -83,7 +83,7 @@ def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id
         )
     return cfg, api_key, base_url, model, system_prompt
 
-def build_effective_system_prompt(
+def build_runtime_system_prompt_and_tools(
     session: Session,
     user: User,
     *,
@@ -91,37 +91,68 @@ def build_effective_system_prompt(
     ai_config_id: Optional[int] = None,
     session_id: Optional[str] = None,
     merged_system_prompt: Optional[str] = None,
-) -> str:
-    """Build the same runtime system prompt the inference loop injects before a turn."""
+    cfg: Optional[Any] = None,
+    base_system_prompt: Optional[str] = None,
+    task_payload: Optional[dict] = None,
+) -> tuple[str, set]:
+    """Single source of truth for the runtime system prompt **and** the effective
+    MCP tool allow-list.
+
+    Both the inference worker (``ai_runtime``) and the live ``/system-prompt-preview``
+    endpoint (``gateway``) call this, so the prompt shown to the user is assembled by
+    the exact same logic the model receives — same dynamic MCP catalog, same task
+    sections. This prevents the two paths from drifting (e.g. a tool listed in the
+    preview but missing from the prompt the model actually got).
+
+    ``cfg`` / ``base_system_prompt`` / ``task_payload`` may be passed in by a caller
+    that already resolved them (the inference loop) to avoid recomputation; when
+    omitted they are resolved here (the preview endpoint).
+
+    Returns ``(system_prompt, effective_tool_allowlist)``.
+    """
     from connector_runtime.dispatch.desktop_device_tools import (
         endpoint_bridge_tools_for_config,
         endpoint_tools_for_config,
         strip_endpoint_tool_config_names,
+        toolbox_tools_for_config,
     )
-    from api.services.task_system import TASK_RUNTIME_REQUIRED_TOOLS
+    from connector_runtime.bots import iter_bots as _iter_bots
+    from connector_runtime.bots.base import channel_for_session_id as _channel_for_session_id
+    from api.services.task_system import TASK_RUNTIME_REQUIRED_TOOLS, TASK_PLAN_FLOW_PROMPT
+    from api.mcp_tool_aliases import fully_clean_tool_names
     from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
+    from api.services import kb_store
 
-    cfg, _, _, _, system_prompt = _resolve_ai_runtime(session, user, ai_kind, ai_config_id)
+    uid = user.id
+    if cfg is None or base_system_prompt is None:
+        cfg, _, _, _, base_system_prompt = _resolve_ai_runtime(session, user, ai_kind, ai_config_id)
+    system_prompt = base_system_prompt
     sid = str(session_id or "").strip()
-    task_payload = _load_task_payload_by_session(session, user.id, ai_config_id, sid) if sid else {}
+    if task_payload is None:
+        task_payload = _load_task_payload_by_session(session, uid, ai_config_id, sid) if sid else {}
     is_task_runtime = bool(task_payload) or sid.startswith("session_task_")
 
     effective_tool_allowlist = _parse_allowed_tools(cfg.mcp_tools if cfg else None)
     effective_tool_allowlist.update(MCP_INTROSPECTION_TOOLS)
-    effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, user.id))
-    effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, user.id))
+    effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, uid))
+    # Endpoint (desktop / browser) tools are governed by the per-(AI, agent-type)
+    # permission scope, not cfg.mcp_tools.
+    effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, uid))
     if ai_config_id is not None:
+        # System-injected AI-to-AI messages must remain answerable even when a
+        # task or config narrows the general MCP tool allowlist.
         effective_tool_allowlist.add("message.send_to_ai")
+    try:
+        effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
+    except Exception:
+        pass
 
-    if sid:
-        from connector_runtime.bots import iter_bots as _iter_bots
-        from connector_runtime.bots.base import channel_for_session_id as _channel_for_session_id
-
-        session_channel = _channel_for_session_id(sid, _iter_bots())
-        if session_channel:
-            bot = next((item for item in _iter_bots() if item.channel == session_channel), None)
-            if bot is not None:
-                effective_tool_allowlist.update(bot.extra_required_mcp_tools())
+    # Per-bot tool requirements (e.g. Feishu adds context-trim) live on the adapter.
+    _session_channel = _channel_for_session_id(sid, _iter_bots())
+    if _session_channel:
+        _bot = next((b for b in _iter_bots() if b.channel == _session_channel), None)
+        if _bot is not None:
+            effective_tool_allowlist.update(_bot.extra_required_mcp_tools())
 
     if task_payload:
         override_tools = task_payload.get("override_mcp_tools")
@@ -131,51 +162,60 @@ def build_effective_system_prompt(
                 effective_tool_allowlist = {
                     str(tool).strip() for tool in tools if isinstance(tool, str) and str(tool).strip()
                 }
+                effective_tool_allowlist = fully_clean_tool_names(effective_tool_allowlist)
                 effective_tool_allowlist = strip_endpoint_tool_config_names(
                     with_workspace_read_by_name_compat(effective_tool_allowlist)
                 )
-                effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, user.id))
-                effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, user.id))
+                effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, uid))
+                effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, uid))
                 if ai_config_id is not None:
                     effective_tool_allowlist.add("message.send_to_ai")
-                try:
-                    from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
-                    effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, user.id)
-                except Exception:
-                    pass
+            try:
+                effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
+            except Exception:
+                pass
 
+    # Task runtime must always allow task system tools.
     if is_task_runtime:
         effective_tool_allowlist.update(TASK_RUNTIME_REQUIRED_TOOLS)
+    # Dynamic MCP discovery must remain available even when task runtime narrows
+    # the operational tool allowlist.
     effective_tool_allowlist.update(MCP_INTROSPECTION_TOOLS)
 
-    # Server toolbox MCP tools now come from the toolbox DeviceMcpScope (勾选的实际工具).
-    # Bound AIs get exactly what is allowed in the toolbox scope. This replaces the
-    # server part of cfg.mcp_tools to prevent conflicts.
+    # Server toolbox MCP tools come from the toolbox DeviceMcpScope.
     try:
-        from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
-        effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, user.id)
+        effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
     except Exception:
         pass
 
-    # Apply current binding state so that library (and potentially toolbox) tools
-    # do not appear in the catalog if the AI is not actually bound.
+    # Apply current binding state (library / toolbox) so unbound governance tools
+    # do not appear in the visible MCP catalog sent to the model.
     effective_tool_allowlist = _filter_tools_for_current_bindings(
-        effective_tool_allowlist, user.id, ai_config_id
+        effective_tool_allowlist, uid, ai_config_id
     )
-
-    # 最后再彻底清理一次老名字
-    from api.mcp_tool_aliases import fully_clean_tool_names
+    # 最后再彻底清理一次老名字，防止任何路径残留
     effective_tool_allowlist = fully_clean_tool_names(effective_tool_allowlist)
 
     if merged_system_prompt:
         system_prompt = merged_system_prompt
     if is_task_runtime:
+        # Keep only one effective workspace section in task runtime prompt.
         system_prompt = _append_prompt_section(
             _strip_prompt_section(system_prompt, "AI 工作目录"),
             "AI 工作目录",
-            get_project_root(user.id, ai_config_id),
+            get_project_root(uid, ai_config_id),
         )
+        # Remove legacy task-runtime prompt sections; task constraints are enforced server-side.
         system_prompt = _strip_task_runtime_sections(system_prompt)
+        # Steer the planned task flow: plan -> phased execution -> summarized end.
+        task_plan_flow_text = kb_store.effective_system_value(
+            uid, "task_plan_flow_prompt", TASK_PLAN_FLOW_PROMPT
+        ).strip() or TASK_PLAN_FLOW_PROMPT
+        system_prompt = _append_prompt_section(
+            _strip_prompt_section(system_prompt, "任务规划流程"),
+            "任务规划流程",
+            task_plan_flow_text,
+        )
 
     # Always strip any stale catalog first (prevents accumulation from previous
     # injections or loaded prompts that had repeated sections).
@@ -186,21 +226,46 @@ def build_effective_system_prompt(
         cfg is None or getattr(cfg, "mcp_enabled", False)
     )
     if mcp_catalog_active:
-        endpoint_catalog_tools = endpoint_tools_for_config(ai_config_id, user.id)
-        endpoint_catalog_tools |= endpoint_bridge_tools_for_config(ai_config_id, user.id)
+        endpoint_catalog_tools = endpoint_tools_for_config(ai_config_id, uid)
+        endpoint_catalog_tools |= endpoint_bridge_tools_for_config(ai_config_id, uid)
         catalog_body = (
             "以下是你当前可调用的全部 MCP 工具（名称 + 简介，`!` 表示有副作用）。"
             "直接从这里定位需要的工具。\n"
             "确定工具后，用一次 mcp.describe_tool 取参数 schema 再调用："
             "可在 tools 数组里一次传多个工具名，或用 query 关键词搜索相关工具。\n\n"
-            + _build_dynamic_mcp_explanation(effective_tool_allowlist, endpoint_catalog_tools, user.id, ai_config_id)
+            + _build_dynamic_mcp_explanation(effective_tool_allowlist, endpoint_catalog_tools, uid, ai_config_id)
         )
         system_prompt = _append_prompt_section(
             _strip_prompt_section(system_prompt, "动态 MCP 说明"),
             "动态 MCP 说明",
             catalog_body,
         )
-    return system_prompt
+    return system_prompt, effective_tool_allowlist
+
+
+def build_effective_system_prompt(
+    session: Session,
+    user: User,
+    *,
+    ai_kind: str = "assistant",
+    ai_config_id: Optional[int] = None,
+    session_id: Optional[str] = None,
+    merged_system_prompt: Optional[str] = None,
+) -> str:
+    """Build the same runtime system prompt the inference loop injects before a turn.
+
+    Thin wrapper over :func:`build_runtime_system_prompt_and_tools` (single source
+    of truth) that returns only the prompt text.
+    """
+    prompt, _tools = build_runtime_system_prompt_and_tools(
+        session,
+        user,
+        ai_kind=ai_kind,
+        ai_config_id=ai_config_id,
+        session_id=session_id,
+        merged_system_prompt=merged_system_prompt,
+    )
+    return prompt
 
 def _parse_allowed_tools(raw: Optional[str]) -> set[str]:
     from connector_runtime.dispatch.desktop_device_tools import strip_endpoint_tool_config_names

@@ -18,7 +18,7 @@ Create Date: 2026-06-20
 from typing import Sequence, Union
 
 from alembic import op
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 
 # revision identifiers, used by Alembic.
@@ -49,12 +49,24 @@ def _has_table(table_name: str) -> bool:
     return table_name in inspect(_bind()).get_table_names()
 
 
+def _has_pgvector_extension() -> bool:
+    result = _bind().execute(
+        text("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")
+    )
+    return result.first() is not None
+
+
 def upgrade() -> None:
     if not _has_table("knowledgeembedding"):
         return
     # pgvector is a PostgreSQL extension; on other backends the JSON column and
     # the in-process scan fallback remain in use.
     if not _is_postgres():
+        return
+    if not _has_pgvector_extension():
+        # Local Windows PostgreSQL installs often do not include pgvector.
+        # Runtime embeddings are file-based now, so keep the legacy JSON column
+        # instead of failing startup on a rebuildable cache table.
         return
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     # Stale JSON vectors are not castable across an embedding-model change and

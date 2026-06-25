@@ -8,8 +8,21 @@ rem trigger TLS hostname errors during pip resolution.
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
+set "PYTHON_CMD="
+where python >nul 2>nul && set "PYTHON_CMD=python"
+if not defined PYTHON_CMD (
+  where py >nul 2>nul && set "PYTHON_CMD=py -3"
+)
+if not defined PYTHON_CMD (
+  echo [ERROR] Python is not installed or not available in PATH.
+  echo [HINT] Install Python 3.11 or 3.12 from:
+  echo [HINT] https://www.python.org/downloads/windows/
+  start "" "https://www.python.org/downloads/windows/"
+  exit /b 1
+)
+
 if not exist "venv" (
-  python -m venv venv
+  %PYTHON_CMD% -m venv venv
   if errorlevel 1 (
     echo [ERROR] Failed to create virtual environment.
     exit /b 1

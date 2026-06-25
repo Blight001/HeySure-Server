@@ -27,7 +27,6 @@ PREFIX = "/api/admin/repo-update"
 
 
 def _status_payload(session: Session) -> dict:
-    repo_svc.refresh_webhook_state()
     return {
         "config": repo_svc.get_config(session),
         "state": repo_svc.get_state(),

@@ -79,7 +79,7 @@ per-service start/restart/stop, global controls, status overview pills, and quic
 | `main/mcp_runtime/` | MCP plugin loader, registry, permissions, and built-in tools. |
 | `main/connector_runtime/` | External connectors, device dispatch, and bot implementations. |
 | `other/migrations/` | Alembic database migrations. |
-| `other/scripts/` | Helper scripts such as webhook deployment and data migration. |
+| `other/scripts/` | Helper scripts such as data migration and version snapshotting. |
 | `other/tests/` | pytest suite. |
 | `library/` | Internal library (知识工坊) code. |
 | `data/` | Local runtime data and workspace storage. |

@@ -27,6 +27,28 @@ async def get_system_prompt_preview(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
+
+    # Prefer the *actual* system prompt the model last received in this session
+    # (persisted on the assistant message), so the preview shows ground truth —
+    # the exact prompt the AI got, including the dynamic MCP catalog as it was
+    # resolved at run time (e.g. which browser/desktop agents were online). This
+    # avoids a misleading live re-derivation that can diverge from what the AI saw.
+    if session_id:
+        last_stmt = select(ChatMessage).where(
+            ChatMessage.user_id == user.id,
+            ChatMessage.session_id == session_id,
+            ChatMessage.ai_kind == ai_kind,
+            ChatMessage.role == "assistant",
+            ChatMessage.system_prompt.is_not(None),
+        ).order_by(ChatMessage.created_at.desc())
+        if ai_config_id is not None:
+            last_stmt = last_stmt.where(ChatMessage.ai_config_id == ai_config_id)
+        last_msg = session.exec(last_stmt).first()
+        if last_msg and (last_msg.system_prompt or "").strip():
+            return {"prompt": last_msg.system_prompt, "prompt_source": "last_run"}
+
+    # No prior run in this session yet → live-build a best-effort preview using
+    # the same single-source-of-truth assembly the inference loop uses.
     prompt = build_effective_system_prompt(
         session,
         user,

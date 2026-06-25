@@ -179,22 +179,6 @@ class Settings(BaseSettings):
         default=10 * 1024 * 1024,
         description="Maximum size accepted by the temporary image upload endpoints.",
     )
-    repo_update_webhook_url: str = Field(
-        default="",
-        description="Optional fixed webhook that runs the host/container deployment update. "
-        "Used when the packaged app is not a Git working tree.",
-    )
-    repo_update_webhook_token: str = Field(
-        default="",
-        description="Optional bearer token sent to repo_update_webhook_url.",
-    )
-    repo_update_webhook_timeout_seconds: int = Field(
-        default=30,
-        ge=3,
-        le=300,
-        description="Timeout for accepting a deployment-update webhook request.",
-    )
-
     # ---- Auth / Socket.IO ----------------------------------------------------
 
     jwt_secret: str = Field(
@@ -282,8 +266,6 @@ class Settings(BaseSettings):
         "mcp_runtime_url",
         "connector_runtime_url",
         "ai_runtime_url",
-        "repo_update_webhook_url",
-        "repo_update_webhook_token",
         "agent_token",
         "smtp_host",
         "smtp_username",
