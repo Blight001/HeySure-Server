@@ -2519,7 +2519,8 @@ def list_topics(
     status: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """渐进披露：只返标题 + 触发词 + 摘要，不返正文。
-    现在从 KnowledgeBase/ 文件直接读取（topics + skills），不再依赖 KnowledgeEntry 表。
+    控制台知识库列表只展示系统内置聚合入口；topics/ 与 inheritance_thoughts/
+    下的文件不再作为独立卡片追加到列表。
     """
     target_status = status or "active"
     if target_status not in _VALID_STATUSES and target_status != "all":
@@ -2527,30 +2528,6 @@ def list_topics(
     out: List[Dict[str, Any]] = []
     if target_status in {"active", "all"} and (scope in {None, "", "global"}):
         out.extend(_builtin_entries(user_id=user_id, with_body=False))
-    # File-first: scan KnowledgeBase
-    try:
-        file_entries = _load_user_knowledge_entries(user_id)
-        for e in file_entries:
-            if target_status != "all" and e.get("status") != target_status:
-                continue
-            if not _scope_match(e, scope, None):
-                continue
-            out.append({
-                "memory_id": e["memory_id"],
-                "title": e.get("title", ""),
-                "triggers": e.get("triggers") or [],
-                "scope": e.get("scope", "global"),
-                "scope_target": e.get("scope_target"),
-                "status": e.get("status", "active"),
-                "confidence": e.get("confidence", 1.0),
-                "use_count": e.get("use_count", 0),
-                "summary": e.get("summary", ""),
-                "updated_at": e.get("updated_at"),
-            })
-    except Exception as exc:
-        logger.info(f"list_topics file scan failed: {exc}")
-    # Fallback: if somehow no file entries but old DB rows exist (transition), keep minimal
-    # (intentionally light; main path is files)
     return out
 
 

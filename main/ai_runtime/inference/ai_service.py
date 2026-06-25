@@ -108,12 +108,12 @@ def _default_ai_specs():
     return [
         {
             "switch_key": "assistant_default",
-            "name": "主脑·阿尔法",
+            "name": "阿尔法",
             "description": "数字社会核心管理员（兼图书管理员），负责总体调度、战略指引与知识传承。",
             "ai_role": "digital_member",
             "digital_member_role": "manager",
             "is_librarian": True,
-            "platform": "Server-Core",
+            "platform": "服务器",
             "generation": 1,
             "token_limit": 50000,
             "lifecycle_status": "working",
@@ -125,11 +125,11 @@ def _default_ai_specs():
         },
         {
             "switch_key": "assistant_worker_file",
-            "name": "辅助管理员·先锋",
+            "name": "辅助管理员·总督",
             "description": "辅助主脑进行项目治理、归档与流程巡检。",
             "ai_role": "assistant_admin",
             "digital_member_role": "member",
-            "platform": "MacBook-Pro-16",
+            "platform": "服务器",
             "generation": 1,
             "token_limit": 0,
             "lifecycle_status": "working",
@@ -140,20 +140,36 @@ def _default_ai_specs():
             "sort_order": 10,
         },
         {
-            "switch_key": "assistant_worker_code",
-            "name": "代码助手·贝塔",
-            "description": "负责代码实现、重构与执行编排。",
+            "switch_key": "assistant_beta_browser",
+            "name": "贝塔",
+            "description": "普通数字成员，负责浏览器端任务、网页操作与信息采集。",
             "ai_role": "digital_member",
             "digital_member_role": "member",
-            "platform": "Ubuntu-Server-01",
+            "platform": "浏览器",
             "generation": 1,
             "token_limit": 10000,
             "lifecycle_status": "working",
-            "current_behavior": "处理代码任务与重构需求...",
-            "project_id": "p-multiagent",
-            "project_name": "多端 Agent 统一管理",
+            "current_behavior": "等待浏览器端任务...",
+            "project_id": None,
+            "project_name": "",
             "prompt": "",
             "sort_order": 20,
+        },
+        {
+            "switch_key": "assistant_delta_windows",
+            "name": "德尔塔",
+            "description": "普通数字成员，负责 Windows 端任务、桌面操作与本机协作。",
+            "ai_role": "digital_member",
+            "digital_member_role": "member",
+            "platform": "Windows端",
+            "generation": 1,
+            "token_limit": 10000,
+            "lifecycle_status": "working",
+            "current_behavior": "等待 Windows 端任务...",
+            "project_id": None,
+            "project_name": "",
+            "prompt": "",
+            "sort_order": 30,
         },
     ]
 
@@ -165,7 +181,7 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
         select(AssistantAIConfig).where(AssistantAIConfig.user_id == user_id)
     ).all()
 
-    # Never auto-recreate deleted defaults. For existing users, only run backfill.
+    # Existing users keep their current AI configs unchanged.
     if existing:
         pass
     else:
@@ -198,6 +214,7 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
         session.commit()
         for row in created:
             session.refresh(row)
+
         # 人格 Prompt 真相源为文件：写入 personas/*.md。
         try:
             from api.services import kb_store
@@ -206,6 +223,8 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
                 kb_store.write_persona(user_id, row, prompt=prompt)
         except Exception:
             pass
+
+    if created:
         # 工具箱默认自动绑定：新建的 AI 一律绑定工具箱（多绑），获得默认工具集。
         # 之后绑定关系完全由用户操作控制，不再做全量自愈。
         try:
