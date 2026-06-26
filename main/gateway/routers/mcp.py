@@ -26,7 +26,7 @@ from mcp_runtime.mcp.permissions import (
 from api.models import AssistantAIConfig
 from .auth import get_current_user
 from api.runtime.internal_http import require_internal_token
-from api.services.inheritance_mcp_test import run_inheritance_mcp_test
+from api.services.mcp_tool_runner import run_inheritance_mcp_test
 from connector_runtime.dispatch.device_dispatch import dispatch_endpoint_tool_and_wait
 from connector_runtime.dispatch.desktop_device_tools import (
     connected_endpoint_tool_catalog,
