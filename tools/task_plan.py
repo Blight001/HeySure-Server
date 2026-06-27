@@ -14,7 +14,7 @@ The AI drives a plan through three tools:
                           deep-thinking + MCP detail from the live context)
 - ``plan.finish``         summarize the whole plan into a success/failure log
 
-Durable plan state lives in :mod:`api.services.task_plan`; the conversation
+Durable plan state lives in :mod:`api.services.tasks.task_plan`; the conversation
 context side effects are applied by the inference loop.
 """
 
@@ -26,7 +26,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AITaskJob
-from api.services import task_plan as plan_service
+from api.services.tasks import task_plan as plan_service
 from connector_runtime.dispatch.device_dispatch import get_run_session_context
 # get_project_root is imported inside _plan_finish to avoid circular import
 # (tools.task_plan <-> mcp_runtime.mcp.registry during full MCP bootstrap)
@@ -201,7 +201,7 @@ def _plan_finish(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
     # 计划收尾后：若有 AI 绑定了图书馆且执行者不是它，主动把本计划总结投喂给
     # 图书馆 AI，由它自行决定是否沉淀进知识库（best-effort，不影响收尾返回）。
     try:
-        from api.services.knowledge_review_trigger import trigger_plan_knowledge_review
+        from api.services.knowledge.knowledge_review_trigger import trigger_plan_knowledge_review
 
         trigger_plan_knowledge_review(
             user_id=user_id,

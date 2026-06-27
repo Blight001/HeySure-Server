@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from api.models import ChatMessage, ChatMessageMedia
-from api.services.temp_image_store import DATA_URL_RE, EXT_TO_MIME, _normalize_ext, _validate_image_bytes
+from api.services.storage.temp_image_store import DATA_URL_RE, EXT_TO_MIME, _normalize_ext, _validate_image_bytes
 
 
 def decode_image_data_url(data_url: str) -> tuple[bytes, str]:

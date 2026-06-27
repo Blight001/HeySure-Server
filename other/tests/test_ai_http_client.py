@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from api.http_client import ai_http_session
+from api.runtime.http_client import ai_http_session
 
 
 class AIHTTPClientTests(unittest.TestCase):

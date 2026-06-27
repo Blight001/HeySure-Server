@@ -79,7 +79,7 @@ async def world_snapshot(
     """
     user = get_current_user(authorization, session)
 
-    from api.services import librarian_service
+    from api.services.knowledge import librarian_service
     from .ai_misc_routes import list_ai_cards
     from .devices import list_connected_devices
 

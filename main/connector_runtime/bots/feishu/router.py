@@ -8,9 +8,9 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatRun, ChatSession, User
-from api.services.access_guards import get_ai_config_or_404
+from api.services.access.access_guards import get_ai_config_or_404
 from api.core.settings import settings
-from api.services.chat_persistence import _save_message
+from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.run_state import _RUN_THREADS
 from api.chat_runtime.chat_runtime_helpers import _resolve_ai_runtime
 from ai_runtime.inference.core import _run_worker

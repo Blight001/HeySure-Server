@@ -10,8 +10,8 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AssistantAIConfig, BotSessionRoute, ChatMessage, ChatSession, User
-from api.services.chat_media import delete_message_media
-from api.services.chat_persistence import _rebuild_usage_snapshots
+from api.services.chat.chat_media import delete_message_media
+from api.services.chat.chat_persistence import _rebuild_usage_snapshots
 from connector_runtime.dispatch.device_dispatch import get_run_session_context
 
 
@@ -329,7 +329,8 @@ def _compress_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Opt
     在标准 AI 运行内，运行时会拦截本工具并对内存中的对话立即生效；这里的实现用于
     运行时之外（核心管理员、直连调用等）的兜底：落库后于下一轮对话生效。
     """
-    from api.services import conversation_compress, kb_store
+    from api.services.chat import conversation_compress
+    from api.services.knowledge import kb_store
     from api.services.model_presets import resolve_model_preset
 
     scope = _conversation_base_scope(args, ai_config_id)

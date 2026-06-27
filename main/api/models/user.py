@@ -34,7 +34,7 @@ class User(SQLModel, table=True):
     # 系统提示词文本（admin_prompt / mcp_call_method / mcp_namespace_hints /
     # mcp_dynamic_rule / mcp_format_error_hint / default_*_prompt /
     # default_compression_prompt / prompt_ai_message_* / prompt_user_message_notice）
-    # 已迁出数据库，真相源为 KnowledgeBase/system/*.md（见 api.services.kb_store）。
+    # 已迁出数据库，真相源为 KnowledgeBase/system/*.md（见 api.services.knowledge.kb_store）。
     # 这些数值/配置项不是提示词，保留在库。
     mcp_max_steps: int = Field(default=48)
     # Per-role MCP allow-list configured by the admin. JSON object mapping a role

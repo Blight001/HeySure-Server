@@ -16,7 +16,7 @@ from sqlmodel import Session
 
 from connector_runtime.bots import all_channels, get as get_bot
 from api.database import get_session
-from api.services.access_guards import get_ai_config_or_404
+from api.services.access.access_guards import get_ai_config_or_404
 from .auth import get_current_user
 
 

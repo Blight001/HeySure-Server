@@ -6,7 +6,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AssistantAIConfig, User
-from api.services.governance import assert_can_manage_or_legacy
+from api.services.access.governance import assert_can_manage_or_legacy
 from mcp_runtime.mcp.permissions import ROLE_ASSISTANT_ADMIN, ROLE_MANAGER
 
 
@@ -192,7 +192,7 @@ def _apply_prompt_line_edits(current: str, args: Dict[str, Any]) -> tuple[str, i
 
 
 def _prompt_list_targets(user_id: int, args: dict, ai_config_id: Optional[int] = None):
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     with Session(engine) as session:
         ai_rows = session.exec(
@@ -231,7 +231,7 @@ def _prompt_read_ai(user_id: int, args: dict, ai_config_id: Optional[int] = None
     target_id = args.get("target_ai_config_id", args.get("ai_config_id", ai_config_id))
     if not target_id:
         raise HTTPException(status_code=400, detail="target_ai_config_id is required")
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     with Session(engine) as session:
         cfg = _get_owned_ai_config(session, user_id, int(target_id))
@@ -259,7 +259,7 @@ def _prompt_write_ai(user_id: int, args: dict, ai_config_id: Optional[int] = Non
             if denial:
                 raise HTTPException(status_code=403, detail=denial)
         # 行编辑基于文件真相源（缺失时为空人格）。
-        from api.services import kb_store
+        from api.services.knowledge import kb_store
 
         old_prompt = kb_store.effective_ai_prompt(user_id, cfg)
         old_length = len(str(old_prompt or ""))
@@ -284,7 +284,7 @@ def _prompt_write_ai(user_id: int, args: dict, ai_config_id: Optional[int] = Non
 
 
 def _prompt_read_system(user_id: int, args: dict, ai_config_id: Optional[int] = None):
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     key = str(args.get("key") or "").strip()
     with Session(engine) as session:
@@ -323,7 +323,7 @@ def _prompt_write_system(user_id: int, args: dict, ai_config_id: Optional[int] =
         raise HTTPException(status_code=400, detail=f"Unsupported system prompt key: {key}")
     with Session(engine) as session:
         user = _get_user(session, user_id)
-        from api.services import kb_store
+        from api.services.knowledge import kb_store
 
         # These prompt columns have been removed from User. Read and write the
         # KnowledgeBase file directly instead of assigning a non-model field.

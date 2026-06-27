@@ -34,7 +34,7 @@ from sqlmodel import Session
 
 from api.core.settings import DATA_DIR, REPOSITORY_DIR, settings
 from api.database import engine
-from api.services.auth_settings import get_setting, set_setting
+from api.services.access.auth_settings import get_setting, set_setting
 
 
 logger = logging.getLogger(__name__)

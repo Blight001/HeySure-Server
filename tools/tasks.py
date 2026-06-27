@@ -10,11 +10,11 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatRun, ChatSession
-from api.services.chat_media import delete_message_media
+from api.services.chat.chat_media import delete_message_media
 from connector_runtime.dispatch.device_dispatch import get_run_session_context
-from api.services.governance import assert_can_manage_or_legacy
-from api.services import task_plan as plan_service
-from api.services.task_schedule import (
+from api.services.access.governance import assert_can_manage_or_legacy
+from api.services.tasks import task_plan as plan_service
+from api.services.tasks.task_schedule import (
     AT_KEYS as _SCHEDULE_AT_KEYS,
     DAILY_TIME_KEYS as _SCHEDULE_DAILY_TIME_KEYS,
     DURATION_KEYS as _SCHEDULE_DURATION_KEYS,
@@ -30,8 +30,8 @@ from api.services.task_schedule import (
     parse_timestamp_strict,
     parse_weekly_days,
 )
-from api.services.task_system import extract_task_payload
-from api.value_utils import safe_json_obj, to_bool
+from api.services.tasks.task_system import extract_task_payload
+from api.common.value_utils import safe_json_obj, to_bool
 from mcp_runtime.mcp.core import get_project_root
 from mcp_runtime.mcp.permissions import ROLE_MANAGER
 

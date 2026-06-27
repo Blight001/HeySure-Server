@@ -12,10 +12,10 @@ from sqlmodel import Session, select
 
 from api.database import get_session
 from api.models import AITaskJob, ChatMessage, ChatRun, ChatSession
-from api.services.access_guards import get_ai_config_or_404
-from api.services.chat_media import delete_message_media
+from api.services.access.access_guards import get_ai_config_or_404
+from api.services.chat.chat_media import delete_message_media
 from .auth import get_current_user
-from api.services.task_system import (
+from api.services.tasks.task_system import (
     decode_task_payload,
     extract_task_payload,
     find_task_active_run,
@@ -42,7 +42,7 @@ async def get_ai_task_plan(
     plus the full plan + phases (each with sub-actions and status) so the
     console can render: 安排 → 实施的阶段 N → 子任务进度 → 结束.
     """
-    from api.services import task_plan as plan_service
+    from api.services.tasks import task_plan as plan_service
 
     user = get_current_user(authorization, session)
     cfg = get_ai_config_or_404(session, config_id, user.id)

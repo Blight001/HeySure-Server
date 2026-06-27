@@ -1,6 +1,6 @@
 """Temp-image routes: create from a data URL or upload (``/api/temp-images``,
 ``/api/temp-images/upload``) and serve stored images (``/tmp-images/{filename}``),
-backed by ``api.services.temp_image_store``."""
+backed by ``api.services.storage.temp_image_store``."""
 
 from typing import Optional
 
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from api.database import get_session
-from api.services.temp_image_store import (
+from api.services.storage.temp_image_store import (
     cleanup_expired_temp_images,
     resolve_temp_image,
     save_temp_image,

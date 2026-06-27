@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlmodel import Session, select
 
-from ..models import TaskPhase, TaskPlan
+from ...models import TaskPhase, TaskPlan
 
 # Caps to keep a single plan tractable for the model and the context window.
 MAX_PHASES = 20

@@ -21,7 +21,7 @@ from email.utils import formataddr
 from sqlmodel import Session, select
 
 from api.models import EmailVerificationCode
-from api.services import auth_settings
+from api.services.access import auth_settings
 
 
 logger = logging.getLogger(__name__)

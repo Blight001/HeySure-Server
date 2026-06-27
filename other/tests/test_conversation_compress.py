@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from api.services.conversation_compress import _extract_summary_response
+from api.services.chat.conversation_compress import _extract_summary_response
 
 
 class _Response:

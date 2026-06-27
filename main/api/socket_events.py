@@ -3,8 +3,8 @@ import time
 
 from sqlmodel import Session, select
 
-from api.device_bindings import get_binding, set_binding
-from api.device_live import emit_agent_list_for_user
+from api.devices.bindings import get_binding, set_binding
+from api.devices.live import emit_agent_list_for_user
 from api.database import engine
 from api.models import AssistantAIConfig
 from api.sio import (
@@ -205,8 +205,8 @@ def register_agent_socket_events():
                 agent_endpoint_tools,
                 agent_endpoint_tool_defs,
             )
-            from api.device_presence import upsert_presence
-            from api.device_mcp_permissions import reconcile_scope_with_capabilities
+            from api.devices.presence import upsert_presence
+            from api.devices.mcp_permissions import reconcile_scope_with_capabilities
 
             atype = device_type_of(agents[sid])
             if atype:
@@ -242,14 +242,14 @@ def register_agent_socket_events():
                 device_type_of,
                 agent_endpoint_tool_defs,
             )
-            from api.device_live import push_device_dynamic_tools_to_sid
-            from api.services import device_workspace_tools as _dyn
+            from api.devices.live import push_device_dynamic_tools_to_sid
+            from api.services.device_tools import device_workspace_tools as _dyn
 
             push_type = device_type_of(agents[sid])
             if owner_user_id is not None and push_type in ('desktop', 'browser', 'android'):
                 # Join the device room so future edits (from any process) can push
                 # via the socket relay, not just the gateway-local agents map.
-                from api.device_live import device_tool_room
+                from api.devices.live import device_tool_room
                 await sio.enter_room(sid, device_tool_room(owner_user_id, push_type))
                 # Tools live as files in the user's workspace (not the DB). Seed the
                 # factory-default desktop python tools on first connect (idempotent;
@@ -298,7 +298,7 @@ def register_agent_socket_events():
             owner_user_id = agents[sid].get('userId')
             del agents[sid]
             try:
-                from api.device_presence import set_offline
+                from api.devices.presence import set_offline
                 set_offline(device_id_for_presence)
             except Exception:
                 logger.exception('Failed to mark endpoint agent offline: %s', device_id_for_presence)

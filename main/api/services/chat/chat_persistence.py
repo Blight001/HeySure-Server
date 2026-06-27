@@ -11,7 +11,7 @@ from typing import Dict, Optional, Tuple
 
 from sqlmodel import Session, select
 
-from ..models import ChatMessage, ChatMessageCreate, ChatSession, TokenUsageSnapshot
+from ...models import ChatMessage, ChatMessageCreate, ChatSession, TokenUsageSnapshot
 import logging
 
 

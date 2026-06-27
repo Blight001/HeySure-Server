@@ -1,6 +1,6 @@
 import json
 
-from api.services.mcp_prompt_groups import build_prompt_tool_groups
+from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
 from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS, clamp_tools_json
 
 
@@ -34,11 +34,11 @@ def test_clamp_tools_json_keeps_library_bound_tools_despite_role_policy():
 
 def test_build_prompt_tool_groups_includes_governance_tools(monkeypatch):
     monkeypatch.setattr(
-        "api.services.mcp_prompt_groups._config_selected_tool_names",
+        "api.services.mcp.mcp_prompt_groups._config_selected_tool_names",
         lambda ai_config_id, user_id: set(LIBRARY_BOUND_TOOLS),
     )
     monkeypatch.setattr(
-        "api.services.mcp_prompt_groups._agents_for_prompt_groups",
+        "api.services.mcp.mcp_prompt_groups._agents_for_prompt_groups",
         lambda user_id, ai_config_id: [{
             "id": "workshop-user-1",
             "name": "图书馆",

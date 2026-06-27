@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.device_bindings import get_binding
+from api.devices.bindings import get_binding
 from api.models import AIRuntimeStatus, AssistantAIConfig
 from api.sio import agents
 from mcp_runtime.mcp.core import generate_file_tree, get_project_root, safe_join

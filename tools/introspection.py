@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AssistantAIConfig
-from api.device_presence import online_tool_defs_for_user
+from api.devices.presence import online_tool_defs_for_user
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 
 
@@ -26,7 +26,7 @@ def _allowed_tool_names(user_id: int, ai_config_id: Optional[int]) -> set[str]:
         endpoint_tools_for_config,
         strip_endpoint_tool_config_names,
     )
-    from api.services.task_system import with_workspace_read_by_name_compat
+    from api.services.tasks.task_system import with_workspace_read_by_name_compat
     import json
 
     allowed: set[str] = set(MCP_INTROSPECTION_TOOLS)
@@ -170,7 +170,7 @@ def _describe_one_tool(name: str, endpoint_defs: Dict[str, Any], user_id: int = 
     # 文件为真相源：KnowledgeBase/mcp/*.md 的描述与参数说明优先于注册表原文。
     if user_id:
         try:
-            from api.services.librarian_service import intrinsic_input_schema, intrinsic_tool_description
+            from api.services.knowledge.librarian_service import intrinsic_input_schema, intrinsic_tool_description
 
             description = intrinsic_tool_description(int(user_id), tool.name, description)
             input_schema = intrinsic_input_schema(int(user_id), tool.name, input_schema)

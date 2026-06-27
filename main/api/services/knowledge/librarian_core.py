@@ -24,11 +24,11 @@ import yaml
 
 from sqlmodel import Session, select
 
-from ..database import engine
-from ..integrations import clawhub
-from ..models import AssistantAIConfig, User
-from ..sio import sio
-from ..core.config import user_shared_knowledge_dir
+from ...database import engine
+from ...integrations import clawhub
+from ...models import AssistantAIConfig, User
+from ...sio import sio
+from ...core.config import user_shared_knowledge_dir
 from . import kb_store
 from .knowledge_vector import sync_topic_embedding_for_entry as _sync_topic_embedding
 from mcp_runtime.mcp.core import safe_join
@@ -179,7 +179,7 @@ def _infer_endpoint_kind(user_id: int, ai_config_id: Optional[int]) -> str:
     if not cfg:
         return "any"
     try:
-        from ..device_presence import online_devices_for_config
+        from ...devices.presence import online_devices_for_config
 
         kinds = {
             _normalize_endpoint(device_type)

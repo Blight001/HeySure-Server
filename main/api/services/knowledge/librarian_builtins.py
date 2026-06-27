@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlmodel import Session, select
 
-from ..database import engine
-from ..models import AssistantAIConfig, User
+from ...database import engine
+from ...models import AssistantAIConfig, User
 from . import kb_store
 import logging
 
@@ -413,7 +413,7 @@ def _inheritance_skills_payload(user_id: int = 0) -> Dict[str, Any]:
 
     online_devices: List[Dict[str, Any]] = []
     try:
-        from api.device_presence import online_tool_catalog_for_user
+        from api.devices.presence import online_tool_catalog_for_user
 
         online_devices = online_tool_catalog_for_user(int(user_id or 0))
     except Exception as exc:

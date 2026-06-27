@@ -23,11 +23,11 @@ from api.models import (
     AssistantAIConfigCreate,
     AssistantAIConfigUpdate,
 )
-from api.services.access_guards import get_ai_config_or_404
+from api.services.access.access_guards import get_ai_config_or_404
 from .auth import get_current_user
 from ai_runtime.inference.ai_service import ensure_default_ai_for_user
 from api.services.model_presets import normalize_model_presets
-from api.services.task_system import compact_system_auto_control
+from api.services.tasks.task_system import compact_system_auto_control
 from .ai_base import (
     _default_system_auto_control_for_user,
     _normalize_ai_role,
@@ -201,7 +201,7 @@ def _write_persona_file(
 
     ``prompt`` 为本次请求显式提交的人格文本；不传时保留文件既有内容。
     """
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     expected = prompt if prompt is not None else kb_store.effective_ai_prompt(user_id, cfg)
     kb_store.write_persona(user_id, cfg, prompt=expected)
@@ -212,7 +212,7 @@ def _write_persona_file(
 def _cfg_response(cfg: AssistantAIConfig, user_id: int):
     """AI 配置响应：补回人格 Prompt（已迁出数据库，真相源在 personas 文件）。"""
     try:
-        from api.services import kb_store
+        from api.services.knowledge import kb_store
 
         data = cfg.model_dump()
         data["prompt"] = kb_store.effective_ai_prompt(user_id, cfg)
@@ -502,7 +502,7 @@ async def clone_ai_config(
 ):
     user = get_current_user(authorization, session)
     src = get_ai_config_or_404(session, config_id, user.id)
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     src_prompt = kb_store.effective_ai_prompt(user.id, src)
     new_cfg = AssistantAIConfig(

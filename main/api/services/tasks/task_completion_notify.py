@@ -8,10 +8,10 @@ from typing import Any, Dict, Optional
 
 from sqlmodel import Session, select
 
-from ..database import engine
-from ..models import AITaskJob, AssistantAIConfig, ChatMessageCreate, ChatRun, ChatSession
+from ...database import engine
+from ...models import AITaskJob, AssistantAIConfig, ChatMessageCreate, ChatRun, ChatSession
 from ai_runtime.inference import ai_message_service
-from ..services.chat_persistence import _save_message
+from ..chat.chat_persistence import _save_message
 
 TASK_COMPLETION_RECEIPT = "【任务完成回执】"
 _TASK_NOTICE_WAKE_LOCK = threading.Lock()

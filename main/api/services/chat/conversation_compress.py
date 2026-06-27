@@ -17,9 +17,9 @@ from typing import Any, Dict, List, Optional
 import requests
 from sqlmodel import Session, select
 
-from api.http_client import ai_http_post
-from ..models import ChatMessage, ChatMessageCreate
-from ..models.defaults import DEFAULT_COMPRESSION_PROMPT
+from api.runtime.http_client import ai_http_post
+from ...models import ChatMessage, ChatMessageCreate
+from ...models.defaults import DEFAULT_COMPRESSION_PROMPT
 from .chat_persistence import _save_message
 
 logger = logging.getLogger(__name__)

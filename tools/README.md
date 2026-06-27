@@ -19,7 +19,7 @@
 | 位置 | 用途 |
 | --- | --- |
 | `mcp_runtime/mcp/core.py` | `MCPRegistry.call` 经 `enforce_toolbox_binding` 校验绑定（逻辑定义在 tools/engine） |
-| `api/device_live.py` · `gateway/routers/devices.py` | 把工具箱合成为一条常在线"已连接设备" |
+| `api/devices/live.py` · `gateway/routers/devices.py` | 把工具箱合成为一条常在线"已连接设备" |
 | `gateway/routers/workshop.py` | 工具箱绑定列表 / 绑定接口（多绑） |
 | `gateway/routers/ai_config_routes.py` · `ai_runtime/.../ai_service.py` | 新建 AI 时默认绑定工具箱 |
 | `library/engine.py` | 图书馆 presence 自愈时仅确保工具箱 MCP scope 默认记录 |

@@ -31,7 +31,7 @@ from connector_runtime.dispatch.desktop_device_tools import (
     endpoint_bridge_tools_for_config,
     endpoint_tools_for_config,
 )
-from api.services.task_system import (
+from api.services.tasks.task_system import (
     with_workspace_read_by_name_compat,
 )
 from .run_state import (
@@ -102,7 +102,7 @@ def _parse_allowed_tools_for_cfg(cfg: Optional[AssistantAIConfig]) -> set[str]:
         if not isinstance(parsed, list):
             return set()
         raw_tools = {str(item).strip() for item in parsed if isinstance(item, str) and str(item).strip()}
-        from api.mcp_tool_aliases import fully_clean_tool_names
+        from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
         raw_tools = fully_clean_tool_names(raw_tools)
         raw_tools = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(raw_tools))
         raw_tools.update(MCP_INTROSPECTION_TOOLS)
@@ -325,7 +325,7 @@ def _render_mcp_tool_catalog(allowed_tools: set[str], endpoint_tools: Optional[s
     presence-derived ``is_endpoint_agent_tool`` snapshot disagrees. Any remaining
     non-builtin, non-endpoint name is a stale config entry and is omitted.
     """
-    from api.device_presence import online_tool_defs
+    from api.devices.presence import online_tool_defs
     from connector_runtime.dispatch.desktop_device_tools import is_endpoint_agent_tool
 
     allowed = {str(name).strip() for name in (allowed_tools or set()) if str(name).strip()}
@@ -337,7 +337,7 @@ def _render_mcp_tool_catalog(allowed_tools: set[str], endpoint_tools: Optional[s
     effective_desc = None
     if user_id:
         try:
-            from api.services import kb_store
+            from api.services.knowledge import kb_store
 
             effective_desc = kb_store.effective_tool_description
         except Exception:
@@ -399,7 +399,7 @@ def _filter_tools_for_current_bindings(
         return set(allowed)
     result = set(allowed)
     try:
-        from api.workshop_bindings import config_bound_to_library
+        from api.devices.workshop_bindings import config_bound_to_library
         from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
         from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
         from tools.engine import config_bound_to_toolbox, is_toolbox_gated_tool
@@ -431,11 +431,11 @@ def _build_dynamic_mcp_explanation(
     Falls back to flat if anything fails.
     """
     try:
-        from api.services.mcp_prompt_groups import build_prompt_tool_groups
+        from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
         from mcp_runtime.mcp import registry as mcp_registry
-        from api.device_presence import online_tool_defs
+        from api.devices.presence import online_tool_defs
         from connector_runtime.dispatch.desktop_device_tools import is_endpoint_agent_tool
-        from api.mcp_tool_aliases import fully_clean_tool_names
+        from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
 
         prompt_tools: list[dict] = []
         allowed_set = fully_clean_tool_names(allowed or set())

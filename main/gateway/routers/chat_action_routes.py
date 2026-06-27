@@ -16,16 +16,16 @@ from fastapi.responses import StreamingResponse  # 用于 /stream 端点的 SSE 
 from sqlmodel import Session, select
 
 from api.database import get_session
-from api.http_client import ai_http_post
+from api.runtime.http_client import ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
 from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMessageUpdate, ChatRun
 from .auth import get_current_user
 from ai_runtime.worker import notify_queue
 from api.core.settings import settings
 from api.services.model_presets import resolve_model_preset
-from api.services.chat_media import delete_message_media, get_message_media
+from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, _RUN_THREADS, router
-from api.services.chat_persistence import _append_usage_snapshot, _rebuild_usage_snapshots, _save_message, _upsert_session
+from api.services.chat.chat_persistence import _append_usage_snapshot, _rebuild_usage_snapshots, _save_message, _upsert_session
 from api.chat_runtime.chat_prompt_utils import (
     _append_prompt_section,
     _build_mcp_stream_warning,
@@ -551,7 +551,7 @@ async def stream_chat(
         raise HTTPException(status_code=400, detail="messages must be a list")
 
     # KnowledgeBase 文件为真相源：建目录 + 首次导出（幂等）。运行时直接读文件。
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     kb_store.ensure_user_kb(user.id)
 

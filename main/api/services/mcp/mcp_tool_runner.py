@@ -7,7 +7,7 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional
 
-from api.http_client import ai_http_post
+from api.runtime.http_client import ai_http_post
 from api.models import User
 from api.services.model_presets import normalize_model_presets
 from connector_runtime.dispatch.device_dispatch import dispatch_task_to_agent

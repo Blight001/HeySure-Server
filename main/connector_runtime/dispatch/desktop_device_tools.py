@@ -6,7 +6,7 @@ from api.sio import agents
 # The live ``agents`` registry only exists in the process that owns the agent
 # socket server (api-gateway). To let every process (ai-runtime / mcp-runtime /
 # connector) discover and classify endpoint tools identically, connected agents
-# are mirrored into a shared DB presence snapshot (see ``api.device_presence``).
+# are mirrored into a shared DB presence snapshot (see ``api.devices.presence``).
 # Classification (``is_desktop_tool`` / ``is_browser_tool``) consults a short
 # TTL cache of that snapshot so it stays context-free and cheap across
 # processes.
@@ -20,7 +20,7 @@ def _presence_tool_names() -> Tuple[Set[str], Set[str]]:
     if _TOOLNAME_CACHE["expiry"] > now:
         return _TOOLNAME_CACHE["desktop"], _TOOLNAME_CACHE["browser"]
     try:
-        from api.device_presence import online_tool_names
+        from api.devices.presence import online_tool_names
         desktop, browser = online_tool_names()
     except Exception:
         desktop, browser = set(), set()
@@ -36,7 +36,7 @@ def _presence_tool_defs() -> Dict[str, Dict[str, Any]]:
     if _TOOLDEFS_CACHE["expiry"] > now:
         return _TOOLDEFS_CACHE["defs"]
     try:
-        from api.device_presence import online_tool_defs
+        from api.devices.presence import online_tool_defs
         defs = online_tool_defs()
     except Exception:
         defs = {}
@@ -416,9 +416,9 @@ def workshop_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
     config_id = _parse_int(ai_config_id)
     if not config_id:
         return set()
-    from api.device_mcp_permissions import get_scope
-    from api.device_presence import online_workshop_agents_for_user
-    from api.workshop_bindings import workshop_device_ids_for_config
+    from api.devices.mcp_permissions import get_scope
+    from api.devices.presence import online_workshop_agents_for_user
+    from api.devices.workshop_bindings import workshop_device_ids_for_config
 
     bound_ids = set(workshop_device_ids_for_config(user_id, config_id))
     if not bound_ids:
@@ -458,7 +458,7 @@ def _config_selected_tool_names(ai_config_id: Optional[int], user_id: Optional[i
         parsed = json.loads(cfg.mcp_tools or "[]")
         if not isinstance(parsed, list):
             return set()
-        from api.mcp_tool_aliases import normalize_legacy_tool_names
+        from api.services.mcp.mcp_tool_aliases import normalize_legacy_tool_names
         return normalize_legacy_tool_names(
             str(item).strip() for item in parsed if isinstance(item, str) and str(item).strip()
         )
@@ -480,14 +480,14 @@ def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
        so a tool the model sees listed in its catalog is the same tool it may
        describe and call.
 
-    Resolved from the shared DB presence snapshot (``api.device_presence``) so
+    Resolved from the shared DB presence snapshot (``api.devices.presence``) so
     every process — gateway, ai-runtime, mcp-runtime, connector — gets the same
     answer without the in-memory agent registry."""
     config_id = _parse_int(ai_config_id)
     if not config_id:
         return set()
-    from api.device_presence import online_devices_for_config
-    from api.device_mcp_permissions import get_scope
+    from api.devices.presence import online_devices_for_config
+    from api.devices.mcp_permissions import get_scope
 
     tools: Set[str] = set()
     live_caps: Set[str] = set()

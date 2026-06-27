@@ -20,12 +20,12 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.runtime.async_bridge import run_async
-from api.http_client import ai_http_post
+from api.runtime.http_client import ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
-from api.services import conversation_compress
-from api.services import task_plan as plan_service
+from api.services.chat import conversation_compress
+from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
 from connector_runtime.dispatch.device_dispatch import (
@@ -33,7 +33,7 @@ from connector_runtime.dispatch.device_dispatch import (
     get_run_session_context,
     set_run_session_context,
 )
-from api.services.task_completion_notify import notify_task_completion
+from api.services.tasks.task_completion_notify import notify_task_completion
 from connector_runtime.dispatch.desktop_device_tools import (
     build_endpoint_tools_payload,
     endpoint_bridge_tools_for_config,
@@ -41,7 +41,7 @@ from connector_runtime.dispatch.desktop_device_tools import (
     is_endpoint_agent_tool,
     is_workshop_tool,
 )
-from api.services.task_system import (
+from api.services.tasks.task_system import (
     TASK_PLAN_FLOW_PROMPT,
     TASK_RUNTIME_REQUIRED_TOOLS,
     normalize_system_auto_control,
@@ -66,7 +66,7 @@ from api.chat_runtime.chat_prompt_utils import (
     _strip_prompt_section,
     _strip_task_runtime_sections,
 )
-from api.services.chat_persistence import _save_message
+from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
 from api.chat_runtime.chat_runtime_helpers import (
     _create_loop_scheduled_job,
@@ -515,7 +515,7 @@ def _record_mcp_call(
     Captures the conversation location (session / run / message) so a failure can
     be traced in chat and the responsible tool iterated. Never breaks the run."""
     try:
-        from api.services import mcp_stats
+        from api.services.mcp import mcp_stats
 
         mcp_stats.record_call(
             user_id=user_id,
@@ -671,7 +671,7 @@ def _save_mcp_tool_bubble(
     )
     if image_data_url and saved.id:
         try:
-            from api.services.chat_media import message_media_url, save_message_image_data_url
+            from api.services.chat.chat_media import message_media_url, save_message_image_data_url
 
             media = save_message_image_data_url(bg, message=saved, data_url=image_data_url)
             saved.content = _build_mcp_tool_bubble_content(
@@ -1331,7 +1331,7 @@ def _run_worker_impl(
                 max_steps,
                 _coerce_max_steps(getattr(user, "mcp_max_steps", DEFAULT_CHAT_MAX_STEPS), DEFAULT_CHAT_MAX_STEPS),
             )
-            from api.services import kb_store
+            from api.services.knowledge import kb_store
 
             cfg, api_key, base_url, model, system_prompt = _resolve_ai_runtime(bg, user, ai_kind, ai_config_id)
             # 方案 A：系统提示 / 人格自动控制直接读 KnowledgeBase 文件（缺失回退 DB）。

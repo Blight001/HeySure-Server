@@ -14,9 +14,9 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from api.database import get_session
-from api.device_live import push_device_dynamic_tools
-from api.device_presence import online_tool_catalog_for_user
-from api.services import device_workspace_tools as dyn
+from api.devices.live import push_device_dynamic_tools
+from api.devices.presence import online_tool_catalog_for_user
+from api.services.device_tools import device_workspace_tools as dyn
 from .auth import get_current_user
 
 router = APIRouter()
@@ -146,7 +146,7 @@ async def device_tool_stats(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    from api.services import mcp_stats
+    from api.services.mcp import mcp_stats
 
     try:
         dtype = dyn.normalize_device_type(device_type)
@@ -163,7 +163,7 @@ async def device_tool_failures(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    from api.services import mcp_stats
+    from api.services.mcp import mcp_stats
 
     return {"name": name, "failures": mcp_stats.recent_failures(user.id, name)}
 
@@ -244,7 +244,7 @@ async def get_permission_policy(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    from api.services import device_permission_policy as policy_svc
+    from api.services.device_tools import device_permission_policy as policy_svc
 
     try:
         dtype = dyn.normalize_device_type(device_type)
@@ -264,7 +264,7 @@ async def set_permission_policy(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    from api.services import device_permission_policy as policy_svc
+    from api.services.device_tools import device_permission_policy as policy_svc
 
     try:
         dtype = dyn.normalize_device_type(payload.device_type)

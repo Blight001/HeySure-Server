@@ -9,8 +9,8 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 
-from api.services import kb_store
-from api.services import knowledge_vector
+from api.services.knowledge import kb_store
+from api.services.knowledge import knowledge_vector
 
 
 def _knowledge_search(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int] = None):

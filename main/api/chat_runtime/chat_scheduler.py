@@ -15,10 +15,10 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AITaskJob, AssistantAIConfig, ChatMessageCreate, ChatRun, ChatSession, User
-from api.services import librarian_service
-from api.services.task_system import DEFAULT_SYSTEM_AUTO_CONTROL, normalize_system_auto_control
+from api.services.knowledge import librarian_service
+from api.services.tasks.task_system import DEFAULT_SYSTEM_AUTO_CONTROL, normalize_system_auto_control
 from .run_state import MAX_AUTO_SUPERVISION_ROUNDS, _RUN_THREADS
-from api.services.chat_persistence import _save_message
+from api.services.chat.chat_persistence import _save_message
 import logging
 
 
@@ -263,7 +263,7 @@ def process_task_scheduler() -> Dict[str, int]:
                 AssistantAIConfig.enabled == True,
             )
         ).all()
-        from api.services import kb_store
+        from api.services.knowledge import kb_store
 
         for cfg in cfgs:
             # 方案 A：自动控制（含定时任务配置）直接读 personas 文件（缺失回退 DB）。
@@ -280,7 +280,7 @@ def process_task_scheduler() -> Dict[str, int]:
             ).all()
 
             def _is_job_time_ready(row: AITaskJob) -> bool:
-                from api.services.task_schedule import is_time_ready
+                from api.services.tasks.task_schedule import is_time_ready
 
                 try:
                     payload = json.loads(row.task_payload) if row.task_payload else {}

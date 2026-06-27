@@ -100,7 +100,7 @@ def load_default_tools() -> List[Dict[str, Any]]:
 
 def sync_workspace_after_catalog_change(user_id: int) -> int:
     """Drop removed builtin wrappers and refresh ``browser.run`` enum from catalog."""
-    from api.services import device_workspace_tools as ws
+    from api.services.device_tools import device_workspace_tools as ws
 
     removed = 0
     for name in REMOVED_TOOL_NAMES:

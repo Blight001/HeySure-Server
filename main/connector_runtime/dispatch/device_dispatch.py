@@ -35,10 +35,10 @@ from connector_runtime.dispatch.desktop_device_tools import (
     is_endpoint_agent_tool,
     is_workshop_tool,
 )
-from api.services.screenshot_store import attach_persisted_screenshot
+from api.services.storage.screenshot_store import attach_persisted_screenshot
 from api.models import AgentDispatchTask, ChatMessageCreate
 from api.sio import agents, sio
-from api.services.chat_persistence import _save_message
+from api.services.chat.chat_persistence import _save_message
 
 
 logger = logging.getLogger(__name__)

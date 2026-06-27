@@ -30,10 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sqlmodel import Session, select
 
-from ..core.config import _ai_dir_slug, user_shared_knowledge_dir
-from ..database import engine
-from ..models import AssistantAIConfig, Memory, User
-from ..models import defaults as _defaults
+from ...core.config import _ai_dir_slug, user_shared_knowledge_dir
+from ...database import engine
+from ...models import AssistantAIConfig, Memory, User
+from ...models import defaults as _defaults
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +309,7 @@ def _prune_stale_personas(user_id: int, cfg_id: int, keep: str) -> None:
 
 def cleanup_legacy_agent_thoughts(user_id: int, session: Optional[Session] = None) -> None:
     """Remove obsolete per-AI task prompts after switching to unified control."""
-    from .task_system import compact_system_auto_control
+    from ..tasks.task_system import compact_system_auto_control
 
     own = session is None
     sess = session or Session(engine)

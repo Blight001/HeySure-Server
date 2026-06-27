@@ -3,7 +3,7 @@
 ``SystemSetting`` stores admin-configurable, server-scoped knobs (e.g. the
 registration mode and SMTP mailer credentials) so they can be changed from
 the admin console at runtime without editing env files. Read/write helpers
-live in ``api.services.auth_settings``.
+live in ``api.services.access.auth_settings``.
 
 ``EmailVerificationCode`` backs the email-code register/login flows; codes
 are single-use, expire quickly and carry an attempt counter so they cannot

@@ -138,7 +138,7 @@ def mark_phase_messages_compressed(
 ) -> int:
     """Tag a phase's assistant turns + MCP tool bubbles ``compressed_away``.
 
-    Mirrors :mod:`api.services.conversation_compress`: ``compressed_away`` rows
+    Mirrors :mod:`api.services.chat.conversation_compress`: ``compressed_away`` rows
     are excluded from the model context on subsequent runs. User-visible turns
     and the persisted phase-summary message are left intact.
     """

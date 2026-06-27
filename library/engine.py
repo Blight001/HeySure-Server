@@ -90,8 +90,8 @@ def ensure_presence_for_user(user_id) -> None:
         return
     _last_ensure_at[uid] = now
     try:
-        from api.device_mcp_permissions import get_scope, set_scope
-        from api.device_presence import upsert_presence
+        from api.devices.mcp_permissions import get_scope, set_scope
+        from api.devices.presence import upsert_presence
 
         device_id = device_id_for_user(uid)
         caps = capability_names()
@@ -130,14 +130,14 @@ def connected_entry_for_user(user_id) -> Dict[str, Any]:
     悬浮提示与成员漫游区域据此联动。"""
     bound_cfg_id = None
     try:
-        from api.workshop_bindings import bound_config_id_for_agent
+        from api.devices.workshop_bindings import bound_config_id_for_agent
 
         bound_cfg_id = bound_config_id_for_agent(user_id, device_id_for_user(user_id))
     except Exception:
         bound_cfg_id = None
     library_catalog = None
     try:
-        from api.services.library_mcp_catalog import library_mcp_full_payload
+        from api.services.knowledge.library_mcp_catalog import library_mcp_full_payload
 
         library_catalog = library_mcp_full_payload(int(user_id))
     except Exception:
@@ -182,7 +182,7 @@ def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Opt
 
     from api.database import engine as db_engine
     from api.models import AssistantAIConfig, User
-    from api.workshop_bindings import workshop_device_ids_for_config
+    from api.devices.workshop_bindings import workshop_device_ids_for_config
 
     if not ai_config_id:
         raise HTTPException(status_code=400, detail="ai_config_id is required for workshop tools")

@@ -1298,7 +1298,7 @@ class TestEmailPayload(BaseModel):
 
 
 def _auth_settings_response(session: Session) -> dict:
-    from api.services import auth_settings
+    from api.services.access import auth_settings
 
     smtp = auth_settings.get_smtp_config(session)
     return {
@@ -1330,7 +1330,7 @@ def update_auth_settings(
     session: Session = Depends(get_session),
     actor: User = Depends(require_owner_user),
 ) -> dict:
-    from api.services import auth_settings
+    from api.services.access import auth_settings
 
     mode = (payload.registration_mode or "").strip().lower()
     if mode not in auth_settings.REGISTRATION_MODES:
@@ -1374,7 +1374,8 @@ def send_test_email(
     session: Session = Depends(get_session),
     actor: User = Depends(require_owner_user),
 ) -> dict:
-    from api.services import auth_settings, email_service
+    from api.services.access import auth_settings
+    from api.services import email_service
 
     to = auth_settings.normalize_email(payload.to)
     if not auth_settings.is_valid_email(to):

@@ -15,9 +15,9 @@ from sqlmodel import Session, select
 from api.database import engine
 from mcp_runtime.mcp import get_project_root
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatRun, User
-from api.value_utils import safe_json_obj
+from api.common.value_utils import safe_json_obj
 from api.services.model_presets import resolve_model_preset
-from api.services.task_system import with_workspace_read_by_name_compat
+from api.services.tasks.task_system import with_workspace_read_by_name_compat
 from .run_state import _RUN_LIVE_STATE, _RUN_STATE_LOCK
 from .chat_prompt_utils import (
     _append_prompt_section,
@@ -34,7 +34,7 @@ from .chat_prompt_utils import (
 def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id: Optional[int]):
     # KnowledgeBase 文件为真相源：建目录 + 首次把现有内容导出成文件（幂等）。
     # 运行时直接读文件（见下方 effective_* 调用），不再回写数据库。
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     kb_store.ensure_user_kb(user.id)
     cfg = None
@@ -118,10 +118,10 @@ def build_runtime_system_prompt_and_tools(
     )
     from connector_runtime.bots import iter_bots as _iter_bots
     from connector_runtime.bots.base import channel_for_session_id as _channel_for_session_id
-    from api.services.task_system import TASK_RUNTIME_REQUIRED_TOOLS, TASK_PLAN_FLOW_PROMPT
-    from api.mcp_tool_aliases import fully_clean_tool_names
+    from api.services.tasks.task_system import TASK_RUNTIME_REQUIRED_TOOLS, TASK_PLAN_FLOW_PROMPT
+    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
     from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     uid = user.id
     if cfg is None or base_system_prompt is None:
@@ -269,7 +269,7 @@ def build_effective_system_prompt(
 
 def _parse_allowed_tools(raw: Optional[str]) -> set[str]:
     from connector_runtime.dispatch.desktop_device_tools import strip_endpoint_tool_config_names
-    from api.mcp_tool_aliases import fully_clean_tool_names
+    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
 
     try:
         parsed = json.loads(raw or "[]")
@@ -341,7 +341,7 @@ def _create_loop_scheduled_job(
     if not isinstance(payload, dict):
         payload = {}
 
-    from api.services.task_schedule import build_next_loop_schedule
+    from api.services.tasks.task_schedule import build_next_loop_schedule
 
     next_schedule = build_next_loop_schedule(payload.get("schedule"), now)
     if next_schedule is None:

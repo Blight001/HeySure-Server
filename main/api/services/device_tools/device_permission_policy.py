@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import DevicePermissionPolicy
-from api.services.device_dynamic_tools import KNOWN_PERMISSION_TAGS, normalize_device_type
+from api.services.device_tools.device_dynamic_tools import KNOWN_PERMISSION_TAGS, normalize_device_type
 
 VALID_DECISIONS = ("allow", "confirm", "deny")
 

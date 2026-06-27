@@ -210,7 +210,7 @@ def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Option
     from .permissions import requires_library_binding
 
     if requires_library_binding(tool_name):
-        from api.workshop_bindings import config_bound_to_library
+        from api.devices.workshop_bindings import config_bound_to_library
 
         if not config_bound_to_library(user_id, ai_config_id):
             raise HTTPException(

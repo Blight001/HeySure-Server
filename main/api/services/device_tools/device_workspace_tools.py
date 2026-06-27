@@ -23,7 +23,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from api.core.config import user_workspace_dir
-from api.services.device_dynamic_tools import (
+from api.services.device_tools.device_dynamic_tools import (
     _revision,
     normalize_device_type,
     validate_definition,
@@ -342,7 +342,7 @@ def device_payload(user_id: int, device_type: str) -> Dict[str, Any]:
         if t.get("enabled") and t.get("status", "active") == "active"
     ]
     try:
-        from api.services import device_permission_policy as policy_svc
+        from api.services.device_tools import device_permission_policy as policy_svc
         permission_policy = policy_svc.get_policy(user_id, dtype)
     except Exception:
         permission_policy = {}
@@ -358,9 +358,9 @@ def seed_defaults(user_id: int, device_type: str = "desktop") -> int:
     program wrappers + browser.run dispatcher."""
     dtype = normalize_device_type(device_type)
     if dtype == "desktop":
-        from api.services.device_runtime_tools import load_default_tools as _load
+        from api.services.device_tools.device_runtime_tools import load_default_tools as _load
     elif dtype == "browser":
-        from api.services.device_browser_runtime_tools import (
+        from api.services.device_tools.device_browser_runtime_tools import (
             load_default_tools as _load,
             sync_workspace_after_catalog_change,
         )

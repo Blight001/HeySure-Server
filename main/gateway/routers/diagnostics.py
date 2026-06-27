@@ -21,7 +21,7 @@ from sqlmodel import Session, select
 from api.core.config import user_shared_knowledge_dir
 from api.core.settings import settings
 from api.database import engine
-from api.http_client import ai_http_post
+from api.runtime.http_client import ai_http_post
 from api.models import AssistantAIConfig, ChatMessage, ChatSession, User
 from api.runtime.internal_http import internal_headers
 from api.services.model_presets import normalize_model_presets, resolve_model_preset
@@ -203,7 +203,7 @@ async def _mcp_checks(user_id: int) -> List[Dict[str, Any]]:
 
 def _connector_checks(user_id: int) -> List[Dict[str, Any]]:
     def agents() -> Dict[str, Any]:
-        from api.device_presence import online_tool_defs_for_user
+        from api.devices.presence import online_tool_defs_for_user
         defs = online_tool_defs_for_user(user_id) or {}
         n = len(defs)
         return {"ok": True, "detail": f"在线端侧工具 {n} 个" if n else "当前无在线端侧 Agent"}
@@ -430,8 +430,8 @@ def diagnostics_reseed_mcp_docs(user: User = Depends(require_admin_user)) -> Dic
     可强制按当前注册表重新生成。注意：会覆盖对这些工具说明做过的手动修改。
     """
     from mcp_runtime.mcp import registry
-    from api.services import kb_store
-    from api.services.librarian_service import _mcp_schema_parameter_rows
+    from api.services.knowledge import kb_store
+    from api.services.knowledge.librarian_service import _mcp_schema_parameter_rows
 
     count = 0
     failed: List[str] = []

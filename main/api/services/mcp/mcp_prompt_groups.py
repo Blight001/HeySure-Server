@@ -2,8 +2,8 @@
 
 from typing import Any, Dict, List, Optional, Set
 
-from api.device_live import connected_agent_rows_for_user
-from api.device_mcp_permissions import get_scope
+from api.devices.live import connected_agent_rows_for_user
+from api.devices.mcp_permissions import get_scope
 from connector_runtime.dispatch.desktop_device_tools import (
     _config_selected_tool_names,
     _iter_agents_for_config,
@@ -117,7 +117,7 @@ def build_prompt_tool_groups(
     # Otherwise the "图书馆 MCP" group leaks even when not connected.
     if ai_config_id is not None:
         try:
-            from api.workshop_bindings import config_bound_to_library
+            from api.devices.workshop_bindings import config_bound_to_library
             if not config_bound_to_library(user_id, ai_config_id):
                 library_tool_names = set()
         except Exception:

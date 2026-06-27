@@ -14,9 +14,9 @@ Use ``action="capabilities"`` to discover what a device of each type can run.
 
 from typing import Any, Dict, Optional
 
-from api.device_live import push_device_dynamic_tools
-from api.device_presence import online_tool_catalog_for_user
-from api.services import device_workspace_tools as dyn
+from api.devices.live import push_device_dynamic_tools
+from api.devices.presence import online_tool_catalog_for_user
+from api.services.device_tools import device_workspace_tools as dyn
 
 
 def _capabilities(user_id: int, device_type: str) -> list:
@@ -57,12 +57,12 @@ async def _device_mcp_manage(user_id: int, args: Dict[str, Any], ai_config_id: O
             return {"ok": False, "error": f"tool not found: {name}"}
         return {"ok": True, "tool": tool}
     if action == "stats":
-        from api.services import mcp_stats
+        from api.services.mcp import mcp_stats
 
         tool_names = [t["name"] for t in dyn.list_tools(user_id, device_type)]
         return {"ok": True, "deviceType": device_type, "stats": mcp_stats.tool_stats(user_id, tool_names)}
     if action == "failures":
-        from api.services import mcp_stats
+        from api.services.mcp import mcp_stats
 
         return {"ok": True, "name": name, "failures": mcp_stats.recent_failures(user_id, name)}
     if action == "history":

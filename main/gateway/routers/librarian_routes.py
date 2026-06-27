@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from api.services import librarian_service
+from api.services.knowledge import librarian_service
 from api.database import get_session
 from .auth import get_current_user
 

@@ -120,7 +120,7 @@ def _consolidate_prompts_to_files(engine) -> None:
     """
     from sqlalchemy import inspect, text
 
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     insp = inspect(engine)
     tables = set(insp.get_table_names())
@@ -927,8 +927,8 @@ def _live_registered_tool_names() -> set:
 # pruning stored allow-lists so operators keep an equivalent grant after the
 # consolidation refactor instead of silently losing the permission. The table is
 # the single source shared with runtime allow-list normalization
-# (``api.mcp_tool_aliases``) so migration-time and runtime stay in lock-step.
-from api.mcp_tool_aliases import LEGACY_TOOL_RENAMES as _LEGACY_TOOL_RENAMES  # noqa: E402
+# (``api.services.mcp.mcp_tool_aliases``) so migration-time and runtime stay in lock-step.
+from api.services.mcp.mcp_tool_aliases import LEGACY_TOOL_RENAMES as _LEGACY_TOOL_RENAMES  # noqa: E402
 
 
 def _migrate_assistantaiconfig_prune_unknown_mcp_tools() -> None:

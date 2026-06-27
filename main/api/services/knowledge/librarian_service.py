@@ -153,7 +153,7 @@ from .librarian_clawhub import (
     _write_clawhub_install_metadata,
 )
 
-from ..sio import sio
+from ...sio import sio
 from .knowledge_vector import sync_topic_embedding_for_entry as _sync_topic_embedding
 
 logger = logging.getLogger(__name__)

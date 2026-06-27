@@ -17,10 +17,10 @@ from typing import Any, Dict, List, Optional
 
 from sqlmodel import Session, select
 
-from ..database import engine
-from ..models import AssistantAIConfig, ChatMessageCreate, ChatSession
-from ..services.chat_persistence import _save_message
-from ..services.task_completion_notify import (
+from ...database import engine
+from ...models import AssistantAIConfig, ChatMessageCreate, ChatSession
+from ..chat.chat_persistence import _save_message
+from ..tasks.task_completion_notify import (
     _TASK_NOTICE_WAKE_LOCK,
     _TASK_NOTICE_WAKE_SESSIONS,
     _ai_kind_for_config,
@@ -28,7 +28,7 @@ from ..services.task_completion_notify import (
     _start_creator_notice_run,
     _wait_idle_then_start_creator_notice_run,
 )
-from ..workshop_bindings import bound_config_id_for_agent
+from ...devices.workshop_bindings import bound_config_id_for_agent
 
 # 图书馆 AI 接收"计划完成→请审核沉淀"简报的专用会话（与用户对话隔离）。
 REVIEW_SESSION_ID = "kb_auto_review"

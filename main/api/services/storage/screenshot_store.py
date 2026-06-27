@@ -8,8 +8,8 @@ import re
 import time
 from typing import Any, Dict, Optional
 
-from ..core.config import user_workspace_dir
-from ..core.settings import settings
+from ...core.config import user_workspace_dir
+from ...core.settings import settings
 from .temp_image_store import save_temp_image
 
 DATA_URL_RE = re.compile(r"^data:image/(?P<ext>png|jpeg|jpg|webp);base64,(?P<data>.+)$", re.IGNORECASE | re.DOTALL)

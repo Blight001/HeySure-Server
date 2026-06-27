@@ -28,7 +28,7 @@ from api.database import create_db_and_tables
 from api.runtime import heartbeat as heartbeat_module
 from ai_runtime.inference.ai_service import align_token_snapshots_with_history, migrate_legacy_switch_files_to_db
 from api.chat_runtime.chat_scheduler import process_task_scheduler
-from api.services.temp_image_store import cleanup_expired_temp_images
+from api.services.storage.temp_image_store import cleanup_expired_temp_images
 from api.services import repo_update
 
 
@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
     # empty in-memory registry, so reset the shared presence snapshot — agents
     # flip their own rows back online as they reconnect.
     try:
-        from api.device_presence import mark_all_offline
+        from api.devices.presence import mark_all_offline
         mark_all_offline()
     except Exception:
         logger.exception("failed to reset endpoint agent presence on startup")
@@ -81,7 +81,7 @@ async def lifespan(app: FastAPI):
         from sqlmodel import Session, select
         from api.database import engine
         from api.models import User
-        from api.services.kb_store import sync_topics_from_files, sync_skills_from_directory
+        from api.services.knowledge.kb_store import sync_topics_from_files, sync_skills_from_directory
 
         with Session(engine) as sess:
             user_ids = [uid for uid in sess.exec(select(User.id)).all() if uid is not None]

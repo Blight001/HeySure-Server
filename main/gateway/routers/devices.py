@@ -7,13 +7,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from api.device_bindings import set_binding
-from api.device_mcp_permissions import get_scope, set_scope
+from api.devices.bindings import set_binding
+from api.devices.mcp_permissions import get_scope, set_scope
 from api.database import get_session
 from api.models import DeviceAiBinding, AssistantAIConfig, DevicePresence
 from .auth import get_current_user
 from api.sio import agents, device_token_required
-from api.device_live import connected_agent_rows_for_user, emit_agent_list_for_user
+from api.devices.live import connected_agent_rows_for_user, emit_agent_list_for_user
 from connector_runtime.dispatch.desktop_device_tools import agent_endpoint_tools, device_type_of
 
 router = APIRouter()
@@ -107,7 +107,7 @@ def _scope_view(agent: dict, user_id: int) -> dict:
     scope = get_scope(user_id, device_id) if device_id else None
     allowed = [] if scope is None else sorted(set(capabilities) & scope)
     try:
-        from api.device_presence import tool_defs_for_agent
+        from api.devices.presence import tool_defs_for_agent
 
         tool_defs = tool_defs_for_agent(user_id, device_id)
     except Exception:
@@ -225,7 +225,7 @@ async def bind_agent_ai(
     # Keep the shared DB presence snapshot in sync so off-gateway processes
     # resolve endpoint tools against the new assignment immediately.
     try:
-        from api.device_presence import update_binding
+        from api.devices.presence import update_binding
         update_binding(device_id, stored)
         if previous_same_type_device_id:
             update_binding(previous_same_type_device_id, None)

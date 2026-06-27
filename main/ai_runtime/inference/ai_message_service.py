@@ -33,7 +33,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AIMessage, AssistantAIConfig, ChatMessageCreate, ChatRun, ChatSession, User
-from api.services.chat_persistence import _save_message
+from api.services.chat.chat_persistence import _save_message
 import logging
 
 
@@ -455,7 +455,7 @@ def _send_inquiry_reply_reminder(*, message_id: str, user_id: int, elapsed_secon
             return {"reminded": False, "reason": "missing_target_session"}
         target_ai_config_id = int(row.to_ai_config_id)
         ai_kind = "assistant" if target_cfg.ai_role == "assistant_admin" else "core"
-        from api.services import kb_store
+        from api.services.knowledge import kb_store
 
         template = kb_store.effective_system_value(
             getattr(user, "id", 0), "prompt_ai_message_inquiry_reminder",

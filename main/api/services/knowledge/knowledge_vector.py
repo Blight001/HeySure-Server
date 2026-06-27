@@ -36,7 +36,7 @@ from sqlmodel import Session, select
 from api.core.settings import settings
 from api.core.config import user_shared_knowledge_dir
 from api.database import engine
-from api.http_client import ai_http_post
+from api.runtime.http_client import ai_http_post
 from api.models import AssistantAIConfig, User
 from api.services.model_presets import resolve_model_preset
 
@@ -463,7 +463,7 @@ def semantic_search_knowledge(
     candidates: List[Tuple[str, List[float], Dict[str, Any]]] = []
     try:
         # Try file-driven metadata first (no hard dep on KnowledgeEntry table)
-        from api.services.librarian_service import _load_user_knowledge_entries as _load_entries
+        from api.services.knowledge.librarian_service import _load_user_knowledge_entries as _load_entries
         file_rows = _load_entries(int(user_id))
         for e in file_rows:
             if str(e.get("status") or "active") != "active":

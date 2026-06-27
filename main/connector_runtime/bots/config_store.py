@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, Dict
 
-from api.value_utils import to_bool
+from api.common.value_utils import to_bool
 
 if TYPE_CHECKING:
     from api.models import AssistantAIConfig

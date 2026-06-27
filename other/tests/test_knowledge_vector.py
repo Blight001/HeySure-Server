@@ -1,7 +1,7 @@
 import os
 import tempfile
 
-from api.services import knowledge_vector
+from api.services.knowledge import knowledge_vector
 from mcp_runtime.mcp.permissions import ROLE_MEMBER, tool_min_role
 from mcp_runtime.mcp.registry import registry
 

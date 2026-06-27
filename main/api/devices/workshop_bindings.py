@@ -1,7 +1,7 @@
 """Read/write helpers for AI → workshop-agent bindings (知识与进化工坊).
 
 工坊与 AI 是 **1:1 绑定**：一个工坊同一时间只服务一个 AI 数字成员
-（绑定新 AI 会替换旧绑定）。与设备绑定（``api.device_bindings``）的差异
+（绑定新 AI 会替换旧绑定）。与设备绑定（``api.devices.bindings``）的差异
 仅在绑定方向：工坊绑定从 AI 侧声明、存 ``WorkshopAiBinding``。
 Shared by the dispatch path (which resolves the workshop agent for a
 calling AI) and the REST binding endpoints.
@@ -12,8 +12,8 @@ from typing import List, Optional, Set
 
 from sqlmodel import Session, select
 
-from .database import engine
-from .models import WorkshopAiBinding
+from ..database import engine
+from ..models import WorkshopAiBinding
 
 
 def _coerce_int(value) -> Optional[int]:

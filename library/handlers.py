@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 
-from api.services import librarian_service
+from api.services.knowledge import librarian_service
 
 
 def _as_str_list(value: Any) -> list:

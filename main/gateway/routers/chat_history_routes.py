@@ -13,8 +13,8 @@ from api.database import get_session
 from api.models import ChatMessage, ChatSession
 from .auth import get_current_user
 from .chat_base import router
-from api.services.chat_persistence import _rebuild_usage_snapshots
-from api.services.chat_media import delete_message_media
+from api.services.chat.chat_persistence import _rebuild_usage_snapshots
+from api.services.chat.chat_media import delete_message_media
 from api.chat_runtime.chat_runtime_helpers import _live_pending_tokens_for, build_effective_system_prompt
 
 

@@ -217,7 +217,7 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
 
         # 人格 Prompt 真相源为文件：写入 personas/*.md。
         try:
-            from api.services import kb_store
+            from api.services.knowledge import kb_store
 
             for row, prompt in _seed_persona_prompts:
                 kb_store.write_persona(user_id, row, prompt=prompt)

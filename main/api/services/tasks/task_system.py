@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from sqlmodel import Session, select
 
-from ..models import (
+from ...models import (
     DEFAULT_COMPRESSION_PROMPT,
     DEFAULT_RESUME_TASK_PROMPT,
     DEFAULT_START_TASK_PROMPT,

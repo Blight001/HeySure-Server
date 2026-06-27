@@ -84,14 +84,14 @@ def toolbox_capability_names() -> List[str]:
 # 绑定（多绑：新建 AI 默认绑定，之后完全听从用户操作）
 # ---------------------------------------------------------------------------
 def config_bound_to_toolbox(user_id, ai_config_id) -> bool:
-    from api.workshop_bindings import config_bound_to_device
+    from api.devices.workshop_bindings import config_bound_to_device
 
     return config_bound_to_device(user_id, ai_config_id, toolbox_device_id_for_user(user_id))
 
 
 def bind_config_to_toolbox(user_id, ai_config_id) -> bool:
     """把单个 AI 绑定到工具箱（多绑）。用于 AI 创建时默认绑定。"""
-    from api.workshop_bindings import set_workshop_binding
+    from api.devices.workshop_bindings import set_workshop_binding
 
     return set_workshop_binding(
         user_id, toolbox_device_id_for_user(user_id), ai_config_id, bound=True, single=False
@@ -109,7 +109,7 @@ def toolbox_connected_entry_for_user(user_id) -> Dict[str, Any]:
     绑定关系完全由用户通过作坊面板或 AI 配置管理，新建 AI 时会默认调用 bind_config_to_toolbox。"""
     bound_ids: List[int] = []
     try:
-        from api.workshop_bindings import bound_config_ids_for_agent
+        from api.devices.workshop_bindings import bound_config_ids_for_agent
 
         bound_ids = sorted(bound_config_ids_for_agent(user_id, toolbox_device_id_for_user(user_id)))
     except Exception:
@@ -169,7 +169,7 @@ def ensure_toolbox_scope_for_user(user_id) -> None:
     except (TypeError, ValueError):
         return
     try:
-        from api.device_mcp_permissions import get_scope, set_scope
+        from api.devices.mcp_permissions import get_scope, set_scope
     except Exception:
         return
     tbid = toolbox_device_id_for_user(uid)
@@ -223,7 +223,7 @@ def toolbox_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int]
     if not config_id or not uid:
         return set()
     try:
-        from api.device_mcp_permissions import get_scope
+        from api.devices.mcp_permissions import get_scope
         from mcp_runtime.mcp import registry as mcp_registry
         from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
     except Exception:
@@ -256,7 +256,7 @@ def sanitize_mcp_tools(raw: Optional[str], *, user_id: Optional[int] = None, ai_
     返回可直接存回 AssistantAIConfig.mcp_tools 的 JSON 字符串。
     """
     from api.mcp_tool_aliases import fully_clean_tool_names
-    from api.services.task_system import with_workspace_read_by_name_compat
+    from api.services.tasks.task_system import with_workspace_read_by_name_compat
     from connector_runtime.dispatch.desktop_device_tools import strip_endpoint_tool_config_names
     from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
     import json
@@ -277,7 +277,7 @@ def sanitize_mcp_tools(raw: Optional[str], *, user_id: Optional[int] = None, ai_
         # 3. 如果提供了绑定信息，按当前绑定状态进一步清理 gated 工具
         if user_id and ai_config_id:
             try:
-                from api.workshop_bindings import config_bound_to_library
+                from api.devices.workshop_bindings import config_bound_to_library
                 from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
 
                 protected = set(MCP_INTROSPECTION_TOOLS or set())

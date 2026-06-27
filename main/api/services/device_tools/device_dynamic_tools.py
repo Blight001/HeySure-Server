@@ -6,7 +6,7 @@ and ``device/extension/src/lib/tools/dynamic.ts``) so a definition rejected on
 the device can never be saved from the web, and vice versa. Keep the rules in
 this module and the device ``validate()`` in lockstep.
 
-Storage / CRUD now lives in :mod:`api.services.device_workspace_tools` (tools
+Storage / CRUD now lives in :mod:`api.services.device_tools.device_workspace_tools` (tools
 are persisted as user-workspace files, not DB rows); this module is the shared
 validation + constants both that module and the permission policy import.
 """

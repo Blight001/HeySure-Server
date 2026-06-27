@@ -17,7 +17,7 @@ from sqlmodel import Session, select
 
 from api.database import get_session
 from api.models import AssistantAIConfig
-from api.workshop_bindings import (
+from api.devices.workshop_bindings import (
     bound_config_id_for_agent,
     set_workshop_binding,
     workshop_device_ids_for_config,
@@ -72,7 +72,7 @@ async def list_workshop_bindings(
     user = get_current_user(authorization, session)
     cfg = _load_owned_config(session, user.id, ai_config_id)
 
-    from api.device_presence import online_workshop_agents_for_user
+    from api.devices.presence import online_workshop_agents_for_user
     from tools import engine as toolbox_engine
     from library import engine as workshop_engine
 
@@ -158,7 +158,7 @@ async def update_workshop_binding(
 
     # 绑定/解绑后推送更新 device list，让作坊面板能立即看到 toolbox 的 boundAiConfigIds 变化
     try:
-        from api.device_live import emit_agent_list_for_user
+        from api.devices.live import emit_agent_list_for_user
         import asyncio
         asyncio.create_task(emit_agent_list_for_user(user.id))
     except Exception:

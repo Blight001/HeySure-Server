@@ -15,7 +15,7 @@ from typing import Optional
 
 from sqlmodel import Session, func, select
 
-from ..models import AssistantAIConfig
+from ...models import AssistantAIConfig
 
 
 def user_has_governance_tree(session: Session, user_id: int) -> bool:

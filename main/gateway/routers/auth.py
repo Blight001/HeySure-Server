@@ -24,7 +24,8 @@ from api.database import get_session
 from api.models import Token, User, UserCreate, UserLogin, UserRead, UserUpdate
 from api.models.defaults import DEFAULT_MCP_NAMESPACE_HINTS
 from ai_runtime.inference.ai_service import ensure_default_ai_for_user
-from api.services import auth_settings, email_service
+from api.services.access import auth_settings
+from api.services import email_service
 from api.services.model_presets import model_presets_json
 from api.core.settings import settings
 from pydantic import BaseModel
@@ -40,7 +41,7 @@ def _user_payload(user: User) -> dict:
     """构造用户响应：数据库列 + 已迁出到 KnowledgeBase/system 的系统提示词文本。
 
     用 model_dump 合并文件值，避免在 ORM 实例上设置瞬态属性（更稳健）。"""
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     data = {
         "id": getattr(user, "id", None),
@@ -393,7 +394,7 @@ async def update_profile(
     
     # System prompts no longer belong to the User table. Keep them out of the
     # ORM update and persist them to KnowledgeBase/system after the DB commit.
-    from api.services import kb_store
+    from api.services.knowledge import kb_store
 
     file_keys = {key for key, _kind in kb_store.SYSTEM_PROMPT_KEYS}
     prompt_updates = {

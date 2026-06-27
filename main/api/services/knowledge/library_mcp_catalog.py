@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 def library_mcp_full_payload(user_id: int = 0) -> Dict[str, Any]:
     """完整图书馆 MCP = 需绑定图书馆的治理类注册表工具。"""
-    from api.services.librarian_service import _intrinsic_properties_payload
+    from api.services.knowledge.librarian_service import _intrinsic_properties_payload
 
     governance = _intrinsic_properties_payload(int(user_id or 0), scope="library")
     return {

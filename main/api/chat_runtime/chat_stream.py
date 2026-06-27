@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from api.http_client import ai_http_post
+from api.runtime.http_client import ai_http_post
 from .chat_prompt_utils import (
     _extract_delta_text,
     _extract_first_complete_mcp_call,

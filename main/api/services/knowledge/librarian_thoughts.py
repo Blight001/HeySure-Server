@@ -36,7 +36,7 @@ from .librarian_core import (
     _clawhub_installed_items,
     _entry_dict_from_file_entry,
 )
-from ..integrations import clawhub
+from ...integrations import clawhub
 from .knowledge_vector import sync_topic_embedding_for_entry as _sync_topic_embedding
 
 logger = logging.getLogger(__name__)

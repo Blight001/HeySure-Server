@@ -28,7 +28,7 @@ from .librarian_core import (
     _BUILTIN_UPDATED_AT,
 )
 from .librarian_thoughts import _sync_skill_to_knowledge_entry
-from ..integrations import clawhub
+from ...integrations import clawhub
 from mcp_runtime.mcp.core import safe_join
 
 logger = logging.getLogger(__name__)
