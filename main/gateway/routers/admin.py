@@ -11,6 +11,8 @@ Mounted at ``/api/admin`` (see ``PREFIX``) and auto-discovered by
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import mimetypes
 import os
@@ -18,8 +20,8 @@ import shutil
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import (
     and_,
@@ -45,6 +47,7 @@ from api.models import (
     AIMessage,
     AITaskJob,
     ChatMessage,
+    ChatMessageMedia,
     ChatRun,
     ChatSession,
     EvolutionProject,
@@ -1243,6 +1246,222 @@ def cleanup_database(
         "dropped_tables": dropped,
         "total_deleted": total_deleted,
     }
+
+
+# ---------------------------------------------------------------------------
+# Database export / import (full backup & restore)
+#
+# Export dumps every mapped table to a single JSON document the owner can
+# download — a complete snapshot of all user data (accounts, chats, AI
+# configs, tasks, knowledge, devices, …). Import restores such a snapshot,
+# replacing the contents of every table it carries. Both are owner-only;
+# import additionally re-confirms an owner's password (a deliberate second
+# factor) because it wipes and rewrites the database.
+#
+# Serialization is schema-agnostic — tables and columns are discovered from
+# SQLModel's metadata, so new models are covered automatically. The single
+# binary column (chat media blobs) is base64-wrapped as ``{"__b64__": "..."}``
+# so the document stays valid JSON and round-trips losslessly.
+# ---------------------------------------------------------------------------
+
+
+EXPORT_VERSION = 1
+_MEDIA_TABLE = ChatMessageMedia.__table__.name
+
+
+def _export_value(v):
+    """Make a DB value JSON-safe while keeping it reversible on import."""
+    if isinstance(v, (bytes, bytearray)):
+        return {"__b64__": base64.b64encode(bytes(v)).decode("ascii")}
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    return str(v)  # no datetime/Decimal columns today; stringify as a fallback
+
+
+def _import_value(col, v):
+    """Reverse :func:`_export_value` for a single column value."""
+    if isinstance(v, dict) and "__b64__" in v:
+        return base64.b64decode(v["__b64__"])
+    return v
+
+
+@router.get("/db/export")
+def export_database(
+    include_media: bool = True,
+    session: Session = Depends(get_session),
+    actor: User = Depends(require_owner_user),
+):
+    """Stream the whole database as a downloadable JSON backup.
+
+    Rows are streamed table by table over a server-side cursor so a large
+    export — chat media in particular — never has to be buffered in memory all
+    at once. Pass ``include_media=false`` to skip the binary blob table for a
+    much smaller dump.
+    """
+    tables = [
+        t for t in SQLModel.metadata.sorted_tables
+        if include_media or t.name != _MEDIA_TABLE
+    ]
+    _record_audit(
+        session, actor, "db_export",
+        target_type="database", target_id="export", target_label="数据库导出",
+        detail=f"导出 {len(tables)} 张表" + ("" if include_media else "（不含媒体文件）"),
+    )
+
+    def generate():
+        # Use a dedicated connection: the request session may already be closed
+        # by the time this generator runs (StreamingResponse consumes it after
+        # the endpoint returns).
+        with engine.connect() as conn:
+            yield (
+                '{"heysure_export": true, '
+                f'"version": {EXPORT_VERSION}, '
+                f'"exported_at": {json.dumps(time.time())}, '
+                '"tables": {'
+            )
+            for ti, tbl in enumerate(tables):
+                yield ("," if ti else "") + json.dumps(tbl.name) + ":["
+                result = conn.execution_options(stream_results=True).execute(select(tbl))
+                for ri, row in enumerate(result.mappings()):
+                    obj = {k: _export_value(v) for k, v in row.items()}
+                    yield ("," if ri else "") + json.dumps(obj, ensure_ascii=False)
+                yield "]"
+            yield "}}"
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    headers = {"Content-Disposition": f'attachment; filename="heysure-backup-{stamp}.json"'}
+    return StreamingResponse(generate(), media_type="application/json", headers=headers)
+
+
+def _reset_sequences(session: Session) -> None:
+    """Advance every serial/identity sequence past the largest imported id.
+
+    Bulk-inserting rows with explicit primary keys leaves Postgres' backing
+    sequences untouched, so the next natural insert would collide. Realign
+    each one to ``MAX(id)`` (or 1 for an empty table).
+    """
+    for tbl in SQLModel.metadata.sorted_tables:
+        for col in tbl.columns:
+            seq = session.execute(
+                text("SELECT pg_get_serial_sequence(:t, :c)"),
+                {"t": tbl.name, "c": col.name},
+            ).scalar()
+            if not seq:
+                continue  # column has no serial sequence behind it
+            session.execute(
+                text(
+                    f'SELECT setval(:seq, GREATEST(COALESCE((SELECT MAX("{col.name}") '
+                    f'FROM "{tbl.name}"), 0), 1))'
+                ),
+                {"seq": seq},
+            )
+
+
+@router.post("/db/import")
+def import_database(
+    file: UploadFile = File(...),
+    account: str = Form(...),
+    password: str = Form(...),
+    session: Session = Depends(get_session),
+    actor: User = Depends(require_owner_user),
+) -> dict:
+    """Restore a backup produced by :func:`export_database`.
+
+    Every table carried by the document is wiped and repopulated inside one
+    transaction, so a failure rolls back to the pre-import state. Tables the
+    document does not mention are left untouched. Requires an owner's password
+    as a second factor — the same gate the cleanup endpoint uses.
+    """
+    account = (account or "").strip()
+    if not account or not password:
+        raise HTTPException(status_code=400, detail="请输入房主账号和密码")
+    # Re-authenticate against any owner account (a co-owner may confirm).
+    confirm_user = session.exec(select(User).where(User.account == account)).first()
+    if (
+        not confirm_user
+        or confirm_user.role != "owner"
+        or not verify_password(password, confirm_user.hashed_password)
+    ):
+        raise HTTPException(status_code=403, detail="房主账号或密码不正确")
+
+    try:
+        raw = file.file.read()
+        doc = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"无法解析备份文件：{exc}")
+    if not isinstance(doc, dict) or not doc.get("heysure_export"):
+        raise HTTPException(status_code=400, detail="不是有效的 HeySure 备份文件")
+    payload_tables = doc.get("tables")
+    if not isinstance(payload_tables, dict):
+        raise HTTPException(status_code=400, detail="备份文件缺少 tables 字段")
+
+    # Only operate on tables the current schema still knows about; surface the
+    # rest so an out-of-date backup is obvious instead of silently dropped.
+    known = {t.name for t in SQLModel.metadata.sorted_tables}
+    skipped = sorted(set(payload_tables) - known)
+
+    # Capture the actor's identity now: the import may wipe and replace the
+    # ``user`` table, after which the ORM object is expired and reloading it
+    # could fail (the row may no longer exist in the restored data).
+    actor_id, actor_account = actor.id, actor.account
+
+    imported: dict[str, int] = {}
+    try:
+        # 1) Wipe child-first so foreign keys never block a delete.
+        for tbl in reversed(SQLModel.metadata.sorted_tables):
+            if tbl.name in payload_tables:
+                session.execute(sa_delete(tbl))
+        # 2) Insert parent-first so foreign keys are always satisfiable.
+        for tbl in SQLModel.metadata.sorted_tables:
+            rows = payload_tables.get(tbl.name)
+            if not isinstance(rows, list) or not rows:
+                continue
+            cols = {c.name: c for c in tbl.columns}
+            batch = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                clean = {k: _import_value(cols[k], v) for k, v in row.items() if k in cols}
+                if clean:
+                    batch.append(clean)
+            if batch:
+                session.execute(sa_insert(tbl), batch)
+                imported[tbl.name] = len(batch)
+        _reset_sequences(session)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=f"导入失败，已回滚到导入前状态：{exc}")
+
+    total = sum(imported.values())
+    logger.warning(
+        f"owner {actor_account} imported a database backup: "
+        f"{total} rows across {len(imported)} tables"
+    )
+    # Build the audit row from the captured identity (the actor ORM object is
+    # expired after the restore). ``actor_id`` is not a foreign key, so it is
+    # safe even if that account no longer exists in the imported data.
+    detail = (
+        f"导入 {len(imported)} 张表共 {total} 行"
+        + (f"；跳过未知表 {', '.join(skipped)}" if skipped else "")
+    )
+    try:
+        session.add(
+            AdminAuditLog(
+                actor_id=actor_id,
+                actor_account=actor_account,
+                action="db_import",
+                target_type="database",
+                target_id="import",
+                target_label="数据库导入",
+                detail=detail,
+            )
+        )
+        session.commit()
+    except Exception:
+        logger.exception("failed to write admin audit log for db_import")
+        session.rollback()
+    return {"ok": True, "imported": imported, "total": total, "skipped_tables": skipped}
 
 
 # ---------------------------------------------------------------------------

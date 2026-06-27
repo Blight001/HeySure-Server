@@ -339,6 +339,16 @@ def _parse_int(value: Any) -> Optional[int]:
         return None
 
 
+# ⚠️ DISPATCH/ROUTING ONLY — NEVER use these in system-prompt assembly.
+# ``_iter_agents_for_config`` and the ``get_connected_*_agent`` resolvers read the
+# in-memory ``agents`` socket registry, which is only populated in the process that
+# owns the agent sockets (gateway). They are correct for *dispatching* a tool call
+# to a live socket, but using them to decide what goes into the prompt makes the
+# ai-runtime-built prompt diverge from the gateway-built /system-prompt-preview
+# (preview shows a tool the model never actually received). For prompt-facing tool
+# grants use the DB-presence helpers below (``endpoint_tools_for_config`` /
+# ``endpoint_bridge_tools_for_config``). See the INVARIANT note in
+# chat_runtime_helpers.build_runtime_system_prompt_and_tools.
 def _iter_agents_for_config(ai_config_id: Optional[int], user_id: Optional[int] = None):
     config_id = _parse_int(ai_config_id)
     if not config_id:
@@ -404,8 +414,24 @@ def online_runtimes(user_id: Optional[int], device_type: str = "desktop") -> Dic
 
 
 def endpoint_bridge_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Set[str]:
-    if get_connected_endpoint_agent(ai_config_id, user_id):
-        return set(ENDPOINT_BRIDGE_MCP_TOOLS)
+    """Bridge MCP tools (e.g. ``admin.manage``) granted when an endpoint executor
+    (desktop / android / browser) is online and bound to this AI config.
+
+    Resolved from the shared DB presence snapshot (``api.devices.presence``) — not
+    the in-memory ``agents`` registry — so every process (gateway, ai-runtime,
+    mcp-runtime, connector) returns the same answer. The in-memory registry only
+    exists in the process that owns the agent sockets, so reading it here caused
+    the inference path (ai-runtime, no sockets) to silently drop these tools from
+    the prompt while the gateway-built preview still showed them.
+    """
+    config_id = _parse_int(ai_config_id)
+    if not config_id:
+        return set()
+    from api.devices.presence import online_devices_for_config
+
+    for _device_id, device_type, _caps in online_devices_for_config(user_id, config_id):
+        if str(device_type or "").strip().lower() in ("desktop", "android", "browser"):
+            return set(ENDPOINT_BRIDGE_MCP_TOOLS)
     return set()
 
 

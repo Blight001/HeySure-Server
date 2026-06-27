@@ -109,6 +109,27 @@ def build_runtime_system_prompt_and_tools(
     omitted they are resolved here (the preview endpoint).
 
     Returns ``(system_prompt, effective_tool_allowlist)``.
+
+    ──────────────────────────────────────────────────────────────────────────
+    INVARIANT — keep the preview honest (前置 prompt == 真实喂给 AI 的 prompt):
+    This function runs in TWO different processes:
+      • gateway      → builds the live /system-prompt-preview ("前置 prompt")
+      • ai-runtime   → builds the prompt the model actually receives
+    Therefore EVERY input that shapes the prompt or the tool allow-list MUST be
+    PROCESS-INDEPENDENT — resolve it from the database (DB presence snapshot,
+    config rows, bindings), NEVER from in-memory per-process state.
+
+    In particular, DO NOT feed prompt content from the in-memory ``agents``
+    socket registry (``get_connected_*_agent`` / ``_iter_agents_for_config`` in
+    connector_runtime.dispatch.desktop_device_tools). That registry only exists
+    in the process that owns the agent sockets (gateway), so ai-runtime would
+    silently drop whatever you add and the preview would lie. Use the DB-backed
+    helpers instead (``endpoint_tools_for_config`` / ``endpoint_bridge_tools_for_config``
+    / ``toolbox_tools_for_config`` — all read ``api.devices.presence``).
+
+    When you add a NEW prompt section or a NEW tool source below, add it HERE so
+    both processes assemble it identically, and verify its data source is the DB.
+    ──────────────────────────────────────────────────────────────────────────
     """
     from connector_runtime.dispatch.desktop_device_tools import (
         endpoint_bridge_tools_for_config,
