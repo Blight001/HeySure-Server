@@ -7,6 +7,7 @@ import time
 from typing import Dict, List, Optional
 
 from fastapi import Depends, Header, HTTPException
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from api.database import get_session
@@ -64,21 +65,46 @@ async def get_chat_history(
     ai_config_id: Optional[int] = None,
     ai_kind: str = "assistant",
     after_id: Optional[int] = None,
+    before_id: Optional[int] = None,
+    limit: Optional[int] = None,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
 ):
+    """Fetch chat history. Three modes:
+
+    * ``after_id`` — incremental new messages produced during a run (ascending,
+      unbounded; the count is small).
+    * ``before_id`` / ``limit`` — cursor paging for "load older on scroll up":
+      returns the newest ``limit`` messages older than ``before_id``.
+    * neither + ``limit`` — the latest page (newest ``limit`` messages).
+    * neither + no ``limit`` — the full history (legacy/full-snapshot callers).
+
+    Paged results are always returned oldest→newest so the client can render /
+    prepend them directly.
+    """
     user = get_current_user(authorization, session)
     statement = select(ChatMessage).where(
         ChatMessage.user_id == user.id,
         ChatMessage.session_id == session_id,
         ChatMessage.ai_kind == ai_kind,
-    ).order_by(ChatMessage.created_at.asc())
+    )
     if ai_config_id is not None:
         statement = statement.where(ChatMessage.ai_config_id == ai_config_id)
+
+    # Incremental tail fetch: ascending, no windowing.
     if after_id is not None:
         statement = statement.where(ChatMessage.id > after_id)
-    results = session.exec(statement).all()
-    return results
+        return session.exec(statement.order_by(ChatMessage.created_at.asc())).all()
+
+    # Newest-first window (optionally older than a cursor), then flip to ascending.
+    if before_id is not None:
+        statement = statement.where(ChatMessage.id < before_id)
+    statement = statement.order_by(ChatMessage.id.desc())
+    if limit is not None and limit > 0:
+        statement = statement.limit(limit)
+    rows = session.exec(statement).all()
+    rows.reverse()
+    return rows
 
 @router.get("/sessions")
 async def get_sessions(
@@ -96,17 +122,21 @@ async def get_sessions(
         session_stmt = session_stmt.where(ChatSession.ai_config_id == ai_config_id)
     results = session.exec(session_stmt).all()
 
-    msg_stmt = select(ChatMessage).where(
+    # Sum tokens per session in the database (GROUP BY) instead of pulling every
+    # ChatMessage row (incl. large content/system_prompt text) into Python.
+    token_stmt = select(
+        ChatMessage.session_id,
+        func.coalesce(func.sum(ChatMessage.total_tokens), 0),
+    ).where(
         ChatMessage.user_id == user.id,
         ChatMessage.ai_kind == ai_kind,
-    )
+    ).group_by(ChatMessage.session_id)
     if ai_config_id is not None:
-        msg_stmt = msg_stmt.where(ChatMessage.ai_config_id == ai_config_id)
-    messages = session.exec(msg_stmt).all()
-    token_by_session: Dict[str, int] = {}
-    for msg in messages:
-        sid = msg.session_id or "default"
-        token_by_session[sid] = token_by_session.get(sid, 0) + int(msg.total_tokens or 0)
+        token_stmt = token_stmt.where(ChatMessage.ai_config_id == ai_config_id)
+    token_by_session: Dict[str, int] = {
+        (sid or "default"): int(total or 0)
+        for sid, total in session.exec(token_stmt).all()
+    }
 
     return [
         {
@@ -287,17 +317,21 @@ async def get_total_tokens(
     authorization: str = Header(None)
 ):
     user = get_current_user(authorization, session)
-    statement = select(ChatMessage).where(
+    # Aggregate in SQL rather than materializing every ChatMessage row.
+    agg_stmt = select(
+        func.coalesce(func.sum(ChatMessage.prompt_tokens), 0),
+        func.coalesce(func.sum(ChatMessage.completion_tokens), 0),
+        func.coalesce(func.sum(ChatMessage.total_tokens), 0),
+        func.count(ChatMessage.id),
+    ).where(
         ChatMessage.user_id == user.id,
         ChatMessage.ai_kind == ai_kind,
     )
     if ai_config_id is not None:
-        statement = statement.where(ChatMessage.ai_config_id == ai_config_id)
-    messages = session.exec(statement).all()
-
-    total_prompt_tokens = sum(msg.prompt_tokens or 0 for msg in messages)
-    total_completion_tokens = sum(msg.completion_tokens or 0 for msg in messages)
-    total_all_tokens = sum(msg.total_tokens or 0 for msg in messages)
+        agg_stmt = agg_stmt.where(ChatMessage.ai_config_id == ai_config_id)
+    total_prompt_tokens, total_completion_tokens, total_all_tokens, message_count = (
+        session.exec(agg_stmt).one()
+    )
     pending = _live_pending_tokens_for(
         session,
         user_id=user.id,
@@ -315,5 +349,5 @@ async def get_total_tokens(
         "live_prompt_tokens": int(pending["prompt_tokens"]),
         "live_completion_tokens": int(pending["completion_tokens"]),
         "live_total_tokens": int(pending["total_tokens"]),
-        "message_count": len(messages)
+        "message_count": int(message_count or 0)
     }

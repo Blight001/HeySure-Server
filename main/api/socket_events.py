@@ -20,6 +20,7 @@ from connector_runtime.dispatch.device_dispatch import (
     purge_stale_dispatches,
     resume_device_dispatch_queue,
 )
+from connector_runtime.dispatch import remote_control
 
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,42 @@ def register_agent_socket_events():
     async def flow_log(sid, data):
         await sio.emit('flow:monitor', data)
 
+    # --- Remote control (WebRTC signaling) -------------------------------
+    # Both the web console and the Android agent connect to this same
+    # Socket.IO server, so signaling is plain in-memory relay; the media and
+    # input ride a peer-to-peer WebRTC link negotiated through these events.
+    @sio.on('rc:start')
+    async def rc_start(sid, data):
+        await remote_control.start_session(sid, data if isinstance(data, dict) else {})
+
+    @sio.on('rc:offer')
+    async def rc_offer(sid, data):
+        await remote_control.relay(sid, 'rc:offer', data if isinstance(data, dict) else {})
+
+    @sio.on('rc:answer')
+    async def rc_answer(sid, data):
+        await remote_control.relay(sid, 'rc:answer', data if isinstance(data, dict) else {})
+
+    @sio.on('rc:ice')
+    async def rc_ice(sid, data):
+        await remote_control.relay(sid, 'rc:ice', data if isinstance(data, dict) else {})
+
+    @sio.on('rc:ready')
+    async def rc_ready(sid, data):
+        await remote_control.relay(sid, 'rc:ready', data if isinstance(data, dict) else {})
+
+    @sio.on('rc:error')
+    async def rc_error(sid, data):
+        await remote_control.relay(sid, 'rc:error', data if isinstance(data, dict) else {})
+
+    @sio.on('rc:stop')
+    async def rc_stop(sid, data):
+        await remote_control.relay(sid, 'rc:stop', data if isinstance(data, dict) else {})
+
+    @sio.on('rc:stopped')
+    async def rc_stopped(sid, data):
+        await remote_control.relay(sid, 'rc:stopped', data if isinstance(data, dict) else {})
+
     @sio.on('task:progress')
     async def task_progress(sid, data):
         await handle_task_progress(data if isinstance(data, dict) else {})
@@ -293,6 +330,13 @@ def register_agent_socket_events():
 
     @sio.on('disconnect')
     async def disconnect(sid):
+        # Tear down any remote-control session this socket was part of (the
+        # controller browser tab or the device). Runs for every sid, not only
+        # registered agents, because the web controller is not in ``agents``.
+        try:
+            await remote_control.handle_disconnect(sid)
+        except Exception:
+            logger.exception('Failed to clean up remote-control session on disconnect: %s', sid)
         if sid in agents:
             device_id_for_presence = str(agents[sid].get('id') or '')
             owner_user_id = agents[sid].get('userId')
