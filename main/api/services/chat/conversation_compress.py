@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # text, so one runaway message cannot blow up the compression prompt.
 _MAX_MSG_CHARS = 4000
 
-_ROLE_LABELS = {"user": "用户", "assistant": "助手"}
+_ROLE_LABELS = {"user": "用户", "assistant": "助手", "system": "系统"}
 
 
 def _response_debug(resp: requests.Response, *, max_body: int = 1200) -> str:
@@ -124,19 +124,29 @@ def compress_session(
 
     # Load persisted user/assistant messages for this session, excluding ones
     # already folded into a previous summary. Mirrors the runtime history filter.
+    # ``phase_summary`` system rows are included too: they are the per-phase
+    # progress anchors, so the summary must carry which phases already finished
+    # (otherwise a compressed run loses the plan thread and re-plans from phase 1).
     stmt = select(ChatMessage).where(
         ChatMessage.user_id == user_id,
         ChatMessage.session_id == session_id,
         ChatMessage.ai_kind == ai_kind,
-        ChatMessage.role.in_(("user", "assistant")),
+        ChatMessage.role.in_(("user", "assistant", "system")),
     ).order_by(ChatMessage.created_at.asc())
     if ai_config_id is not None:
         stmt = stmt.where(ChatMessage.ai_config_id == ai_config_id)
 
-    rows: List[ChatMessage] = [
-        m for m in session.exec(stmt).all()
-        if "compressed_away" not in str(getattr(m, "tags", "") or "")
-    ]
+    def _included(m: ChatMessage) -> bool:
+        tags = str(getattr(m, "tags", "") or "")
+        if "compressed_away" in tags:
+            return False
+        if m.role == "system":
+            # Only the compact phase-progress anchors; other system bubbles
+            # (e.g. mcp_tool_call) stay out of the summarization input.
+            return "phase_summary" in tags
+        return True
+
+    rows: List[ChatMessage] = [m for m in session.exec(stmt).all() if _included(m)]
 
     if len(rows) < keep_recent + 2:
         # Not enough history to be worth compressing.

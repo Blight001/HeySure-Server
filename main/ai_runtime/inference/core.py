@@ -1398,6 +1398,13 @@ def _run_worker_impl(
                 elif m.role == "system":
                     if tags.startswith("ai_message_inbound:") or tags.startswith("task_completion_notice:"):
                         convo.append({"role": "user", "content": m.content})
+                    elif "phase_summary" in tags:
+                        # The per-phase progress anchor: it carries which phase
+                        # finished + its status line. The phase's verbose turns are
+                        # compressed_away (intended), but this compact summary must
+                        # survive a run rebuild so the model knows phases already
+                        # done and does not re-plan from phase 1.
+                        convo.append({"role": "system", "content": m.content})
             if model_user_content:
                 for i in range(len(convo) - 1, -1, -1):
                     if convo[i].get("role") == "user":
@@ -1461,7 +1468,12 @@ def _run_worker_impl(
             # A directive to inject *after* the current tool result is appended
             # (so a native tool_call keeps its matching tool response adjacent).
             pending_flow_directive = ""
-            if is_task_runtime and ai_config_id is not None:
+            # Load any active plan for this (ai, session). A plan can exist in a
+            # normal conversation too — not only a task runtime — so the lookup
+            # is unconditional. Without it, a rebuilt run (fresh worker call or
+            # post-compression) loses the plan thread and the model re-plans from
+            # phase 1 (which abandons the live plan via plan.create).
+            if ai_config_id is not None:
                 try:
                     plan_state = plan_service.get_active_plan(
                         bg, user_id, int(ai_config_id), session_id
@@ -1470,24 +1482,40 @@ def _run_worker_impl(
                 except Exception:
                     logger.exception("plan state load failed")
                     plan_state = None
-                # Tell the AI where it stands if plan mode is already active.
+
+            def _inject_flow_directive(target_convo: List[Dict]) -> None:
+                """Re-anchor the model on the active plan: append the current
+                phase directive (or the finish notice when every phase is done).
+
+                Used both when (re)building a run and right after a context
+                compaction, so the model always knows the current phase and never
+                falls back to re-planning from phase 1. No-op without an active
+                plan; the optional plan-required nudge stays task-runtime only."""
                 if plan_state is None:
-                    convo.append({"role": "user", "content": phase_context.render_plan_required_notice()})
-                elif flow_awaiting_finish:
-                    convo.append({
+                    return
+                if flow_awaiting_finish:
+                    target_convo.append({
                         "role": "user",
                         "content": phase_context.render_finish_required_notice(plan_state.goal),
                     })
-                else:
-                    _prog = plan_service.plan_progress(bg, plan_state)
-                    _cur = next(
-                        (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
-                        None,
-                    )
-                    convo.append({
-                        "role": "user",
-                        "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
-                    })
+                    return
+                _prog = plan_service.plan_progress(bg, plan_state)
+                _cur = next(
+                    (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
+                    None,
+                )
+                target_convo.append({
+                    "role": "user",
+                    "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
+                })
+
+            # Tell the AI where it stands. With an active plan, re-anchor on the
+            # current phase. Without one, only a task runtime is nudged to plan
+            # (plan mode stays optional/AI-driven in normal conversations).
+            if plan_state is not None:
+                _inject_flow_directive(convo)
+            elif is_task_runtime and ai_config_id is not None:
+                convo.append({"role": "user", "content": phase_context.render_plan_required_notice()})
 
             def _flow_allowed_tool(tool_name: str) -> bool:
                 """Hard gate: which tools the planned flow permits right now."""
@@ -1959,7 +1987,12 @@ def _run_worker_impl(
                             # immediately re-hit on the next loop step.
                             _set_run_live_usage(run_id, 0, 0, 0)
                             if plan_state is not None:
+                                # Compression rebuilt convo as system+summary+recent
+                                # and dropped the live phase directive. Re-anchor the
+                                # model on the current phase so it does not re-plan
+                                # from phase 1 after the context shrinks.
                                 phase_start_convo_index = len(convo)
+                                _inject_flow_directive(convo)
                                 phase_started_at = time.time()
                                 phase_mcp_statuses = []
                             continue
