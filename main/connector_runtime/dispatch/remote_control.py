@@ -155,7 +155,7 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
     if not _agent_supports_rc(android_sid):
         await sio.emit(
             "rc:error",
-            {"code": "unsupported", "message": "该设备版本不支持远程控制（请升级安卓端）"},
+            {"code": "unsupported", "message": "该设备版本不支持远程控制（请更新端侧客户端后重连）"},
             to=controller_sid,
         )
         return

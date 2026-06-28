@@ -220,7 +220,13 @@ def effective_allowed_for_tier(user, tier: str, all_tool_names: Iterable[str]) -
     ceiling = role_ceiling_tools(tier, names)
     policy = parse_role_permissions(user)
     if tier in policy:
-        return {tool for tool in policy[tier] if tool in ceiling}
+        allowed = {tool for tool in policy[tier] if tool in ceiling}
+        # 图书馆治理类工具与自省工具不受「按档位的工具箱白名单」约束：它们由
+        # 图书馆绑定门槛 + enforce_min_role 管控，且角色权限编辑器（已迁入工具箱）
+        # 只展示/收敛工具箱工具，看不到这些。始终放行，避免运行时天花板把它们
+        # 误挡掉——与 clamp_tools_json 的同类豁免保持一致。
+        allowed |= (LIBRARY_BOUND_TOOLS | {"mcp.describe_tool"}) & ceiling
+        return allowed
     return ceiling
 
 

@@ -4,10 +4,11 @@ delete chat sessions, and report per-session total token usage."""
 IS_ROUTER_ENTRY = False
 
 import time
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from fastapi import Depends, Header, HTTPException
 from sqlalchemy import func
+from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
 from api.database import get_session
@@ -59,7 +60,35 @@ async def get_system_prompt_preview(
     )
     return {"prompt": prompt, "prompt_source": "runtime_preview"}
 
-@router.get("/history", response_model=List[ChatMessage])
+# Columns shipped to the chat UI per history message. Deliberately excludes the
+# heavy ``system_prompt`` column (the full MCP catalog, tens of KB per assistant
+# message): the conversation render never needs it, and the prompt panel reads the
+# last-run prompt from the dedicated ``/system-prompt-preview`` endpoint instead.
+# Keeping it out of every history row is the single biggest history-load win.
+def _history_row_to_dict(msg: ChatMessage) -> dict:
+    return {
+        "id": msg.id,
+        "user_id": msg.user_id,
+        "ai_config_id": msg.ai_config_id,
+        "ai_kind": msg.ai_kind,
+        "session_id": msg.session_id,
+        "session_name": msg.session_name,
+        "role": msg.role,
+        "content": msg.content,
+        "think": msg.think,
+        "tags": msg.tags,
+        "model": msg.model,
+        "prompt_tokens": msg.prompt_tokens,
+        "completion_tokens": msg.completion_tokens,
+        "total_tokens": msg.total_tokens,
+        "cache_read_tokens": msg.cache_read_tokens,
+        "finish_reason": msg.finish_reason,
+        "latency": msg.latency,
+        "created_at": msg.created_at,
+    }
+
+
+@router.get("/history")
 async def get_chat_history(
     session_id: Optional[str] = "default",
     ai_config_id: Optional[int] = None,
@@ -83,7 +112,9 @@ async def get_chat_history(
     prepend them directly.
     """
     user = get_current_user(authorization, session)
-    statement = select(ChatMessage).where(
+    # ``defer`` keeps the large ``system_prompt`` column from ever being read off
+    # disk for these rows; ``_history_row_to_dict`` then drops it from the payload.
+    statement = select(ChatMessage).options(defer(ChatMessage.system_prompt)).where(
         ChatMessage.user_id == user.id,
         ChatMessage.session_id == session_id,
         ChatMessage.ai_kind == ai_kind,
@@ -94,7 +125,8 @@ async def get_chat_history(
     # Incremental tail fetch: ascending, no windowing.
     if after_id is not None:
         statement = statement.where(ChatMessage.id > after_id)
-        return session.exec(statement.order_by(ChatMessage.created_at.asc())).all()
+        rows = session.exec(statement.order_by(ChatMessage.created_at.asc())).all()
+        return [_history_row_to_dict(row) for row in rows]
 
     # Newest-first window (optionally older than a cursor), then flip to ascending.
     if before_id is not None:
@@ -104,7 +136,7 @@ async def get_chat_history(
         statement = statement.limit(limit)
     rows = session.exec(statement).all()
     rows.reverse()
-    return rows
+    return [_history_row_to_dict(row) for row in rows]
 
 @router.get("/sessions")
 async def get_sessions(

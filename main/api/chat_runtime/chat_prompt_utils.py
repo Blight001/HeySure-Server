@@ -892,6 +892,51 @@ def _emit_run_live_update(run_id: str) -> None:
     except RuntimeError:
         asyncio.run(_do_emit())
 
+def _emit_run_done(
+    *,
+    run_id: str,
+    user_id: Optional[int],
+    status: str,
+    error_message: Optional[str] = None,
+    session_id: Optional[str] = None,
+    ai_config_id: Optional[int] = None,
+    ai_kind: Optional[str] = None,
+) -> None:
+    """Push a terminal ``chat:run_done`` event to the run owner's room.
+
+    The streaming ``chat:run_live`` channel only carries the live ``phase``
+    (generating / waiting_mcp); the real run status (completed / error /
+    stopped) lives on the ChatRun row. This terminal event lets the web client
+    stop relying on history polling to learn a run finished. Emit failures are
+    logged only — they must never break status persistence (mirrors
+    ``_emit_run_live_update``). Workers route this through the gateway relay via
+    the ``_RemoteSio`` proxy automatically.
+    """
+    run_id = str(run_id or "").strip()
+    if not run_id or user_id is None:
+        return
+    payload = {
+        "run_id": run_id,
+        "user_id": user_id,
+        "status": str(status or ""),
+        "error_message": error_message,
+        "session_id": session_id,
+        "ai_config_id": ai_config_id,
+        "ai_kind": ai_kind,
+    }
+
+    async def _do_emit():
+        try:
+            await sio.emit("chat:run_done", payload, room=f"user_{int(user_id)}")
+        except Exception:
+            logger.exception(f"chat_run_done_emit {run_id} failed")
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_do_emit())
+    except RuntimeError:
+        asyncio.run(_do_emit())
+
 def _split_tags(raw: Optional[str]) -> Tuple[str, str]:
     text = str(raw or "")
     idx = text.find(STATE_PREFIX)

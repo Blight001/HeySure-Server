@@ -23,6 +23,7 @@ from .chat_prompt_utils import (
     _append_prompt_section,
     _build_dynamic_mcp_explanation,
     _clear_run_live_text,
+    _emit_run_done,
     _filter_tools_for_current_bindings,
     _render_mcp_tool_catalog,
     _strip_prompt_section,
@@ -404,8 +405,21 @@ def _run_set_status(run_id: str, status: str, error_message: Optional[str] = Non
             row.finished_at = time.time()
         bg.add(row)
         bg.commit()
+        # Snapshot the fields the terminal event needs while the row is loaded;
+        # the Session closes when the with-block exits.
+        done_payload = {
+            "run_id": run_id,
+            "user_id": row.user_id,
+            "status": row.status,
+            "error_message": row.error_message,
+            "session_id": row.session_id,
+            "ai_config_id": row.ai_config_id,
+            "ai_kind": row.ai_kind,
+        } if finished else None
     if finished:
         _clear_run_live_text(run_id)
+        if done_payload:
+            _emit_run_done(**done_payload)
 
 def _run_should_stop(run_id: str) -> bool:
     with Session(engine) as bg:
