@@ -30,7 +30,7 @@ from .ai_base import (
 
 
 @router.get("/configs/{config_id}/plan")
-async def get_ai_task_plan(
+def get_ai_task_plan(
     config_id: int,
     session_id: str = "",
     session: Session = Depends(get_session),
@@ -63,7 +63,7 @@ async def get_ai_task_plan(
 
 
 @router.post("/configs/{config_id}/task-trigger")
-async def trigger_ai_task(
+def trigger_ai_task(
     config_id: int,
     body: dict,
     session: Session = Depends(get_session),
@@ -124,7 +124,7 @@ async def trigger_ai_task(
     }
 
 @router.get("/configs/{config_id}/task-list")
-async def get_ai_task_list(
+def get_ai_task_list(
     config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -187,7 +187,7 @@ async def get_ai_task_list(
     }
 
 @router.get("/configs/{config_id}/task-jobs")
-async def get_ai_task_jobs(
+def get_ai_task_jobs(
     config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -287,7 +287,7 @@ async def get_ai_task_jobs(
     return {"ai_config_id": config_id, "jobs": out}
 
 @router.patch("/configs/{config_id}/task-jobs/{job_id}")
-async def update_ai_task_job(
+def update_ai_task_job(
     config_id: int,
     job_id: str,
     body: dict,
@@ -387,7 +387,7 @@ async def update_ai_task_job(
     }
 
 @router.post("/configs/{config_id}/task-jobs/{job_id}/stop")
-async def stop_ai_task_job(
+def stop_ai_task_job(
     config_id: int,
     job_id: str,
     session: Session = Depends(get_session),
@@ -470,7 +470,7 @@ async def stop_ai_task_job(
     }
 
 @router.post("/configs/{config_id}/task-jobs/{job_id}/pause")
-async def pause_ai_task_job(
+def pause_ai_task_job(
     config_id: int,
     job_id: str,
     session: Session = Depends(get_session),
@@ -502,7 +502,7 @@ async def pause_ai_task_job(
     return {"success": True, "job_id": job.job_id, "status": job.status, "run_id": run_row.run_id if run_row else None}
 
 @router.post("/configs/{config_id}/task-jobs/{job_id}/resume")
-async def resume_ai_task_job(
+def resume_ai_task_job(
     config_id: int,
     job_id: str,
     session: Session = Depends(get_session),
@@ -534,7 +534,7 @@ async def resume_ai_task_job(
     return {"success": True, "job_id": job.job_id, "status": job.status}
 
 @router.delete("/configs/{config_id}/task-jobs/{job_id}")
-async def delete_ai_task_job(
+def delete_ai_task_job(
     config_id: int,
     job_id: str,
     session: Session = Depends(get_session),

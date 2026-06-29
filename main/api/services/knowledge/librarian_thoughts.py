@@ -37,7 +37,6 @@ from .librarian_core import (
     _entry_dict_from_file_entry,
 )
 from ...integrations import clawhub
-from .knowledge_vector import sync_topic_embedding_for_entry as _sync_topic_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -339,11 +338,6 @@ def _sync_skill_to_knowledge_entry(
         "created_at": installed_at,
         "updated_at": now,
     }
-
-    try:
-        _sync_topic_embedding(user_id=user_id, row=entry_dict, ai_config_id=ai_config_id, force=True)
-    except Exception as exc:
-        logger.info("skill file-embedding sync failed slug=%s: %s", slug, exc)
 
     return {
         "installed": True,

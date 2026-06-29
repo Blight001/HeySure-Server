@@ -391,6 +391,13 @@ def _filter_tools_for_current_bindings(
     """Filter out tools that the AI cannot actually use because of missing bindings.
 
     - LIBRARY_BOUND_TOOLS require library (workshop) binding.
+    - Toolbox-gated tools require toolbox binding. ``is_toolbox_gated_tool`` MUST
+      only return True for SERVER-REGISTRY tools — endpoint (device) and workshop
+      tools are governed by their own gate (per-agent MCP scope / workshop
+      binding), so they must pass through here untouched. A past regression where
+      ``is_toolbox_gated_tool`` also matched endpoint tools stripped every online
+      device tool from this allow-list whenever the AI was not bound to the
+      toolbox (locked down by ``test_prompt_groups_db_backed.py``).
     - Always preserve introspection tools (mcp.describe_tool etc.) so the model
       can still discover tools even before binding.
     This keeps the catalog honest: only show what can actually be called.
@@ -816,7 +823,9 @@ def _set_run_live_phase(run_id: str, phase: str, current_tool: str = ""):
             "updated_at": time.time(),
         }
         _RUN_LIVE_META[run_id] = meta
-    _emit_run_live_update(run_id)
+    # Phase/tool transitions are rare but UI-critical — force past the throttle so
+    # the MCP call shows the moment execution starts, not after the next text push.
+    _emit_run_live_update(run_id, force=True)
 
 def _set_run_live_usage(
     run_id: str,
@@ -851,13 +860,18 @@ def _set_run_live_meta(run_id: str, **meta: object) -> None:
         current.update({k: v for k, v in meta.items() if v is not None})
         _RUN_LIVE_META[run_id] = current
 
-def _emit_run_live_update(run_id: str) -> None:
+def _emit_run_live_update(run_id: str, force: bool = False) -> None:
+    # ``force`` bypasses the 80ms throttle for low-frequency but UI-critical
+    # state changes (e.g. entering ``waiting_mcp`` with a tool name). Without it,
+    # a phase/tool transition emitted right after a text delta gets swallowed by
+    # the throttle, so the tool-call bubble only surfaces on the NEXT text push —
+    # which is why MCP calls appeared to lag until the following reply text.
     with _RUN_STATE_LOCK:
         live = dict(_RUN_LIVE_STATE.get(run_id) or {})
         meta = dict(_RUN_LIVE_META.get(run_id) or {})
         last_emit_at = float(meta.get("last_emit_at") or 0.0)
         now = time.time()
-        if now - last_emit_at < 0.08:
+        if not force and now - last_emit_at < 0.08:
             meta["last_emit_at"] = last_emit_at
             _RUN_LIVE_META[run_id] = meta
             return

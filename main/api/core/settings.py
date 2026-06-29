@@ -72,6 +72,21 @@ class Settings(BaseSettings):
         "separate deploy step / init-container instead); the app then only checks "
         "that the schema is present.",
     )
+    db_pool_size: int = Field(
+        default=10,
+        alias="HEYSURE_DB_POOL_SIZE",
+        description="Base size of the SQLAlchemy connection pool per process. "
+        "Gateway runs sync DB routes in a threadpool, so concurrent requests each "
+        "need a connection; this must be large enough to avoid checkout waits. "
+        "Total per process can reach db_pool_size + db_max_overflow; keep "
+        "(processes × that sum) under the Postgres ``max_connections`` limit.",
+    )
+    db_max_overflow: int = Field(
+        default=20,
+        alias="HEYSURE_DB_MAX_OVERFLOW",
+        description="Extra connections opened on demand above db_pool_size when the "
+        "pool is saturated (closed again when idle).",
+    )
 
     # ---- Service mesh --------------------------------------------------------
 
@@ -103,39 +118,6 @@ class Settings(BaseSettings):
     connector_runtime_port: int = Field(default=3002)
     mcp_runtime_port: int = Field(default=3001)
     ai_runtime_port: int = Field(default=3003)
-
-    # ---- Knowledge embedding -------------------------------------------------
-
-    embedding_model: str = Field(
-        default="text-embedding-3-small",
-        alias="HEYSURE_EMBEDDING_MODEL",
-        description="Default embedding model used by knowledge vector indexing/search.",
-    )
-    embedding_dimensions: int = Field(
-        default=1536,
-        alias="HEYSURE_EMBEDDING_DIMENSIONS",
-        ge=1,
-        le=8192,
-        description="Embedding vector width used by the pgvector index.",
-    )
-    embedding_api_key: str = Field(
-        default="",
-        alias="HEYSURE_EMBEDDING_API_KEY",
-        description=(
-            "Dedicated API key for embedding requests. When set, overrides the "
-            "chat-model credentials so embeddings can use a different provider "
-            "(e.g. OpenAI) while chat uses Grok/xAI or another model."
-        ),
-    )
-    embedding_base_url: str = Field(
-        default="",
-        alias="HEYSURE_EMBEDDING_BASE_URL",
-        description=(
-            "Dedicated base URL for embedding requests (e.g. https://api.openai.com/v1). "
-            "When set together with HEYSURE_EMBEDDING_API_KEY, fully overrides the "
-            "chat-model base URL for all knowledge indexing and search operations."
-        ),
-    )
 
     # ---- Chat / AI runtime ---------------------------------------------------
 

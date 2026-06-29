@@ -83,7 +83,7 @@ def _load_connector_runtime_bot_statuses() -> Tuple[Dict[str, Dict[int, Dict[str
 
 
 @router.post("/configs/{config_id}/clear-tokens")
-async def clear_ai_token_usage(
+def clear_ai_token_usage(
     config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -183,7 +183,7 @@ async def delete_ai_config(
     return {"success": True}
 
 @router.get("/runtime-status")
-async def get_runtime_status(
+def get_runtime_status(
     ai_config_id: Optional[int] = None,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -195,7 +195,7 @@ async def get_runtime_status(
     return session.exec(statement).all()
 
 @router.get("/token-snapshots")
-async def get_token_snapshots(
+def get_token_snapshots(
     ai_kind: str = "assistant",
     ai_config_id: Optional[int] = None,
     session: Session = Depends(get_session),
@@ -569,7 +569,7 @@ async def list_ai_cards(
     return cards
 
 @router.post("/sessions")
-async def create_session(
+def create_session(
     body: ChatSessionCreate,
     session: Session = Depends(get_session),
     authorization: str = Header(None),

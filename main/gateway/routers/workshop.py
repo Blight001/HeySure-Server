@@ -61,7 +61,7 @@ def _config_name(session: Session, user_id: int, ai_config_id: Optional[int]) ->
 
 
 @router.get("/bindings")
-async def list_workshop_bindings(
+def list_workshop_bindings(
     ai_config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -113,7 +113,7 @@ async def list_workshop_bindings(
 
 
 @router.post("/bindings")
-async def update_workshop_binding(
+def update_workshop_binding(
     payload: WorkshopBindRequest,
     session: Session = Depends(get_session),
     authorization: str = Header(None),

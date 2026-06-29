@@ -89,7 +89,7 @@ def _apply_member_assignment(session: Session, user_id: int, project: EvolutionP
 
 
 @router.get("")
-async def list_projects(
+def list_projects(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
@@ -117,7 +117,7 @@ async def list_projects(
 
 
 @router.post("")
-async def create_project(
+def create_project(
     body: EvolutionProjectCreate,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -156,7 +156,7 @@ async def create_project(
 
 
 @router.put("/{project_id}")
-async def update_project(
+def update_project(
     project_id: str,
     body: EvolutionProjectUpdate,
     session: Session = Depends(get_session),
@@ -227,7 +227,7 @@ async def update_project(
 
 
 @router.delete("/{project_id}")
-async def delete_project(
+def delete_project(
     project_id: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),

@@ -1,8 +1,7 @@
 """Read-only MCP tool for knowledge recall.
 
-Primary: pure keyword scan over files in the user's KnowledgeBase (no DB dependency).
-When embedding credentials are configured, it can also leverage file-based
-embeddings stored under KnowledgeBase/embeddings/*.json (per-account, no central DB table).
+Pure keyword scan over files in the user's KnowledgeBase (topics/ + skills).
+No embeddings / vector store — retrieval is fully file-based and dependency-free.
 """
 
 from typing import Any, Dict, Optional
@@ -10,7 +9,6 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 
 from api.services.knowledge import kb_store
-from api.services.knowledge import knowledge_vector
 
 
 def _knowledge_search(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int] = None):
@@ -22,32 +20,7 @@ def _knowledge_search(user_id: int, args: Dict[str, Any], ai_config_id: Optional
     except Exception:
         k = 5
     include_body = bool((args or {}).get("include_body"))
-    scope = (args or {}).get("scope")
 
-    # Try file-based semantic first (vectors live in the user's KnowledgeBase/embeddings/)
-    semantic_items: list = []
-    try:
-        if knowledge_vector and hasattr(knowledge_vector, "semantic_search_knowledge"):
-            semantic_items = knowledge_vector.semantic_search_knowledge(
-                user_id=int(user_id),
-                query=query,
-                k=k,
-                scope=scope,
-                ai_config_id=ai_config_id,
-                include_body=include_body,
-            ) or []
-    except Exception:
-        semantic_items = []
-
-    if semantic_items:
-        return {
-            "query": query,
-            "count": len(semantic_items),
-            "items": semantic_items,
-            "mode": "semantic+file",
-        }
-
-    # Fallback to reliable pure keyword file scan (no embedding dependency)
     items = kb_store.keyword_search_knowledge(user_id=int(user_id), query=query, k=k, include_body=include_body)
     return {
         "query": query,
@@ -61,7 +34,7 @@ def knowledge_search_schema() -> Dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "查询文本。优先尝试文件-based semantic（如果配置了 embedding 并有向量文件），否则回退到纯关键词文件扫描。"},
+            "query": {"type": "string", "description": "查询文本。基于关键词对 KnowledgeBase 文件（topics/ 与技能卡）做文件扫描匹配。"},
             "k": {"type": "integer", "description": "返回结果数量，默认 5。"},
             "scope": {
                 "type": "string",
@@ -75,4 +48,3 @@ def knowledge_search_schema() -> Dict[str, Any]:
 
 
 KNOWLEDGE_SEARCH_SCHEMA: Dict[str, Any] = knowledge_search_schema()
-

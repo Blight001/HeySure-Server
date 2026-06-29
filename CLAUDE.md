@@ -98,7 +98,7 @@ server/
 | `DevicePresence` | `models/device_presence.py` | 端侧设备在线状态快照 |
 | `DeviceDynamicTool` | `models/device_dynamic_tool.py` | 设备上报工具定义 |
 | `DevicePermissionPolicy` | `models/device_permission_policy.py` | 设备 MCP 工具权限策略 |
-| `Knowledge` / `KnowledgeVector` | `models/knowledge.py` | 知识条目与向量索引 |
+| `Memory` / `KnowledgeEntry` | `models/knowledge.py` | 记忆与知识条目（检索为纯文件关键词，无向量索引） |
 | `McpTool` / `McpPermission` | `models/mcp*.py` | 工具定义与用户级权限 |
 | `McpCallStat` | `models/mcp_call_stat.py` | MCP 调用统计 |
 | `BotSessionRoute` | `models/bot_session_route.py` | 机器人会话路由 |
@@ -120,8 +120,7 @@ server/
 | `chat/chat_media.py` | 聊天媒体文件处理 |
 | `chat/conversation_compress.py` | 对话上下文压缩 |
 | **`knowledge/`** | |
-| `knowledge/kb_store.py` | 知识库向量存储（pgvector，embedding via litellm） |
-| `knowledge/knowledge_vector.py` | 知识条目向量同步 |
+| `knowledge/kb_store.py` | 知识库文件存储 + 纯关键词检索（`keyword_search_knowledge`，无向量依赖） |
 | `knowledge/knowledge_review_trigger.py` | 知识审核触发器 |
 | `knowledge/librarian_service.py` | 知识工坊公共接口（propose/archive/consult/list_topics/brief/read） |
 | `knowledge/librarian_core.py` | 图书馆共享底座（路径/会话/工具） |
@@ -206,7 +205,7 @@ server/
 | 工具调用失败 | `mcp_runtime/mcp/core.py` 日志；检查 3001 | 工具未注册 / 权限未开放 / 工具 handler 抛异常 |
 | Socket.IO 端侧断连 | `connector_runtime/app.py` + `api/sio.py` | Connector (3002) 未启动 / 网络问题 |
 | 任务不执行 | `services/tasks/task_system.py` 调度循环 | Gateway lifespan 未完成（调度器未启动） |
-| 知识搜索为空 | `services/knowledge/kb_store.py` | 向量未写入 / embedding 维度不匹配 |
+| 知识搜索为空 | `services/knowledge/kb_store.py` | 关键词未命中 / 文件未落在 topics/ 或技能目录 |
 | 设备工具权限错误 | `mcp_runtime/mcp/permissions.py` | `DevicePermissionPolicy` 未配置该工具 |
 | 设备在线状态异常 | `api/devices/presence.py` | `DevicePresence` 表记录异常 |
 | MCP 工具测试失败 | `services/mcp/mcp_tool_runner.py` | 模型不支持 function calling / 设备离线 |

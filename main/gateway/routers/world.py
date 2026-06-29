@@ -88,7 +88,7 @@ async def world_snapshot(
     except Exception:
         cards = []
     try:
-        connected = await list_connected_devices(session=session, authorization=authorization)
+        connected = list_connected_devices(session=session, authorization=authorization)
         agents = connected.get("agents", [])
     except Exception:
         agents = []
@@ -165,7 +165,7 @@ async def world_snapshot(
 
 
 @router.get("/actors/meta")
-async def list_actor_meta(
+def list_actor_meta(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
@@ -177,7 +177,7 @@ async def list_actor_meta(
 
 
 @router.put("/actors/{ai_config_id}/meta")
-async def update_actor_meta(
+def update_actor_meta(
     ai_config_id: int,
     body: ActorMetaUpdate,
     session: Session = Depends(get_session),

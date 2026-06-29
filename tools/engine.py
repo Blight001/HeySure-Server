@@ -56,9 +56,19 @@ def is_toolbox_gated_tool(tool_name: str) -> bool:
     """该工具是否属于「工具箱」（需绑定工具箱才能由 AI 调用）。
 
     仅服务端固定工具会经 ``MCPRegistry.call``；其中非图书馆绑定、非自省的即工具箱
-    工具。端侧/工坊工具走各自分发，不经此判定。"""
+    工具。端侧/工坊工具是**动态注册**（不在服务端注册表内），走各自分发与权限
+    （per-agent scope / 工坊绑定），不受工具箱绑定门禁——因此必须按"是否为注册表
+    里的服务端固定工具"判定，否则未绑工具箱时会把在线设备/工坊工具误删出 prompt。"""
     name = str(tool_name or "").strip()
-    return bool(name) and name not in _library_bound_tools() and name not in TOOLBOX_GATE_EXEMPT
+    if not name or name in _library_bound_tools() or name in TOOLBOX_GATE_EXEMPT:
+        return False
+    try:
+        from mcp_runtime.mcp import registry
+
+        return any(str(t.get("name") or "").strip() == name for t in registry.list_tools())
+    except Exception:
+        # 注册表不可用时 fail-open（不门禁），避免误删任何工具。
+        return False
 
 
 def toolbox_tool_names(all_tool_names: Iterable[str]) -> Set[str]:

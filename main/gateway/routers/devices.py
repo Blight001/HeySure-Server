@@ -140,7 +140,7 @@ def _scope_view(agent: dict, user_id: int) -> dict:
 
 
 @router.get("/connected")
-async def list_connected_devices(
+def list_connected_devices(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
@@ -237,7 +237,7 @@ async def bind_agent_ai(
 
 
 @router.get("/{device_id}/mcp-scope")
-async def get_agent_mcp_scope(
+def get_agent_mcp_scope(
     device_id: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),

@@ -76,7 +76,7 @@ def _build_run_status_payload(row: ChatRun, live: dict) -> dict:
 
 
 @router.post("/run/start")
-async def start_chat_run(
+def start_chat_run(
     req: dict,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
@@ -244,7 +244,7 @@ async def get_active_chat_run(
     }
 
 @router.post("/run/{run_id}/stop")
-async def stop_chat_run(
+def stop_chat_run(
     run_id: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -277,7 +277,7 @@ async def stop_chat_run(
     return {"success": True, "run_id": run_id, "status": row.status, "stop_requested": True}
 
 @router.post("/save", response_model=ChatMessage)
-async def save_chat_message(
+def save_chat_message(
     msg: ChatMessageCreate,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
@@ -317,7 +317,7 @@ async def save_chat_message(
     return db_msg
 
 @router.delete("/{msg_id}")
-async def delete_chat_message(
+def delete_chat_message(
     msg_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
@@ -335,7 +335,7 @@ async def delete_chat_message(
     return {"success": True}
 
 @router.post("/recall/{msg_id}")
-async def recall_chat_messages(
+def recall_chat_messages(
     msg_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
@@ -370,7 +370,7 @@ async def recall_chat_messages(
     return {"success": True, "deleted_count": deleted_count, "recall_content": start_msg.content}
 
 @router.delete("/clear-all")
-async def clear_all_messages(
+def clear_all_messages(
     ai_config_id: Optional[int] = None,
     ai_kind: str = "assistant",
     session: Session = Depends(get_session),
@@ -392,7 +392,7 @@ async def clear_all_messages(
     return {"success": True, "count": len(results)}
 
 @router.patch("/{msg_id}/tags")
-async def update_message_tags(
+def update_message_tags(
     msg_id: int,
     update: ChatMessageUpdate,
     session: Session = Depends(get_session),
@@ -410,7 +410,7 @@ async def update_message_tags(
 
 
 @router.get("/media/{media_id}/{token}")
-async def get_chat_message_media(
+def get_chat_message_media(
     media_id: int,
     token: str,
     session: Session = Depends(get_session),
@@ -426,7 +426,7 @@ async def get_chat_message_media(
     )
 
 @router.get("/files")
-async def list_files(
+def list_files(
     session: Session = Depends(get_session),
     authorization: str = Header(None)
 ):
@@ -457,7 +457,7 @@ async def get_tree(
     }
 
 @router.get("/git-diff")
-async def get_git_diff(
+def get_git_diff(
     session: Session = Depends(get_session),
     authorization: str = Header(None)
 ):
@@ -465,7 +465,7 @@ async def get_git_diff(
     raise HTTPException(status_code=410, detail="workspace.git_diff MCP has been removed")
 
 @router.post("/file-content")
-async def get_file_content(
+def get_file_content(
     req: dict,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
@@ -536,7 +536,7 @@ async def execute_action(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/stream")
-async def stream_chat(
+def stream_chat(
     req: dict,
     session: Session = Depends(get_session),
     authorization: str = Header(None)

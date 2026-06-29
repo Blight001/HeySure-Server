@@ -1,13 +1,27 @@
-"""Group MCP tools for front-prompt preview: workspace (server) vs per-device."""
+"""Group MCP tools for front-prompt preview: workspace (server) vs per-device.
+
+These groups are rendered into the SYSTEM PROMPT (via
+``chat_prompt_utils._build_dynamic_mcp_explanation``), so this module runs in
+BOTH the gateway (live ``/system-prompt-preview``) and the ai-runtime worker
+(the prompt the model actually receives).
+
+⚠️ HARD RULE — every device/tool source here MUST be PROCESS-INDEPENDENT
+(resolved from the DB: ``api.devices.presence`` + ``api.devices.mcp_permissions``).
+NEVER read the in-memory ``api.sio.agents`` socket registry or the
+``connector_runtime.dispatch.desktop_device_tools._iter_agents_for_config`` /
+``get_connected_*_agent`` resolvers built on it: that registry only exists in the
+gateway process, so doing so makes the ai-runtime prompt silently DROP every
+device group while the gateway preview still shows them (the exact bug this
+module was hardened against). See the INVARIANT note in
+``chat_runtime_helpers.build_runtime_system_prompt_and_tools`` and the regression
+test ``other/tests/test_prompt_groups_db_backed.py``.
+"""
 
 from typing import Any, Dict, List, Optional, Set
 
-from api.devices.live import connected_agent_rows_for_user
 from api.devices.mcp_permissions import get_scope
 from connector_runtime.dispatch.desktop_device_tools import (
     _config_selected_tool_names,
-    _iter_agents_for_config,
-    _parse_int,
     agent_endpoint_tools,
     device_type_of,
     is_endpoint_agent_tool,
@@ -32,25 +46,56 @@ def _agent_display_name(agent: Dict[str, Any]) -> str:
     return "桌面端"
 
 
+_PRESENCE_TYPE_FLAG = {
+    "browser": "isBrowserExtension",
+    "android": "isAndroid",
+    "desktop": "isWindowsDesktop",
+    "workshop": "isWorkshop",
+}
+
+
+def _presence_agent_dict(device_id: str, device_type: str, caps) -> Dict[str, Any]:
+    """Synthesize the agent-like record the group builder expects from a DB
+    presence row, so ``device_type_of`` / ``agent_endpoint_tools`` keep working
+    without the in-memory socket registry."""
+    agent: Dict[str, Any] = {
+        "id": device_id,
+        "platform": device_type,
+        "capabilities": sorted({str(c).strip() for c in (caps or []) if str(c).strip()}),
+    }
+    flag = _PRESENCE_TYPE_FLAG.get(str(device_type or "").strip())
+    if flag:
+        agent[flag] = True
+    return agent
+
+
 def _agents_for_prompt_groups(user_id: int, ai_config_id: Optional[int]) -> List[Dict[str, Any]]:
+    """Endpoint agents to render as device groups, built from the **DB presence
+    snapshot** (process-independent) — NOT the in-memory ``agents`` socket
+    registry, which only exists in the gateway process. Reading that registry here
+    made the ai-runtime-built prompt drop every device group (it owns no sockets)
+    while the gateway-built /system-prompt-preview still showed them. See the
+    INVARIANT note in chat_runtime_helpers.build_runtime_system_prompt_and_tools."""
+    from api.devices.presence import online_devices_for_config, online_tool_catalog_for_user
+
+    agents: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
     if ai_config_id is not None:
-        agents = [agent for agent in _iter_agents_for_config(ai_config_id, user_id) if isinstance(agent, dict)]
-        seen = {str(agent.get("id") or "").strip() for agent in agents if str(agent.get("id") or "").strip()}
-        for agent in connected_agent_rows_for_user(user_id):
-            if not isinstance(agent, dict) or device_type_of(agent) != "workshop":
+        for device_id, device_type, caps in online_devices_for_config(user_id, ai_config_id):
+            did = str(device_id or "").strip()
+            if not did or did in seen:
                 continue
-            bound_cfg = _parse_int(agent.get("aiConfigId") or agent.get("ai_config_id"))
-            if bound_cfg != ai_config_id:
-                continue
-            device_id = str(agent.get("id") or "").strip()
-            if device_id and device_id not in seen:
-                agents.append(agent)
-                seen.add(device_id)
+            seen.add(did)
+            agents.append(_presence_agent_dict(did, str(device_type or "").strip(), caps))
         return agents
-    return [
-        agent for agent in connected_agent_rows_for_user(user_id)
-        if isinstance(agent, dict) and device_type_of(agent) in {"desktop", "browser", "android", "workshop"}
-    ]
+    for entry in online_tool_catalog_for_user(user_id):
+        did = str(entry.get("device_id") or "").strip()
+        if not did or did in seen:
+            continue
+        seen.add(did)
+        caps = [str(t.get("name") or "").strip() for t in (entry.get("tools") or [])]
+        agents.append(_presence_agent_dict(did, str(entry.get("device_type") or "").strip(), caps))
+    return agents
 
 
 def _tool_names_for_agent(

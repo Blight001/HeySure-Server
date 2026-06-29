@@ -1391,10 +1391,14 @@ def _run_worker_impl(
                 if "compressed_away" in tags:
                     continue
                 if m.role in ("user", "assistant"):
-                    item = {"role": m.role, "content": m.content}
-                    if m.role == "assistant" and m.think:
-                        item["reasoning_content"] = m.think
-                    convo.append(item)
+                    # Deliberately do NOT replay prior assistant turns' reasoning
+                    # (``m.think``) back to the model. Re-sending historical
+                    # ``reasoning_content`` makes reasoning models restate earlier
+                    # thinking, so each new reply's deep-thinking accumulates all
+                    # the previous ones and grows unboundedly. Only the in-flight
+                    # tool-call turn keeps its reasoning (appended later in this
+                    # loop with its tool_calls).
+                    convo.append({"role": m.role, "content": m.content})
                 elif m.role == "system":
                     if tags.startswith("ai_message_inbound:") or tags.startswith("task_completion_notice:"):
                         convo.append({"role": "user", "content": m.content})

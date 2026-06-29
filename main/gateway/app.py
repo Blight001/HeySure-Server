@@ -76,25 +76,6 @@ async def lifespan(app: FastAPI):
         logger.exception("align_token_snapshots_with_history failed")
     stop_event = asyncio.Event()
 
-    def _periodic_kb_sync() -> None:
-        """为所有用户扫描 KnowledgeBase 目录，将新增/修改的 MD 文件自动索引。"""
-        from sqlmodel import Session, select
-        from api.database import engine
-        from api.models import User
-        from api.services.knowledge.kb_store import sync_topics_from_files, sync_skills_from_directory
-
-        with Session(engine) as sess:
-            user_ids = [uid for uid in sess.exec(select(User.id)).all() if uid is not None]
-        for uid in user_ids:
-            try:
-                sync_topics_from_files(int(uid))
-            except Exception:
-                logger.exception("periodic_kb_sync sync_topics user=%s", uid)
-            try:
-                sync_skills_from_directory(int(uid))
-            except Exception:
-                logger.exception("periodic_kb_sync sync_skills user=%s", uid)
-
     watchdog_counter = {"ticks": 0}
     # In split deployments the dedicated connector-runtime owns every bot's
     # long-connection client so api-gateway restarts don't drop upstream.
@@ -134,11 +115,6 @@ async def lifespan(app: FastAPI):
                     repo_update.maybe_auto_check()
                 except Exception:
                     logger.exception("repo-update auto check failed")
-            if watchdog_counter["ticks"] % 20 == 0:
-                try:
-                    _periodic_kb_sync()
-                except Exception:
-                    logger.exception("periodic_kb_sync failed")
             await asyncio.sleep(3)
 
     task = asyncio.create_task(periodic_scan())

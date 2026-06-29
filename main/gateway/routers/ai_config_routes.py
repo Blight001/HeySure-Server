@@ -94,7 +94,7 @@ def _resolve_config_model_fields(user, preset_id: Optional[str], fallback_model:
 
 
 @router.get("/configs")
-async def list_ai_configs(
+def list_ai_configs(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
@@ -108,7 +108,7 @@ async def list_ai_configs(
     return [_cfg_response(row, user.id) for row in rows]
 
 @router.post("/configs")
-async def create_ai_config(
+def create_ai_config(
     body: AssistantAIConfigCreate,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -258,7 +258,7 @@ def _apply_bot_configs_from_payload(
         bot.apply_config_payload(cfg, slice_payload)
 
 @router.put("/configs/{config_id}")
-async def update_ai_config(
+def update_ai_config(
     config_id: int,
     body: AssistantAIConfigUpdate,
     session: Session = Depends(get_session),
@@ -349,7 +349,7 @@ async def update_ai_config(
     return _cfg_response(cfg, user.id)
 
 @router.post("/configs/{config_id}/toggle-run")
-async def toggle_ai_run(
+def toggle_ai_run(
     config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -397,7 +397,7 @@ def _compute_root_manager(session: Session, user_id: int, cfg: AssistantAIConfig
 
 
 @router.post("/configs/{config_id}/bind-parent")
-async def bind_ai_parent(
+def bind_ai_parent(
     config_id: int,
     body: dict,
     session: Session = Depends(get_session),
@@ -444,7 +444,7 @@ async def bind_ai_parent(
 
 
 @router.post("/configs/{config_id}/unbind-parent")
-async def unbind_ai_parent(
+def unbind_ai_parent(
     config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -461,7 +461,7 @@ async def unbind_ai_parent(
 
 
 @router.get("/governance/tree")
-async def get_governance_tree(
+def get_governance_tree(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
@@ -495,7 +495,7 @@ async def get_governance_tree(
 
 
 @router.post("/configs/{config_id}/clone")
-async def clone_ai_config(
+def clone_ai_config(
     config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -554,7 +554,7 @@ async def clone_ai_config(
 
 
 @router.post("/configs/{config_id}/toggle-mcp")
-async def toggle_ai_mcp(
+def toggle_ai_mcp(
     config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),

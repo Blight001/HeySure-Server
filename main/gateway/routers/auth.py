@@ -180,7 +180,7 @@ class EmailLoginPayload(BaseModel):
 
 
 @router.get("/config")
-async def auth_config(session: Session = Depends(get_session)) -> dict:
+def auth_config(session: Session = Depends(get_session)) -> dict:
     """Public auth capabilities used by the login modal before sign-in."""
     email_enabled = auth_settings.smtp_configured(session)
     return {
@@ -221,7 +221,7 @@ def send_code(payload: SendCodePayload, session: Session = Depends(get_session))
 
 
 @router.post("/register", response_model=UserRead)
-async def register(
+def register(
     user_create: UserCreate,
     session: Session = Depends(get_session)
 ):
@@ -267,7 +267,7 @@ async def register(
     return _user_payload(db_user)
 
 @router.post("/login", response_model=Token)
-async def login(user_in: UserLogin, request: Request, session: Session = Depends(get_session)):
+def login(user_in: UserLogin, request: Request, session: Session = Depends(get_session)):
     statement = select(User).where(User.account == user_in.account)
     user = session.exec(statement).first()
     if not user or not verify_password(user_in.password, user.hashed_password):
@@ -295,7 +295,7 @@ async def login(user_in: UserLogin, request: Request, session: Session = Depends
 
 
 @router.post("/login-email", response_model=Token)
-async def login_with_email(payload: EmailLoginPayload, request: Request, session: Session = Depends(get_session)):
+def login_with_email(payload: EmailLoginPayload, request: Request, session: Session = Depends(get_session)):
     """邮箱验证码登录：验证一次性验证码后为绑定该邮箱的用户签发 JWT。"""
     email = auth_settings.normalize_email(payload.email)
     if not auth_settings.is_valid_email(email):
@@ -323,7 +323,7 @@ async def login_with_email(payload: EmailLoginPayload, request: Request, session
 
 
 @router.get("/agent-endpoint")
-async def agent_endpoint(
+def agent_endpoint(
     request: Request,
     authorization: Optional[str] = Header(None),
     session: Session = Depends(get_session),
@@ -335,7 +335,7 @@ async def agent_endpoint(
 
 
 @router.put("/profile", response_model=UserRead)
-async def update_profile(
+def update_profile(
     user_update: UserUpdate,
     authorization: Optional[str] = Header(None),
     session: Session = Depends(get_session)
@@ -423,7 +423,7 @@ async def update_profile(
     return _user_payload(user)
 
 @router.get("/me", response_model=UserRead)
-async def read_users_me(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
+def read_users_me(authorization: Optional[str] = Header(None), session: Session = Depends(get_session)):
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authentication token")
     return _user_payload(get_current_user(authorization, session))

@@ -154,7 +154,6 @@ from .librarian_clawhub import (
 )
 
 from ...sio import sio
-from .knowledge_vector import sync_topic_embedding_for_entry as _sync_topic_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -235,10 +234,6 @@ def propose(
     }
 
     _rebuild_index(user_id)
-    try:
-        _sync_topic_embedding(user_id=user_id, row=entry_dict, ai_config_id=librarian_id or None, force=True)
-    except Exception as exc:
-        logger.info("file-embedding sync after propose failed %s: %s", memory_id, exc)
     _emit_proposal_event(user_id, "librarian:proposal_resolved", entry_dict)
     return entry_dict
 
@@ -291,10 +286,6 @@ def archive(*, user_id: int, memory_id: str) -> Dict[str, Any]:
         "scope": "global",
         "summary": "",
     })
-    try:
-        _sync_topic_embedding(user_id=user_id, row=entry_dict, force=True)
-    except Exception as exc:
-        logger.info("file-embedding sync after archive failed %s: %s", memory_id, exc)
 
     try:
         _rebuild_index(user_id)

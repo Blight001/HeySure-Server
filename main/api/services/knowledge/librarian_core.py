@@ -30,7 +30,6 @@ from ...models import AssistantAIConfig, User
 from ...sio import sio
 from ...core.config import user_shared_knowledge_dir
 from . import kb_store
-from .knowledge_vector import sync_topic_embedding_for_entry as _sync_topic_embedding
 from mcp_runtime.mcp.core import safe_join
 import logging
 

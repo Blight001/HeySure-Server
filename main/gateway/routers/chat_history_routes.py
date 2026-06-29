@@ -21,7 +21,7 @@ from api.chat_runtime.chat_runtime_helpers import _live_pending_tokens_for, buil
 
 
 @router.get("/system-prompt-preview")
-async def get_system_prompt_preview(
+def get_system_prompt_preview(
     ai_config_id: Optional[int] = None,
     ai_kind: str = "assistant",
     session_id: Optional[str] = None,
@@ -139,7 +139,7 @@ async def get_chat_history(
     return [_history_row_to_dict(row) for row in rows]
 
 @router.get("/sessions")
-async def get_sessions(
+def get_sessions(
     ai_config_id: Optional[int] = None,
     ai_kind: str = "assistant",
     session: Session = Depends(get_session),
@@ -181,7 +181,7 @@ async def get_sessions(
     ]
 
 @router.post("/sessions")
-async def create_session(
+def create_session(
     req: dict,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -203,7 +203,7 @@ async def create_session(
     return {"id": sid, "name": session_name}
 
 @router.delete("/sessions/{session_id}")
-async def delete_session(
+def delete_session(
     session_id: str,
     ai_config_id: Optional[int] = None,
     ai_kind: str = "assistant",
@@ -241,7 +241,7 @@ async def delete_session(
     return {"success": True, "deleted_messages": len(rows)}
 
 @router.put("/sessions/{session_id}")
-async def rename_session(
+def rename_session(
     session_id: str,
     req: dict,
     ai_config_id: Optional[int] = None,
@@ -287,7 +287,7 @@ async def rename_session(
     return {"id": session_id, "name": session_name}
 
 @router.put("/sessions/{session_id}/forward-to-bot")
-async def set_session_forward_to_bot(
+def set_session_forward_to_bot(
     session_id: str,
     req: dict,
     ai_config_id: Optional[int] = None,

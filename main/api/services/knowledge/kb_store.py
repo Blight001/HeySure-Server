@@ -734,170 +734,6 @@ def _parse_triggers_field(raw: Any) -> str:
     return s
 
 
-def sync_topics_from_files(user_id: int, *, session: Optional[Session] = None) -> int:
-    """扫描 topics/*.md ，确保文件被索引（重建 index）并同步 embedding。
-
-    纯文件驱动，不再写入 KnowledgeEntry 表。
-    返回本次处理的条目数（文件数量）。
-    """
-    from .knowledge_vector import ensure_file_embedding as _ensure_file_embedding
-
-    processed = 0
-    try:
-        for path in _list_md(user_id, TOPICS_DIR):
-            raw = _read_text(path)
-            if raw is None:
-                continue
-            meta, body = _split_frontmatter(raw)
-
-            memory_id = str(meta.get("memory_id") or "").strip()
-            if not memory_id:
-                slug = os.path.splitext(os.path.basename(path))[0]
-                memory_id = f"topic:{slug}"
-
-            title = str(meta.get("title") or os.path.splitext(os.path.basename(path))[0])
-            triggers = _parse_triggers_field(meta.get("triggers") or "")
-            summary = str(meta.get("summary") or body[:200]).strip()
-
-            kb_root = _kb_root(user_id)
-            try:
-                rel_path = os.path.relpath(path, kb_root).replace("\\", "/")
-            except ValueError:
-                rel_path = TOPICS_DIR + "/" + os.path.basename(path)
-
-            try:
-                file_mtime = os.path.getmtime(path)
-            except OSError:
-                file_mtime = 0.0
-
-            now = time.time()
-            try:
-                _ensure_file_embedding(
-                    user_id=int(user_id),
-                    memory_id=memory_id,
-                    title=title,
-                    triggers=triggers if isinstance(triggers, str) else ",".join(triggers or []),
-                    summary=summary,
-                    body_text=body,
-                    file_path=rel_path,
-                    force=False,
-                )
-            except Exception as exc:
-                logger.info("sync_topics embedding %s: %s", memory_id, exc)
-
-            processed += 1
-    except Exception as exc:
-        logger.info("sync_topics_from_files user=%s failed: %s", user_id, exc)
-    return processed
-
-
-def sync_skills_from_directory(user_id: int) -> int:
-    """扫描 inheritance_thoughts/ 下所有 SKILL.md，确保 embedding 等就绪。
-
-    纯文件驱动（KnowledgeEntry 表已移除）。
-    返回本次处理的条目数。
-    """
-    from .librarian_service import (
-        _inheritance_thoughts_root,
-        _load_clawhub_state,
-        _skill_card_metadata,
-        _sync_skill_to_knowledge_entry,
-    )
-
-    thoughts_root = _inheritance_thoughts_root(user_id)
-    kb_root = _kb_root(user_id)
-
-    try:
-        state = _load_clawhub_state(user_id)
-        installed: Dict[str, Any] = state.get("installed") or {}
-    except Exception:
-        installed = {}
-    path_to_slug: Dict[str, str] = {}
-    for slug, meta in installed.items():
-        p = str(meta.get("path") or "").strip().rstrip("/\\")
-        if p:
-            path_to_slug[(p + "/SKILL.md").replace("\\", "/")] = slug
-
-    processed = 0
-    for dirpath, _dirs, files in os.walk(thoughts_root):
-        if "SKILL.md" not in files:
-            continue
-        skill_md_abs = os.path.join(dirpath, "SKILL.md")
-        try:
-            rel_path = os.path.relpath(skill_md_abs, kb_root).replace("\\", "/")
-        except ValueError:
-            continue
-
-        slug = path_to_slug.get(rel_path)
-        if slug:
-            meta_entry = installed.get(slug, {})
-            try:
-                card = _skill_card_metadata(dirpath, str(meta_entry.get("displayName") or slug))
-            except Exception:
-                card = {"name": str(meta_entry.get("displayName") or slug), "description": str(meta_entry.get("summary") or "")}
-            try:
-                _sync_skill_to_knowledge_entry(
-                    user_id=int(user_id),
-                    slug=slug,
-                    name=card["name"],
-                    summary=card["description"] or str(meta_entry.get("summary") or ""),
-                    skill_md_path=rel_path,
-                    installed_at=float(meta_entry.get("installed_at") or os.path.getmtime(skill_md_abs)),
-                    status="active",
-                )
-                processed += 1
-            except Exception as exc:
-                logger.info("sync_skills_from_directory slug=%s: %s", slug, exc)
-        else:
-            # unregistered manual
-            try:
-                rel_dir = os.path.relpath(dirpath, thoughts_root).replace("\\", "/")
-            except ValueError:
-                rel_dir = os.path.basename(dirpath)
-            auto_slug = f"fs:{rel_dir.replace('/', '-')}"
-            try:
-                card = _skill_card_metadata(dirpath, os.path.basename(dirpath))
-            except Exception:
-                card = {"name": os.path.basename(dirpath), "description": ""}
-            try:
-                _sync_skill_to_knowledge_entry(
-                    user_id=int(user_id),
-                    slug=auto_slug,
-                    name=card["name"],
-                    summary=card["description"],
-                    skill_md_path=rel_path,
-                    installed_at=os.path.getmtime(skill_md_abs),
-                    status="active",
-                )
-                processed += 1
-            except Exception as exc:
-                logger.info("sync_skills_from_directory unregistered rel=%s: %s", rel_path, exc)
-    return processed
-
-
-def backfill_skill_knowledge_entries(user_id: int) -> None:
-    """确保 inheritance_thoughts 里的已安装技能有 embedding 等（文件驱动）。"""
-    from .librarian_service import (
-        _load_clawhub_state, _sync_skill_to_knowledge_entry,
-    )
-    state = _load_clawhub_state(user_id)
-    installed = state.get("installed") or {}
-    for slug, meta in installed.items():
-        try:
-            p = str(meta.get("path") or "").strip()
-            skill_md_path = (p.rstrip("/\\") + "/SKILL.md") if p else ""
-            _sync_skill_to_knowledge_entry(
-                user_id=user_id,
-                slug=slug,
-                name=str(meta.get("displayName") or meta.get("slug") or slug),
-                summary=str(meta.get("summary") or ""),
-                skill_md_path=skill_md_path,
-                installed_at=float(meta.get("installed_at") or time.time()),
-            )
-        except Exception as exc:
-            logger.info("backfill skill entry failed slug=%s: %s", slug, exc)
-
-
 def ensure_user_kb(user_id: int, *, session: Optional[Session] = None) -> None:
     """Ensure the KB root exists and seed files (personas, system, mcp, memories, etc.).
 
@@ -919,18 +755,6 @@ def ensure_user_kb(user_id: int, *, session: Optional[Session] = None) -> None:
             # Memory：先导出缺失文件，再以文件为准回写 DB。
             seed_memories(user_id, session=sess)
             sync_memories_from_files(user_id, session=sess)
-            try:
-                sync_topics_from_files(user_id, session=sess)
-            except Exception as exc:
-                logger.info(f"kb_store ensure_user_kb sync_topics user={user_id} failed: {exc}")
-            try:
-                sync_skills_from_directory(user_id)
-            except Exception as exc:
-                logger.info(f"kb_store ensure_user_kb sync_skills user={user_id} failed: {exc}")
-            try:
-                backfill_skill_knowledge_entries(user_id)
-            except Exception as exc:
-                logger.info(f"kb_store ensure_user_kb backfill skills user={user_id} failed: {exc}")
         finally:
             if own:
                 sess.close()
@@ -984,9 +808,7 @@ def keyword_search_knowledge(
 ) -> list[dict[str, Any]]:
     """纯关键词匹配检索 KnowledgeBase 文件夹内容。
 
-    完全基于文件系统（KnowledgeBase/topics/ + skills）。
-    Embedding（如果用户配置了 HEYSURE_EMBEDDING_*）会以文件形式存放在
-    KnowledgeBase/embeddings/*.json 下，由 knowledge_vector 管理。
+    完全基于文件系统（KnowledgeBase/topics/ + skills），无向量/embedding 依赖。
     """
     q = str(query or "").strip()
     if not q:

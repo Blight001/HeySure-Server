@@ -53,7 +53,7 @@ class InheritanceThoughtEndpointBody(BaseModel):
 
 
 @router.get("/inheritance-tools/clawhub/search")
-async def search_clawhub_skills(
+def search_clawhub_skills(
     q: str,
     limit: int = 20,
     session: Session = Depends(get_session),
@@ -69,7 +69,7 @@ async def search_clawhub_skills(
 
 
 @router.post("/inheritance-tools/clawhub/installed/{slug:path}/endpoint")
-async def set_installed_clawhub_skill_endpoint(
+def set_installed_clawhub_skill_endpoint(
     slug: str,
     body: InheritanceThoughtEndpointBody,
     session: Session = Depends(get_session),
@@ -87,7 +87,7 @@ async def set_installed_clawhub_skill_endpoint(
 
 
 @router.get("/inheritance-tools/clawhub/installed/{slug:path}")
-async def get_installed_clawhub_skill(
+def get_installed_clawhub_skill(
     slug: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -100,7 +100,7 @@ async def get_installed_clawhub_skill(
 
 
 @router.put("/inheritance-tools/clawhub/installed/{slug:path}")
-async def update_installed_clawhub_skill(
+def update_installed_clawhub_skill(
     slug: str,
     body: ClawHubInstalledUpdateBody,
     session: Session = Depends(get_session),
@@ -118,7 +118,7 @@ async def update_installed_clawhub_skill(
 
 
 @router.delete("/inheritance-tools/clawhub/installed/{slug:path}")
-async def delete_installed_clawhub_skill(
+def delete_installed_clawhub_skill(
     slug: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -131,7 +131,7 @@ async def delete_installed_clawhub_skill(
 
 
 @router.get("/inheritance-tools/clawhub/{slug:path}")
-async def get_clawhub_skill_detail(
+def get_clawhub_skill_detail(
     slug: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -146,7 +146,7 @@ async def get_clawhub_skill_detail(
 
 
 @router.post("/inheritance-tools/clawhub/{slug:path}/install")
-async def install_clawhub_skill(
+def install_clawhub_skill(
     slug: str,
     body: ClawHubInstallBody = ClawHubInstallBody(),
     session: Session = Depends(get_session),
@@ -168,7 +168,7 @@ async def install_clawhub_skill(
 
 
 @router.get("/entries")
-async def list_entries(
+def list_entries(
     scope: Optional[str] = None,
     status: Optional[str] = "active",
     session: Session = Depends(get_session),
@@ -183,7 +183,7 @@ async def list_entries(
 
 
 @router.get("/entries/{memory_id}")
-async def read_entry(
+def read_entry(
     memory_id: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -196,7 +196,7 @@ async def read_entry(
 
 
 @router.post("/intrinsic-properties")
-async def save_intrinsic_properties(
+def save_intrinsic_properties(
     body: IntrinsicPropertiesBody,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -210,7 +210,7 @@ async def save_intrinsic_properties(
 
 
 @router.post("/system-prompts")
-async def save_system_prompts(
+def save_system_prompts(
     body: SystemPromptsBody,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -224,7 +224,7 @@ async def save_system_prompts(
 
 
 @router.post("/entries/{memory_id}/archive")
-async def archive_entry(
+def archive_entry(
     memory_id: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),

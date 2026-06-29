@@ -50,7 +50,26 @@ def _bootstrap_lock():
 
 # pool_pre_ping handles dropped connections after server restarts;
 # pool_recycle prevents stale long-lived connections.
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+#
+# pool_size / max_overflow are tunable because the gateway serves DB-bound routes
+# as plain ``def`` handlers, which FastAPI runs in a worker threadpool: many
+# requests execute truly concurrently, and each holds one connection for its
+# duration. The default QueuePool of 5+10 throttles that concurrency (later
+# requests block on checkout), so we size the pool from settings instead.
+def _pool_kwargs() -> dict:
+    try:
+        from .core.settings import settings
+        return {"pool_size": settings.db_pool_size, "max_overflow": settings.db_max_overflow}
+    except Exception:  # settings unavailable (e.g. tooling import) → SQLAlchemy defaults
+        return {}
+
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+    **_pool_kwargs(),
+)
 
 
 def create_db_and_tables() -> None:
