@@ -77,6 +77,47 @@ def render_plan_required_notice() -> str:
     )
 
 
+_PHASE_STATUS_BADGE = {
+    "completed": "✅ 已完成",
+    "failed": "❌ 未达成",
+    "active": "▶ 进行中",
+    "pending": "◌ 待执行",
+}
+
+
+def render_plan_overview(progress: Optional[dict]) -> str:
+    """Compact skeleton of the whole plan, re-anchored on every run rebuild.
+
+    A rebuilt run (fresh worker call, post-compression, or a user reply that
+    resumes after the AI paused to confirm the plan) drops the verbose
+    ``plan.create`` tool bubble from the model context. The per-phase directive
+    alone only re-injects the *current* phase, so the model loses the overall
+    goal and the later phases it had just planned. This renders the durable plan
+    state back as a compact list (goal + each phase's title/status) so the full
+    plan skeleton always survives, without replaying every sub-action."""
+    progress = progress or {}
+    phases = progress.get("phases") or []
+    if not isinstance(phases, list) or not phases:
+        return ""
+    goal = str(progress.get("goal") or "").strip()
+    current_seq = progress.get("current_phase_seq")
+    lines = [
+        "[系统提示 · 当前计划总览]",
+        f"整体目标：{goal}" if goal else "整体目标：(未填写)",
+        f"共 {len(phases)} 个阶段：",
+    ]
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        seq = int(phase.get("seq", 0))
+        title = str(phase.get("title") or f"阶段{seq + 1}").strip()
+        badge = _PHASE_STATUS_BADGE.get(str(phase.get("status") or "pending"), "◌ 待执行")
+        marker = " ←当前" if seq == current_seq else ""
+        lines.append(f"  {seq + 1}. [{badge}] {title}{marker}")
+    lines.append("（这是已登记计划的骨架，仅供你保持全局方向；具体执行以下方的当前阶段调度为准。）")
+    return "\n".join(lines)
+
+
 def render_phase_directive(phase: Optional[dict], total: int) -> str:
     """System directive that hands the AI the current phase to execute."""
     phase = phase or {}

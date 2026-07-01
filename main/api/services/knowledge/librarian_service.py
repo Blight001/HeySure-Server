@@ -6,7 +6,8 @@
 - 提供"咨询"（consult）：按 query 在 active 条目中检索
 - 提供"主题列表"（list_topics）：渐进披露，只返标题+触发词
 
-文件存储：<workspace_root>/KnowledgeBase/topics/<slug>.md 以及 inheritance_thoughts/**/SKILL.md
+文件存储：<workspace_root>/KnowledgeBase/topics/<slug>.md（传承知识）
+          以及 topics/**/SKILL.md（传承思想/技能，位于 remote/clawhub、local/manual、local/npx 子目录）
 真相源：KnowledgeBase/ 下的 Markdown 文件（直接读取，不依赖 KnowledgeEntry 表）
 索引：纯文件驱动 + KnowledgeBase/index.json（文件扫描重建）
 注册表：<workspace_root>/KnowledgeBase/index.json（前端可选浏览）
@@ -36,12 +37,6 @@ from .librarian_core import (
     _KB_DIR,
     _TOPICS_DIR,
     _ARCHIVE_DIR,
-    _INHERITANCE_THOUGHTS_DIR,
-    _CLAWHUB_REMOTE_DIR,
-    _NPX_SKILLS_DIR,
-    _MANUAL_SKILLS_DIR,
-    _INDEX_FILE,
-    _CLAWHUB_SKILLS_STATE_FILE,
     _INTRINSIC_PROPERTIES_OVERRIDES_FILE,
     _MAX_SUMMARY_LEN,
     _VALID_STATUSES,
@@ -68,11 +63,7 @@ from .librarian_core import (
     _split_csv,
     _split_frontmatter,
     _parse_triggers_field,
-    # ClawHub 状态工具
-    _inheritance_thoughts_root,
-    _clawhub_state_path,
-    _load_clawhub_state,
-    _save_clawhub_state,
+    # 传承思想（单文件 .md）扫描
     _clawhub_installed_items,
     # 条目
     _load_user_knowledge_entries,
@@ -144,13 +135,10 @@ from .librarian_clawhub import (
     update_clawhub_installed_skill,
     set_inheritance_thought_endpoint,
     delete_clawhub_installed_skill,
-    _clawhub_installed_item,
-    _clawhub_installed_dir,
     _latest_clawhub_version,
     _clawhub_trust_summary,
     _raise_if_clawhub_blocked,
     _extract_skill_zip,
-    _write_clawhub_install_metadata,
 )
 
 from ...sio import sio
@@ -345,8 +333,8 @@ def list_topics(
     status: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """渐进披露：只返标题 + 触发词 + 摘要，不返正文。
-    控制台知识库列表只展示系统内置聚合入口；topics/ 与 inheritance_thoughts/
-    下的文件不再作为独立卡片追加到列表。
+    控制台知识库列表只展示系统内置聚合入口；topics/ 下的内容统一归入「传承思想」
+    聚合入口查看，不在此逐条作为独立卡片展示。
     """
     target_status = status or "active"
     if target_status not in _VALID_STATUSES and target_status != "all":

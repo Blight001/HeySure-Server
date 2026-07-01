@@ -28,7 +28,6 @@ from api.runtime.http_client import ai_http_post
 from .chat_prompt_utils import (
     _extract_delta_text,
     _extract_first_complete_mcp_call,
-    _get_run_live_reasoning,
     _set_run_live_phase,
     _set_run_live_reasoning,
     _set_run_live_text,
@@ -49,16 +48,6 @@ class StreamResult:
     tc_args: str = ""
     has_native_tc: bool = False
     stopped: bool = False
-
-
-def _merge_run_reasoning(previous: str, current: str) -> str:
-    old = str(previous or "").rstrip()
-    new = str(current or "").lstrip()
-    if not old:
-        return new
-    if not new:
-        return old
-    return f"{old}\n\n{new}"
 
 
 def _detect_provider(base_url: str) -> str:
@@ -223,9 +212,14 @@ def stream_turn_openai_compat(
     sr = StreamResult()
     last_push_at = 0.0
     tool_call_parts: Dict[int, Dict[str, str]] = {}
-    previous_reasoning = _get_run_live_reasoning(run_id)
 
+    # Reset the live reasoning at the start of every turn so each step's
+    # deep-thinking streams as its own segment. Earlier steps already render as
+    # separate persisted "深度思考" blocks; accumulating them here just made the
+    # live panel pile every step's reasoning together (the frontend's prefix
+    # trim can't keep pace with the live socket).
     _set_run_live_text(run_id, "")
+    _set_run_live_reasoning(run_id, "")
     _set_run_live_phase(run_id, "generating")
     _set_run_live_usage(run_id, 0, 0, 0)
 
@@ -267,10 +261,7 @@ def stream_turn_openai_compat(
         delta_reasoning = delta.get("reasoning_content")
         if isinstance(delta_reasoning, str):
             sr.reasoning_content += delta_reasoning
-            _set_run_live_reasoning(
-                run_id,
-                _merge_run_reasoning(previous_reasoning, sr.reasoning_content),
-            )
+            _set_run_live_reasoning(run_id, sr.reasoning_content)
 
         # Native tool_calls (OpenAI / DeepSeek compatible).
         tc_list = delta.get("tool_calls")
@@ -403,9 +394,11 @@ def stream_turn_anthropic(
     current_tool_name = ""
     current_tool_args = ""
     anthropic_tool_calls: List[Dict[str, str]] = []
-    previous_reasoning = _get_run_live_reasoning(run_id)
 
+    # Reset live reasoning per turn — see stream_turn_openai_compat for why we no
+    # longer accumulate across steps.
     _set_run_live_text(run_id, "")
+    _set_run_live_reasoning(run_id, "")
     _set_run_live_phase(run_id, "generating")
     _set_run_live_usage(run_id, 0, 0, 0)
 
@@ -464,10 +457,7 @@ def stream_turn_anthropic(
                 thinking = delta.get("thinking") or delta.get("text") or ""
                 if thinking:
                     sr.reasoning_content += thinking
-                    _set_run_live_reasoning(
-                        run_id,
-                        _merge_run_reasoning(previous_reasoning, sr.reasoning_content),
-                    )
+                    _set_run_live_reasoning(run_id, sr.reasoning_content)
 
         elif etype == "content_block_stop":
             if current_block_type == "tool_use" and current_tool_name:

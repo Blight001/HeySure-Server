@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import io
 import json
 import os
@@ -38,14 +39,9 @@ logger = logging.getLogger(__name__)
 
 
 _KB_DIR = "KnowledgeBase"
+# 传承知识与传承思想已统一为同一概念，全部为 topics/ 下的扁平单文件 .md。
 _TOPICS_DIR = "topics"
 _ARCHIVE_DIR = "archives"
-_INHERITANCE_THOUGHTS_DIR = "inheritance_thoughts"
-_CLAWHUB_REMOTE_DIR = "remote/clawhub"
-_NPX_SKILLS_DIR = "local/npx"
-_MANUAL_SKILLS_DIR = "local/manual"
-_INDEX_FILE = "index.json"
-_CLAWHUB_SKILLS_STATE_FILE = "clawhub_skills.json"
 _INTRINSIC_PROPERTIES_OVERRIDES_FILE = "intrinsic_properties_overrides.json"
 _MAX_SUMMARY_LEN = 240
 _VALID_STATUSES = {"pending", "active", "archived", "rejected"}
@@ -312,39 +308,13 @@ def _read_text(path: str) -> Optional[str]:
 # ---------- 索引文件 ----------
 
 def _rebuild_index(user_id: int) -> None:
-    """重写 KnowledgeBase/index.json（只含 active+pending，archived/rejected 不进）。
-    现在主要从文件扫描重建，DB 作为可选补充。
+    """空操作（保留以兼容调用方）。
+
+    KnowledgeBase/index.json 曾是"只写不读"的冗余快照：由本函数写出，但运行时与
+    前端都不读取它（前端走 /api/librarian/entries → list_topics 实时扫描文件）。
+    已停止写入并删除该文件，真相源就是 topics/ 下的 .md，无需额外索引。
     """
-    try:
-        root = _kb_root(user_id)
-        items: List[Dict[str, Any]] = []
-        # File scan primary
-        try:
-            file_ents = _load_user_knowledge_entries(user_id)
-            for e in file_ents:
-                if e.get("status") not in ("active", "pending"):
-                    continue
-                items.append({
-                    "memory_id": e.get("memory_id"),
-                    "title": e.get("title"),
-                    "triggers": e.get("triggers") or [],
-                    "scope": e.get("scope", "global"),
-                    "scope_target": e.get("scope_target"),
-                    "status": e.get("status"),
-                    "confidence": e.get("confidence", 1.0),
-                    "file_path": e.get("file_path"),
-                    "use_count": e.get("use_count", 0),
-                    "summary": e.get("summary"),
-                    "updated_at": e.get("updated_at"),
-                })
-        except Exception:
-            pass
-        # No DB fallback — pure file scan (KnowledgeEntry table removed)
-        path = os.path.join(root, _INDEX_FILE)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"items": items, "updated_at": time.time()}, f, ensure_ascii=False, indent=2)
-    except Exception as exc:
-        logger.info(f"{exc}")
+    return None
 
 
 def _split_csv(value: str) -> List[str]:
@@ -387,47 +357,173 @@ def _parse_triggers_field(raw: Any) -> List[str]:
 
 # ---------- ClawHub 状态工具（被 _load_user_knowledge_entries 及其他模块使用） ----------
 
-def _inheritance_thoughts_root(user_id: int) -> str:
-    root = os.path.join(_kb_root(user_id), _INHERITANCE_THOUGHTS_DIR)
-    os.makedirs(root, exist_ok=True)
-    os.makedirs(safe_join(root, _CLAWHUB_REMOTE_DIR), exist_ok=True)
-    return root
+# ---------- 传承思想：单文件 .md（frontmatter 即元数据；无 clawhub_skills.json 台帳，无 local/remote 子目录）----------
+#
+# 每条传承思想 = topics/<名>-<slug哈希>.md，frontmatter 内含 heysure_thought 标记
+# 与全部元数据（slug/source/version/endpoint_kind/installed_at/trust_verdict 等），正文即
+# SKILL.md 内容。列表/详情/安装/编辑/删除全部以单文件为单位，slug 用 frontmatter 字段定位。
+
+_THOUGHT_MARKER_KEY = "heysure_thought"
 
 
-def _clawhub_state_path(user_id: int) -> str:
-    return os.path.join(_inheritance_thoughts_root(user_id), _CLAWHUB_SKILLS_STATE_FILE)
+def _unquote_scalar(value: Any) -> Any:
+    """去掉 _split_frontmatter 保留下来的成对引号（_yaml_frontmatter 写字符串时加的）。"""
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("\"", "'"):
+        return s[1:-1]
+    return s
 
 
-def _load_clawhub_state(user_id: int) -> Dict[str, Any]:
+def _thought_meta_to_row(meta: Dict[str, Any], rel_path: str) -> Dict[str, Any]:
+    """把一条传承思想 .md 的 frontmatter 还原成 installed-row 形状。"""
+    version = meta.get("version")
+    if isinstance(version, str) and version.strip().lower() in ("", "null", "none"):
+        version = None
     try:
-        with open(_clawhub_state_path(user_id), "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except FileNotFoundError:
-        return {}
-    except Exception as exc:
-        logger.info(f"load clawhub state failed: {exc}")
-        return {}
+        installed_at = float(meta.get("installed_at") or 0)
+    except (TypeError, ValueError):
+        installed_at = 0.0
+    auto_enabled = str(meta.get("auto_enabled") or "").strip().lower() in ("true", "1", "yes")
+    row: Dict[str, Any] = {
+        "slug": str(meta.get("slug") or "").strip(),
+        "displayName": str(meta.get("name") or meta.get("title") or meta.get("slug") or ""),
+        "summary": str(meta.get("description") or meta.get("summary") or ""),
+        "triggers": _parse_triggers_field(meta.get("triggers") or meta.get("keywords") or meta.get("tags") or ""),
+        "version": version,
+        "ownerHandle": str(meta.get("owner") or meta.get("ownerHandle") or ""),
+        "source": str(meta.get("source") or "manual"),
+        "path": rel_path,
+        "installed_at": installed_at,
+        "auto_enabled": auto_enabled,
+        "endpoint_kind": _normalize_endpoint(meta.get("endpoint_kind")),
+        "trust": {"verdict": str(meta.get("trust_verdict") or "")},
+    }
+    reg = str(meta.get("registry_url") or "").strip()
+    if reg:
+        row["registry_url"] = reg
+    return row
 
 
-def _save_clawhub_state(user_id: int, state: Dict[str, Any]) -> None:
-    state["updated_at"] = time.time()
-    with open(_clawhub_state_path(user_id), "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+def _iter_thought_files(user_id: int):
+    """遍历 topics/ 下带传承思想标记的 .md，产出 (rel_path, abs_path, meta, body)。"""
+    d = os.path.join(_kb_root(user_id), _TOPICS_DIR)
+    if not os.path.isdir(d):
+        return
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return
+    for n in names:
+        if not n.lower().endswith(".md"):
+            continue
+        abs_p = os.path.join(d, n)
+        raw = _read_text(abs_p)
+        if not raw:
+            continue
+        meta, body = _split_frontmatter(raw)
+        meta = {k: _unquote_scalar(v) for k, v in meta.items()}
+        if str(meta.get(_THOUGHT_MARKER_KEY) or "").strip().lower() not in ("true", "1", "yes"):
+            continue
+        yield f"{_TOPICS_DIR}/{n}".replace("\\", "/"), abs_p, meta, body
+
+
+def _find_thought(user_id: int, slug: str):
+    """按 frontmatter slug 精确定位一条传承思想，返回 (rel, abs, meta, body) 或 None。"""
+    target = str(slug or "").strip()
+    if not target:
+        return None
+    for rel, abs_p, meta, body in _iter_thought_files(user_id):
+        if str(meta.get("slug") or "").strip() == target:
+            return rel, abs_p, meta, body
+    return None
+
+
+def _thought_filename(slug: str, display: str) -> str:
+    """slug → topics/ 下稳定且可读的文件名（slug 决定哈希后缀，保证幂等、避免碰撞）。"""
+    base = _slugify(display or str(slug).split("/")[-1]) or "skill"
+    suffix = hashlib.sha1(str(slug).encode("utf-8")).hexdigest()[:8]
+    return f"{base}-{suffix}.md"
+
+
+def _render_thought_md(row: Dict[str, Any], body: str) -> str:
+    """把 installed-row + 正文渲染成单文件 .md（合并为单块 frontmatter）。"""
+    trust = row.get("trust") if isinstance(row.get("trust"), dict) else {}
+    triggers = row.get("triggers")
+    triggers = triggers if isinstance(triggers, list) else _parse_triggers_field(triggers)
+    fm: Dict[str, Any] = {
+        "name": str(row.get("displayName") or row.get("slug") or ""),
+        "description": str(row.get("summary") or ""),
+        "triggers": triggers,
+        _THOUGHT_MARKER_KEY: True,
+        "slug": str(row.get("slug") or ""),
+        "source": str(row.get("source") or "manual"),
+        "endpoint_kind": _normalize_endpoint(row.get("endpoint_kind")),
+        "version": row.get("version"),
+        "owner": str(row.get("ownerHandle") or ""),
+        "installed_at": float(row.get("installed_at") or time.time()),
+        "auto_enabled": bool(row.get("auto_enabled")),
+        "trust_verdict": str(trust.get("verdict") or row.get("trust_verdict") or ""),
+    }
+    reg = str(row.get("registry_url") or "").strip()
+    if reg:
+        fm["registry_url"] = reg
+    return _yaml_frontmatter(fm) + "\n\n" + str(body or "").strip() + "\n"
+
+
+def _upsert_thought(user_id: int, row: Dict[str, Any], body: Optional[str] = None) -> Dict[str, Any]:
+    """写入/更新一条传承思想 .md。
+
+    * 已存在（按 slug）：缺省字段沿用旧值，``body=None`` 时保留旧正文（仅改元数据）。
+    * 不存在：按 slug 生成文件名新建。
+    返回带 ``path``/``present`` 的 row。
+    """
+    slug = str(row.get("slug") or "").strip()
+    if not slug:
+        raise ValueError("thought slug is required")
+    existing = _find_thought(user_id, slug)
+    if existing is not None:
+        rel, abs_p, old_meta, old_body = existing
+        if body is None:
+            body = old_body
+        merged = _thought_meta_to_row(old_meta, rel)
+        for k, v in row.items():
+            if v is not None or k == "version":
+                merged[k] = v
+        merged["slug"] = slug
+    else:
+        rel = f"{_TOPICS_DIR}/{_thought_filename(slug, str(row.get('displayName') or ''))}"
+        abs_p = safe_join(_kb_root(user_id), rel)
+        merged = dict(row)
+        if body is None:
+            body = ""
+    _safe_write(abs_p, _render_thought_md(merged, body))
+    merged["path"] = rel
+    merged["present"] = True
+    return merged
+
+
+def _delete_thought_file(user_id: int, slug: str) -> Optional[str]:
+    """删除一条传承思想 .md，返回被删的相对路径或 None。"""
+    found = _find_thought(user_id, slug)
+    if found is None:
+        return None
+    rel, abs_p, _meta, _body = found
+    try:
+        os.remove(abs_p)
+    except OSError as exc:
+        logger.info(f"delete thought file failed slug={slug}: {exc}")
+    return rel
 
 
 def _clawhub_installed_items(user_id: int) -> List[Dict[str, Any]]:
-    state = _load_clawhub_state(user_id)
-    installed = state.get("installed") if isinstance(state.get("installed"), dict) else {}
     items: List[Dict[str, Any]] = []
-    for slug, item in installed.items():
-        if not isinstance(item, dict):
+    for rel, abs_p, meta, _body in _iter_thought_files(user_id):
+        row = _thought_meta_to_row(meta, rel)
+        if not row.get("slug"):
             continue
-        row = dict(item)
-        row["slug"] = str(row.get("slug") or slug)
-        row["endpoint_kind"] = _normalize_endpoint(row.get("endpoint_kind"))
-        rel_path = str(row.get("path") or "").strip()
-        row["present"] = bool(rel_path and os.path.isdir(safe_join(_kb_root(user_id), rel_path)))
+        row["present"] = os.path.isfile(abs_p)
         items.append(row)
     items.sort(key=lambda item: float(item.get("installed_at") or 0), reverse=True)
     return items
@@ -455,6 +551,10 @@ def _load_user_knowledge_entries(user_id: int) -> List[Dict[str, Any]]:
                 if not raw:
                     continue
                 meta, body = _split_frontmatter(raw)
+                meta = {k: _unquote_scalar(v) for k, v in meta.items()}
+                # 传承思想（单文件 .md，带 heysure_thought 标记）由下方 skills 段统一处理，topics 段跳过避免重复
+                if str(meta.get(_THOUGHT_MARKER_KEY) or "").strip().lower() in ("true", "1", "yes"):
+                    continue
                 memory_id = str(meta.get("memory_id") or "").strip()
                 if not memory_id:
                     slug = os.path.splitext(fname)[0]
@@ -490,17 +590,16 @@ def _load_user_knowledge_entries(user_id: int) -> List[Dict[str, Any]]:
         except Exception as exc:
             logger.info(f"_load_user_knowledge_entries topics failed user={user_id}: {exc}")
 
-    # skills from inheritance_thoughts (via clawhub state)
+    # skills under topics/ (via clawhub state)
     try:
         installed = _clawhub_installed_items(user_id)
         for item in installed:
             slug = str(item.get("slug") or "").strip()
             if not slug:
                 continue
-            rel_path = str(item.get("path") or "").strip().rstrip("/\\")
-            if not rel_path:
+            skill_rel = str(item.get("path") or "").strip().replace("\\", "/")
+            if not skill_rel:
                 continue
-            skill_rel = (rel_path + "/SKILL.md").replace("\\", "/")
             skill_abs = _topic_path(user_id, skill_rel)
             if not os.path.exists(skill_abs):
                 continue
@@ -511,7 +610,7 @@ def _load_user_knowledge_entries(user_id: int) -> List[Dict[str, Any]]:
             entries.append({
                 "memory_id": memory_id,
                 "title": name,
-                "triggers": [],
+                "triggers": item.get("triggers") or [],
                 "scope": "global",
                 "scope_target": None,
                 "status": "active",

@@ -22,18 +22,17 @@ from .librarian_core import (
     _slugify,
     _normalize_endpoint,
     _resolve_endpoint_kind,
-    _INHERITANCE_THOUGHTS_DIR,
-    _CLAWHUB_REMOTE_DIR,
-    _NPX_SKILLS_DIR,
-    _MANUAL_SKILLS_DIR,
+    _TOPICS_DIR,
     _normalize_triggers,
     _parse_triggers_field,
     _safe_write,
     _topic_path,
     _read_text,
-    _load_clawhub_state,
-    _save_clawhub_state,
+    _split_frontmatter,
     _clawhub_installed_items,
+    _upsert_thought,
+    _delete_thought_file,
+    _find_thought,
     _entry_dict_from_file_entry,
 )
 from ...integrations import clawhub
@@ -44,9 +43,9 @@ logger = logging.getLogger(__name__)
 def _inheritance_thoughts_payload(user_id: int) -> Dict[str, Any]:
     installed = _clawhub_installed_items(user_id)
     return {
-        "description": "传承思想支持从 ClawHub 或 npx skills 安装 Skill 到本地 KnowledgeBase 快照；运行时只使用本地文件。",
+        "description": "传承思想以单文件 .md 落盘在 KnowledgeBase/topics/ 下（frontmatter 即元数据），可由 AI 主动创建或从 ClawHub / npx skills 安装；运行时只使用本地文件。",
         "registry_url": clawhub.registry_base_url(),
-        "storage_root": f"{_INHERITANCE_THOUGHTS_DIR}/{_CLAWHUB_REMOTE_DIR}",
+        "storage_root": _TOPICS_DIR,
         "installed_total": len(installed),
         "installed": installed,
     }
@@ -187,13 +186,8 @@ def edit_inheritance_thought(
     thought_id: str,
     arguments: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """按行编辑 SKILL.md 与/或改端（endpoint_kind）。两者均可单独使用。"""
-    from .librarian_clawhub import (
-        clawhub_installed_skill_detail,
-        update_clawhub_installed_skill,
-        _clawhub_installed_dir,
-        _normalize_clawhub_slug,
-    )
+    """按行编辑正文与/或改端（endpoint_kind）。两者均可单独使用。"""
+    from .librarian_clawhub import _normalize_clawhub_slug
     thought_id = _normalize_clawhub_slug(thought_id)
     endpoint_raw = arguments.get("endpoint_kind")
     has_endpoint = endpoint_raw is not None and str(endpoint_raw).strip() != ""
@@ -201,46 +195,32 @@ def edit_inheritance_thought(
     if not has_line_edits and not has_endpoint:
         raise ValueError("nothing to edit: provide line edits and/or endpoint_kind")
 
-    current = clawhub_installed_skill_detail(user_id=int(user_id), slug=thought_id)
-    old_content = str(current.get("skill_card") or "")
+    found = _find_thought(int(user_id), thought_id)
+    if found is None:
+        raise ValueError("installed skill not found")
+    _rel, _abs, _meta, old_body = found
+    old_content = str(old_body or "")
     old_sha256 = _text_sha256(old_content)
     new_content = old_content
     edit_count = 0
 
+    update_row: Dict[str, Any] = {"slug": thought_id}
+    body_arg = None
     if has_line_edits:
         expected = str(arguments.get("expected_sha256") or "").strip().lower()
         if expected and expected != old_sha256:
             raise ValueError("SKILL.md changed after it was read; read it again before editing")
         new_content, edit_count = _apply_skill_line_edits(old_content, arguments)
-        update_clawhub_installed_skill(
-            user_id=int(user_id),
-            slug=thought_id,
-            skill_card=new_content,
-        )
+        body_arg = new_content
+    if has_endpoint:
+        update_row["endpoint_kind"] = _normalize_endpoint(endpoint_raw)
 
-    state = _load_clawhub_state(int(user_id))
-    installed = state.get("installed") if isinstance(state.get("installed"), dict) else {}
-    row = installed.get(thought_id)
-    if isinstance(row, dict):
-        if has_line_edits:
-            install_dir = _clawhub_installed_dir(int(user_id), row)
-            metadata = _skill_card_metadata(install_dir, str(row.get("displayName") or thought_id))
-            row["displayName"] = metadata["name"]
-            row["summary"] = metadata["description"]
-        if has_endpoint:
-            row["endpoint_kind"] = _normalize_endpoint(endpoint_raw)
-        installed[thought_id] = row
-        state["installed"] = installed
-        _save_clawhub_state(int(user_id), state)
-
-    final_endpoint = _normalize_endpoint(
-        row.get("endpoint_kind") if isinstance(row, dict) else endpoint_raw
-    )
+    merged = _upsert_thought(int(user_id), update_row, body=body_arg)
     return {
         "updated": True,
         "id": thought_id,
         "edit_count": edit_count,
-        "endpoint_kind": final_endpoint,
+        "endpoint_kind": _normalize_endpoint(merged.get("endpoint_kind")),
         "old_sha256": old_sha256,
         "content_sha256": _text_sha256(new_content),
         "line_count": len(new_content.splitlines()),
@@ -372,56 +352,29 @@ def create_inheritance_thought(
     slug_base = _slugify(name) or "skill"
     suffix = hashlib.sha1(f"{name}-{time.time()}".encode("utf-8")).hexdigest()[:8]
     thought_id = f"manual/{slug_base}-{suffix}"
-    safe_name = thought_id.split("/", 1)[1]
-    install_rel = f"{_INHERITANCE_THOUGHTS_DIR}/{_MANUAL_SKILLS_DIR}/{safe_name}"
-    install_dir = safe_join(_kb_root(user_id), install_rel)
-    os.makedirs(install_dir, exist_ok=True)
 
+    # 正文若自带 frontmatter（旧 SKILL.md 形态），剥离后只留正文，统一并入单块 frontmatter。
+    fm, stripped = _split_frontmatter(body)
+    body_text = stripped if fm else body
     summary_text = str(summary or "").strip()
-    skill_md = _ensure_skill_frontmatter(body, name=name, description=summary_text)
-    _safe_write(os.path.join(install_dir, "SKILL.md"), skill_md)
-    installed_at = time.time()
-    with open(os.path.join(install_dir, "heysure_manual_create.json"), "w", encoding="utf-8") as f:
-        json.dump(
-            {"source": "manual", "name": name, "installed_at": installed_at},
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    if not summary_text and isinstance(fm, dict):
+        summary_text = str(fm.get("description") or "").strip()
 
-    meta = _skill_card_metadata(install_dir, name)
     resolved_endpoint = _resolve_endpoint_kind(int(user_id), ai_config_id, endpoint_kind)
-    state = _load_clawhub_state(user_id)
-    installed = state.get("installed") if isinstance(state.get("installed"), dict) else {}
-    installed[thought_id] = {
+    row = {
         "slug": thought_id,
-        "displayName": meta["name"],
-        "summary": meta["description"] or summary_text,
+        "displayName": name,
+        "summary": summary_text,
         "version": None,
         "ownerHandle": "",
         "source": "manual",
-        "path": install_rel,
-        "installed_at": installed_at,
+        "installed_at": time.time(),
         "auto_enabled": False,
         "endpoint_kind": resolved_endpoint,
         "trust": {"verdict": "self-authored"},
     }
-    state["installed"] = installed
-    _save_clawhub_state(user_id, state)
-    try:
-        _sync_skill_to_knowledge_entry(
-            user_id=user_id,
-            slug=thought_id,
-            name=meta["name"],
-            summary=meta["description"] or summary_text,
-            skill_md_path=install_rel.rstrip("/\\") + "/SKILL.md",
-            installed_at=installed_at,
-            ai_config_id=ai_config_id,
-            status="active",
-        )
-    except Exception as exc:
-        logger.warning("skill sync to knowledge entry failed slug=%s: %s", thought_id, exc)
-    return dict(installed[thought_id], id=thought_id)
+    merged = _upsert_thought(int(user_id), row, body=body_text)
+    return dict(merged, id=thought_id)
 
 
 def delete_inheritance_thought(*, user_id: int, thought_id: str) -> Dict[str, Any]:
@@ -554,68 +507,31 @@ def _import_global_skill_snapshot(
 ) -> Dict[str, Any]:
     thought_id = f"npx/{skill_name}"
     _validate_skill_tree_for_import(source_dir)
-    import hashlib
 
-    safe_name = f"{_slugify(skill_name)}-{hashlib.sha1(skill_name.encode('utf-8')).hexdigest()[:8]}"
-    install_rel = f"{_INHERITANCE_THOUGHTS_DIR}/{_NPX_SKILLS_DIR}/{safe_name}"
-    install_dir = safe_join(_kb_root(user_id), install_rel)
-    temp_dir = f"{install_dir}.tmp-{uuid.uuid4().hex[:8]}"
-    os.makedirs(os.path.dirname(install_dir), exist_ok=True)
-    try:
-        shutil.copytree(source_dir, temp_dir)
-        if not os.path.isfile(os.path.join(temp_dir, "SKILL.md")):
-            raise ValueError(f"installed skill has no SKILL.md: {skill_name}")
-        if os.path.isdir(install_dir):
-            shutil.rmtree(install_dir)
-        os.replace(temp_dir, install_dir)
-    except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
+    # 单文件 .md 模型：只取技能卡 SKILL.md 内容；其余附属文件不再随技能落盘。
+    card_path = os.path.join(source_dir, "SKILL.md")
+    if not os.path.isfile(card_path):
+        raise ValueError(f"installed skill has no SKILL.md: {skill_name}")
+    raw = _read_text(card_path) or ""
+    fm, stripped = _split_frontmatter(raw)
+    body_text = stripped if fm else raw
+    name = str((fm or {}).get("name") or skill_name).strip() or skill_name
+    description = str((fm or {}).get("description") or "").strip()
 
-    meta = _skill_card_metadata(install_dir, skill_name)
-    installed_at = time.time()
-    install_meta = {
-        "source": "npx:skills",
-        "package": package,
-        "skill_name": skill_name,
-        "installed_at": installed_at,
-        "global_source_path": source_dir,
-    }
-    with open(os.path.join(install_dir, "heysure_npx_install.json"), "w", encoding="utf-8") as f:
-        json.dump(install_meta, f, ensure_ascii=False, indent=2)
-
-    state = _load_clawhub_state(user_id)
-    installed = state.get("installed") if isinstance(state.get("installed"), dict) else {}
-    installed[thought_id] = {
+    row = {
         "slug": thought_id,
-        "displayName": meta["name"],
-        "summary": meta["description"],
+        "displayName": name,
+        "summary": description,
         "version": None,
         "ownerHandle": "",
         "source": "npx:skills",
-        "package": package,
-        "path": install_rel,
-        "installed_at": installed_at,
+        "installed_at": time.time(),
         "auto_enabled": False,
         "endpoint_kind": _normalize_endpoint(endpoint_kind),
         "trust": {"verdict": "unverified"},
     }
-    state["installed"] = installed
-    _save_clawhub_state(user_id, state)
-    try:
-        _sync_skill_to_knowledge_entry(
-            user_id=user_id,
-            slug=thought_id,
-            name=meta["name"],
-            summary=meta["description"],
-            skill_md_path=install_rel.rstrip("/\\") + "/SKILL.md",
-            installed_at=installed_at,
-            ai_config_id=ai_config_id,
-            status="active",
-        )
-    except Exception as exc:
-        logger.warning("skill sync to knowledge entry failed slug=%s: %s", thought_id, exc)
-    return dict(installed[thought_id], id=thought_id)
+    merged = _upsert_thought(int(user_id), row, body=body_text)
+    return dict(merged, id=thought_id)
 
 
 def install_npx_skill_package(

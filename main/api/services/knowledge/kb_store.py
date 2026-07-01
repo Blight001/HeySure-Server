@@ -7,8 +7,9 @@ Markdown 文件，并让文件成为运行时的真相源：
     ├── personas/<id>-<名>.md      固有人格：每个 AI 一个人格 Prompt
     ├── mcp/<namespace>/<tool>.md  固有技能：每个 MCP 工具的介绍与参数
     ├── system/<key>.md            固有思路：每个系统提示一个 md
-    ├── skills/                    传承技能（沿用 inheritance_thoughts 落盘，目录占位）
-    └── topics/<slug>.md           传承知识（纯文件驱动）
+    └── topics/                    传承知识与传承思想统一落盘（全部扁平单文件 .md）：
+        ├── <slug>.md             传承知识条目（纯文件驱动）
+        └── <名>-<slug哈希>.md     传承思想/技能卡（frontmatter 带 heysure_thought 标记与元数据）
 
 设计原则（安全优先）：
 
@@ -774,30 +775,19 @@ def _kb_tokenize(text: str) -> list[str]:
 
 
 def _list_searchable_md(user_id: int) -> list[str]:
-    """返回相对 KnowledgeBase 根的 .md 候选路径，优先 topics/ 和 inheritance_thoughts 下的技能。"""
+    """返回相对 KnowledgeBase 根的 .md 候选路径。
+
+    传承知识与传承思想已统一为 ``topics/`` 下的扁平单文件 ``*.md``（传承思想带
+    ``heysure_thought`` frontmatter 标记），二者都在顶层，故只需扫描 ``topics/*.md``。
+    """
     root = _kb_root(user_id)
     out: list[str] = []
-    # topics/*.md
     topics = os.path.join(root, TOPICS_DIR)
     if os.path.isdir(topics):
         try:
             for n in os.listdir(topics):
                 if n.endswith(".md"):
                     out.append(os.path.join(TOPICS_DIR, n).replace("\\", "/"))
-        except Exception:
-            pass
-    # inheritance_thoughts/**/SKILL.md
-    inh = os.path.join(root, "inheritance_thoughts")
-    if os.path.isdir(inh):
-        try:
-            for dirpath, _dirs, files in os.walk(inh):
-                if "SKILL.md" in files:
-                    full = os.path.join(dirpath, "SKILL.md")
-                    try:
-                        rel = os.path.relpath(full, root).replace("\\", "/")
-                        out.append(rel)
-                    except Exception:
-                        pass
         except Exception:
             pass
     return out

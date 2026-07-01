@@ -1497,13 +1497,20 @@ def _run_worker_impl(
                 plan; the optional plan-required nudge stays task-runtime only."""
                 if plan_state is None:
                     return
+                # Re-anchor the full plan skeleton first (goal + every phase's
+                # status), then the active directive. Without the overview a
+                # rebuilt run only sees the current phase and loses the rest of
+                # the plan it had registered via plan.create.
+                _prog = plan_service.plan_progress(bg, plan_state)
+                _overview = phase_context.render_plan_overview(_prog)
+                if _overview:
+                    target_convo.append({"role": "user", "content": _overview})
                 if flow_awaiting_finish:
                     target_convo.append({
                         "role": "user",
                         "content": phase_context.render_finish_required_notice(plan_state.goal),
                     })
                     return
-                _prog = plan_service.plan_progress(bg, plan_state)
                 _cur = next(
                     (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
                     None,
