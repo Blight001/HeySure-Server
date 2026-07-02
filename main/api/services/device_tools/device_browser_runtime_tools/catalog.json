@@ -70,6 +70,18 @@
         "mark": {
           "type": "boolean",
           "description": "是否在页面上绘制无序号状态色标记，便于随后截图查看。默认 true；绿色=可点击，红色=不可点击/被禁用/被遮挡；传 false 仅返回列表并清除已有标记。标记仅为视觉叠加，不影响其他取数工具或截图，也不拦截点击。"
+        },
+        "observe_timeout_ms": {
+          "type": "number",
+          "description": "本次 observe 等待/扫描的最大时长（毫秒，默认 8000，上限 30000）；包括顶层页面与跨域 iframe 的观察，超时则结束本次调用。"
+        },
+        "wait_timeout_ms": {
+          "type": "number",
+          "description": "observe_timeout_ms 的通用别名：本次 observe 最多等待多久。"
+        },
+        "max_wait_ms": {
+          "type": "number",
+          "description": "wait_timeout_ms 的兼容别名。"
         }
       }
     }
@@ -302,6 +314,18 @@
         "settle_timeout": {
           "type": "number",
           "description": "自动 observe：等待页面变化稳定的最长时间（毫秒，默认 3000，上限 8000）；遇到持续加载/动画时到此上限即收尾并 observe。"
+        },
+        "wait_timeout_ms": {
+          "type": "number",
+          "description": "本次 action 后置等待的最大时长（毫秒，默认 3000，上限 8000）；用于等待页面变化稳定并限制自动 observe 的等待。"
+        },
+        "max_wait_ms": {
+          "type": "number",
+          "description": "wait_timeout_ms 的兼容别名。"
+        },
+        "observe_timeout_ms": {
+          "type": "number",
+          "description": "action 后触发自动 observe 时，observe 本身的最大等待/扫描时长（毫秒）；不传时跟随 wait_timeout_ms / settle_timeout。"
         }
       },
       "required": [

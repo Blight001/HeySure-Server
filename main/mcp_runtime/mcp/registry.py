@@ -87,9 +87,10 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="workspace.run_command",
         description=(
-            "执行 shell 命令，用于开发或检查工作区。默认在当前用户的工作区目录、使用正常进程环境运行，"
-            "允许绝对路径和环境变量。支持显式 shell=cmd/powershell/pwsh，或用 argv + shell=none 绕过 shell 转义。"
-            "需要隔离、只在工作区内运行时，设置 strict_workspace 或 sandbox_env。"
+            "执行 shell 命令，用于开发或检查工作区。默认在当前 AI 可访问的工作区目录、使用正常进程环境运行。"
+            "普通成员只能在自己的 AI 工作区目录内选择 cwd；管理者可使用更宽的用户工作区。"
+            "支持显式 shell=cmd/powershell/pwsh，或用 argv + shell=none 绕过 shell 转义。"
+            "需要隔离环境时，设置 sandbox_env。"
         ),
         input_schema={
             "type": "object",
@@ -115,7 +116,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
                 },
                 "strict_workspace": {
                     "type": "boolean",
-                    "description": "为 true 时，拒绝工作区之外的绝对 cwd。默认 false。",
+                    "description": "为 true 时，拒绝工作区之外的绝对 cwd；普通成员会被强制视为 true。",
                 },
                 "sandbox_env": {
                     "type": "boolean",
@@ -135,7 +136,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         name="workspace.manage",
         description=(
             "工作区文件统一工具：用 action 选择 read 读取 / tree 列出文件树 / write 创建覆盖 / edit 按块编辑。"
-            "路径必须位于当前 AI 工作区内；write/edit 需管理者及以上。"
+            "路径必须位于当前 AI 工作区内；普通成员仅限自己的 AI 目录，管理者可操作用户工作区。"
             "（运行命令用 workspace.run_command，联网搜索用 workspace.search。）"
         ),
         input_schema=FILE_MANAGE_SCHEMA,

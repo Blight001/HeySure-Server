@@ -445,6 +445,17 @@ async def _dispatch_endpoint_via_runtime(
                     "error": row.get("error"),
                 }
             if _asyncio.get_running_loop().time() >= deadline:
+                # Tell the socket-owning process to finalize the row and
+                # resume the device queue — a row left "pending" blocks every
+                # later dispatch to that device until the orphan sweep.
+                try:
+                    await client.post(
+                        f"/internal/agent/dispatch/expire/{task_id}",
+                        headers=headers,
+                        json={"reason": f"Endpoint agent result timeout after {timeout_seconds}s"},
+                    )
+                except Exception:
+                    pass  # best-effort; the periodic orphan sweep is the backstop
                 return {
                     "success": False,
                     "taskId": task_id,

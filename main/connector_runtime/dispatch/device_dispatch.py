@@ -174,23 +174,31 @@ def _finalize_dispatch_row(
 
 
 def expire_orphan_dispatches(older_than_seconds: float = 300.0) -> int:
-    """Mark pending rows that have been waiting too long as ``timeout``.
+    """Mark pending/queued rows that have been waiting too long as ``timeout``.
 
-    Called on connector-runtime startup to clean up rows whose original
-    Future died with a previous process — pollers were stuck looking at
-    them.
+    Called on connector-runtime startup (and periodically) to clean up rows
+    whose original Future died with a previous process — pollers were stuck
+    looking at them. Queued rows are expired too: replaying a minutes-old
+    click/navigate once the queue unblocks does more harm than dropping it.
     """
     cutoff = time.time() - older_than_seconds
     expired = 0
     try:
         with Session(engine) as session:
             rows = session.exec(
-                select(AgentDispatchTask).where(AgentDispatchTask.status == "pending")
+                select(AgentDispatchTask).where(
+                    AgentDispatchTask.status.in_(["pending", "queued"])
+                )
             ).all()
             for row in rows:
                 if (row.created_at or 0) < cutoff:
+                    stale_kind = row.status
                     row.status = "timeout"
-                    row.error = row.error or "orphaned across connector-runtime restart"
+                    row.error = row.error or (
+                        "orphaned across connector-runtime restart"
+                        if stale_kind == "pending"
+                        else "expired in device queue before dispatch"
+                    )
                     row.completed_at = time.time()
                     session.add(row)
                     expired += 1
@@ -199,6 +207,37 @@ def expire_orphan_dispatches(older_than_seconds: float = 300.0) -> int:
     except Exception as exc:
         logger.exception(f"orphan sweep failed: {exc}")
     return expired
+
+
+async def expire_dispatch(task_id: str, reason: str = "result wait timed out") -> bool:
+    """Finalize one unfinished dispatch as ``timeout`` and unblock its device queue.
+
+    Called (via the gateway's internal expire endpoint) by pollers in other
+    processes when they give up waiting on ``task_id`` — the row would
+    otherwise keep the device's queue wedged until the orphan sweep. Returns
+    False when the task already reached a terminal state.
+    """
+    ctx = _PENDING_DISPATCHES.pop(task_id, None)
+    device_id = str(ctx.get("device_id") or "") if ctx else ""
+    if not device_id:
+        try:
+            with Session(engine) as session:
+                row = session.exec(
+                    select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
+                ).first()
+            if not row or row.status not in {"pending", "queued"}:
+                return False
+            device_id = str(row.device_id or "")
+        except Exception as exc:
+            logger.exception(f"expire lookup failed task={task_id}: {exc}")
+            return False
+    _finalize_dispatch_row(task_id, status="timeout", success=False, error=reason)
+    if device_id:
+        try:
+            await resume_device_dispatch_queue(device_id)
+        except Exception:
+            logger.exception(f"queue resume after expire failed device={device_id}")
+    return True
 
 # Per-run session context so MCP tools (running inside the worker thread) can
 # attach dispatched-task results to the correct chat session. asyncio.run()
@@ -435,7 +474,21 @@ async def dispatch_task_to_agent(
         try:
             return await asyncio.wait_for(future, timeout=max(1, int(timeout_seconds or 120)))
         except asyncio.TimeoutError:
+            # Finalize the row and let the device queue continue right away.
+            # Leaving it "pending" would block every later dispatch to this
+            # device until the orphan sweep (~5 min). A late agent reply still
+            # overwrites the timeout row for audit (see _finalize_dispatch_row).
             _PENDING_DISPATCHES.pop(task_id, None)
+            _finalize_dispatch_row(
+                task_id,
+                status="timeout",
+                success=False,
+                error=f"Endpoint agent result timeout after {timeout_seconds}s",
+            )
+            try:
+                await resume_device_dispatch_queue(device_id)
+            except Exception:
+                logger.exception(f"queue resume after waiter timeout failed device={device_id}")
             return {
                 "success": False,
                 "taskId": task_id,
@@ -459,11 +512,28 @@ async def dispatch_task_to_agent(
 
 
 def _resolve_result_context(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Prefer the tracked dispatch context; fall back to fields echoed by the agent."""
+    """Prefer the tracked dispatch context; fall back to the persisted row,
+    then to fields echoed by the agent.
+
+    The DB fallback matters for late replies (a reply arriving after the
+    waiter timed out and dropped the in-memory context): it preserves
+    ``suppress_session_message`` and the session identity, so a re-delivered
+    result doesn't spam the chat session.
+    """
     task_id = str(data.get("taskId") or "")
     ctx = _PENDING_DISPATCHES.get(task_id)
     if ctx:
         return ctx
+    if task_id:
+        try:
+            with Session(engine) as session:
+                row = session.exec(
+                    select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
+                ).first()
+            if row:
+                return _context_from_dispatch_row(row)
+        except Exception as exc:
+            logger.exception(f"result context lookup failed task={task_id}: {exc}")
     return {
         "device_id": str(data.get("deviceId") or "unknown"),
         "user_id": data.get("userId"),

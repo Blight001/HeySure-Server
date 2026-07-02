@@ -59,6 +59,24 @@ async def device_dispatch(req: DeviceDispatchRequest) -> Dict[str, Any]:
     return {"ok": True, "task_id": task_id, "status": row.status if row else "pending"}
 
 
+class DeviceDispatchExpireRequest(BaseModel):
+    reason: str = "result wait timed out"
+
+
+@router.post("/dispatch/expire/{task_id}")
+async def device_dispatch_expire(
+    task_id: str, req: Optional[DeviceDispatchExpireRequest] = None
+) -> Dict[str, Any]:
+    # Called by pollers (ai-runtime) that gave up waiting on a dispatch: mark
+    # the row timed out and resume the device's queue so the stuck pending row
+    # doesn't wedge every later dispatch until the orphan sweep.
+    from connector_runtime.dispatch.device_dispatch import expire_dispatch
+    expired = await expire_dispatch(
+        task_id, reason=(req.reason if req else "result wait timed out")
+    )
+    return {"ok": True, "expired": expired}
+
+
 @router.get("/dispatch/result/{task_id}")
 def device_dispatch_result(task_id: str) -> Dict[str, Any]:
     # DB-backed lookup so a gateway restart doesn't lose state.

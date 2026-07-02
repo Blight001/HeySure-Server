@@ -143,6 +143,22 @@ def _command_env(project_root: str, *, sandbox_env: bool = False) -> Dict[str, s
     return env
 
 
+def _caller_is_below_manager(user_id: int, ai_config_id: Optional[int]) -> bool:
+    from mcp_runtime.mcp.permissions import ROLE_MANAGER, ROLE_RANK, config_role_tier
+
+    if not ai_config_id:
+        return False
+    with Session(engine) as session:
+        cfg = session.exec(
+            select(AssistantAIConfig).where(
+                AssistantAIConfig.user_id == user_id,
+                AssistantAIConfig.id == ai_config_id,
+            )
+        ).first()
+    tier = config_role_tier(cfg) if cfg else "digital_member_member"
+    return ROLE_RANK.get(tier, 0) < ROLE_RANK.get(ROLE_MANAGER, 0)
+
+
 def _output_decode_encodings() -> List[str]:
     """Preferred decode order for bytes captured from a child process.
 
@@ -373,12 +389,11 @@ def _list_tree(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) 
     }
 
 
-# Action → (handler, minimum role). ``None`` role means available to every tier.
 _FILE_ACTIONS = {
-    "read": (_read_file, None),
-    "tree": (_list_tree, None),
-    "write": (_write_file, "digital_member_manager"),
-    "edit": (_edit_file, "digital_member_manager"),
+    "read": _read_file,
+    "tree": _list_tree,
+    "write": _write_file,
+    "edit": _edit_file,
 }
 
 _FILE_ACTION_ALIASES = {
@@ -394,12 +409,11 @@ def _file_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
     """Unified workspace file tool. Dispatch by ``action``.
 
     Folds ``workspace.{read_file,write_file,edit_file}`` plus a file-tree listing
-    behind one ``action`` parameter. ``read``/``tree`` are open to every tier;
-    ``write``/``edit`` stay manager+ (re-enforced here). Shell execution and web
-    search remain separate tools (``workspace.run_command`` / ``workspace.search``).
+    behind one ``action`` parameter. All actions are open to every tier; regular
+    members are restricted by ``get_project_root`` to their own AI workspace.
+    Shell execution and web search remain separate tools
+    (``workspace.run_command`` / ``workspace.search``).
     """
-    from mcp_runtime.mcp.permissions import enforce_min_role
-
     raw = str((args or {}).get("action") or "").strip().lower()
     action = _FILE_ACTION_ALIASES.get(raw, raw)
     if not action:
@@ -410,10 +424,7 @@ def _file_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             status_code=400,
             detail=f"unsupported action: {action}. 可用: {', '.join(sorted(_FILE_ACTIONS))}",
         )
-    handler, min_role = spec
-    if min_role:
-        enforce_min_role(user_id, ai_config_id, min_role)
-    return handler(user_id, args or {}, ai_config_id)
+    return spec(user_id, args or {}, ai_config_id)
 
 
 FILE_MANAGE_SCHEMA: Dict[str, Any] = {
@@ -425,8 +436,8 @@ FILE_MANAGE_SCHEMA: Dict[str, Any] = {
             "description": (
                 "操作类型："
                 "read 读取工作区内文本文件；tree 列出工作区（或 path 子目录）的文件树；"
-                "write 创建/覆盖文本文件（需管理者+）；edit 按文本块替换/删除/追加/前置编辑（需管理者+）。"
-                "路径必须位于当前 AI 工作区内。"
+                "write 创建/覆盖文本文件；edit 按文本块替换/删除/追加/前置编辑。"
+                "路径必须位于当前 AI 工作区内；普通成员仅限自己的 AI 目录。"
             ),
         },
         "path": {"type": "string", "description": "目标文件/目录路径。相对路径相对当前 AI 工作区；绝对路径必须位于工作区内。"},
@@ -453,6 +464,8 @@ FILE_MANAGE_SCHEMA: Dict[str, Any] = {
 def _run_command(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     project_root = get_project_root(user_id, ai_config_id)
     strict_workspace = _truthy(args.get("strict_workspace") or args.get("workspace_only"))
+    if _caller_is_below_manager(user_id, ai_config_id):
+        strict_workspace = True
     sandbox_env = _truthy(args.get("sandbox_env") or args.get("isolated_env"))
     command_cwd = _resolve_command_cwd(project_root, args.get("cwd"), strict_workspace=strict_workspace)
     timeout = _coerce_timeout(args.get("timeout"))
@@ -685,4 +698,3 @@ def _admin_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int
         status_code=400,
         detail="action is required for admin.manage（可用：overview / list_agents）",
     )
-

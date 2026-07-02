@@ -45,12 +45,13 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     "mcp.describe_tool": ROLE_MEMBER,
     # Web search — external read-only lookup, available to every tier by default.
     "workspace.search": ROLE_MEMBER,
-    # Unified workspace file tool (read/write/edit/tree). Member is the floor so
-    # everyone can read; write/edit are gated to manager+ inside the handler via
-    # ``enforce_min_role``.
+    # Unified workspace file tool (read/write/edit/tree). Regular members are
+    # scoped to their own AI workspace by ``get_project_root``; managers and
+    # assistant admins resolve to the whole user workspace.
     "workspace.manage": ROLE_MEMBER,
-    # Shell command execution is powerful; keep it manager+.
-    "workspace.run_command": ROLE_MANAGER,
+    # Shell command execution is allowed for every member inside the workspace
+    # resolved for that AI. Regular members cannot choose an outside cwd.
+    "workspace.run_command": ROLE_MEMBER,
     # Unified task management tool (create/list/update/delete). Member floor so
     # everyone can list; create/update/delete are gated to manager+ inside the
     # handler. The self-execution operators below stay separate because the
