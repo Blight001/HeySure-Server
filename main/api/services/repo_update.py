@@ -28,6 +28,8 @@ import os
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 from sqlmodel import Session
@@ -259,6 +261,9 @@ def _commit_info(ref: str = "HEAD") -> Optional[Dict[str, Any]]:
 
 def collect_version_info() -> Dict[str, Any]:
     """当前工作区版本快照（无需联网），用于进入栏目时展示。"""
+    remote = _remote_version_info()
+    if remote is not None:
+        return remote
     if not git_available():
         try:
             with open(DEPLOYED_VERSION_FILE, "r", encoding="utf-8") as handle:
@@ -281,12 +286,83 @@ def collect_version_info() -> Dict[str, Any]:
 
 
 def update_mode() -> str:
-    """Return the configured deployment updater: git or unavailable."""
+    """Return the configured deployment updater: remote, git or unavailable."""
+    if remote_updater_available():
+        return "remote"
     return "git" if git_available() else "unavailable"
 
 
 def updater_available() -> bool:
     return update_mode() != "unavailable"
+
+
+def remote_updater_available() -> bool:
+    if not settings.repo_updater_url:
+        return False
+    try:
+        payload = _remote_request("GET", "/health", auth=False, timeout=3)
+        return bool(payload.get("ok"))
+    except Exception:
+        return False
+
+
+def _remote_auth_token() -> str:
+    return settings.repo_updater_token or settings.internal_token
+
+
+def _remote_request(
+    method: str,
+    path: str,
+    body: Optional[Dict[str, Any]] = None,
+    *,
+    auth: bool = True,
+    timeout: float = 30.0,
+) -> Dict[str, Any]:
+    base = settings.repo_updater_url.rstrip("/")
+    if not base:
+        raise RepoUpdateError("未配置宿主更新服务 HEYSURE_REPO_UPDATER_URL")
+    data = None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    token = _remote_auth_token()
+    if auth and token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as res:
+            raw = res.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        raise RepoUpdateError(f"宿主更新服务返回 {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RepoUpdateError(f"无法连接宿主更新服务：{exc.reason}") from exc
+    try:
+        payload = json.loads(raw or "{}")
+    except ValueError as exc:
+        raise RepoUpdateError("宿主更新服务返回了非 JSON 响应") from exc
+    if not isinstance(payload, dict):
+        raise RepoUpdateError("宿主更新服务响应格式无效")
+    if payload.get("ok") is False and payload.get("error"):
+        raise RepoUpdateError(str(payload.get("error")))
+    return payload
+
+
+def _remote_version_info() -> Optional[Dict[str, Any]]:
+    if not settings.repo_updater_url:
+        return None
+    try:
+        payload = _remote_request("GET", "/version", timeout=8)
+        return {
+            "git_available": False,
+            "updater_available": True,
+            "branch": str(payload.get("branch") or ""),
+            "current": payload.get("current") if isinstance(payload.get("current"), dict) else None,
+        }
+    except Exception as exc:
+        logger.warning("repo-update: remote version unavailable: %s", exc)
+        return None
 
 
 def _fetch_and_compare() -> Dict[str, Any]:
@@ -330,6 +406,51 @@ def _pull_fast_forward(branch: str) -> None:
     proc = _run_git(args, timeout=300)
     if proc.returncode != 0:
         raise RepoUpdateError(f"git pull 失败：{(proc.stderr or proc.stdout).strip()}")
+
+
+def _run_remote_check_and_maybe_update(*, trigger: str, auto_apply: bool) -> Dict[str, Any]:
+    _set_state(
+        phase="checking",
+        running=True,
+        trigger=trigger,
+        steps=_fresh_steps(),
+        last_error="",
+        message="正在通过宿主更新服务检测远程更新…",
+    )
+    _set_step(_STEP_CHECK, "active")
+    payload = _remote_request("POST", "/check", {"apply": auto_apply}, timeout=600)
+    _set_state(
+        branch=str(payload.get("branch") or ""),
+        ahead=int(payload.get("ahead") or 0),
+        behind=int(payload.get("behind") or 0),
+        current=payload.get("current") if isinstance(payload.get("current"), dict) else None,
+        remote=payload.get("remote") if isinstance(payload.get("remote"), dict) else None,
+        last_check_at=time.time(),
+    )
+    _set_step(_STEP_CHECK, "done")
+
+    if not payload.get("updated") and not payload.get("update_available"):
+        _set_state(phase="up_to_date", running=False, message="已是最新版本")
+        _set_step(_STEP_PULL, "skipped")
+        _set_step(_STEP_RESTART, "skipped")
+        return {"ok": True, "updated": False, "update_available": False, "state": get_state()}
+
+    if payload.get("update_available") and not auto_apply:
+        _set_state(
+            phase="update_available",
+            running=False,
+            message=f"发现 {int(payload.get('behind') or 0)} 个新提交，待更新",
+        )
+        return {"ok": True, "updated": False, "update_available": True, "state": get_state()}
+
+    from_sha = str(payload.get("from") or ((payload.get("remote") or {}).get("sha") if isinstance(payload.get("remote"), dict) else "") or "")
+    to_sha = str(payload.get("to") or ((payload.get("current") or {}).get("sha") if isinstance(payload.get("current"), dict) else "") or "")
+    if to_sha:
+        _record_last_update(from_sha=from_sha, to_sha=to_sha)
+    _set_step(_STEP_PULL, "done")
+    _set_state(phase="restarting", message="代码已更新，宿主更新服务正在重建并重启容器…")
+    _set_step(_STEP_RESTART, "active")
+    return {"ok": True, "updated": True, "restarting": True, "state": get_state()}
 
 
 # ---------------------------------------------------------------------------
@@ -383,13 +504,17 @@ def run_check_and_maybe_update(*, trigger: str, auto_apply: bool) -> Dict[str, A
     """
     mode = update_mode()
     if mode == "unavailable":
-        _set_state(phase="error", running=False, last_error="当前部署不是可用的 git 工作区，无法自动更新", message="git 不可用")
-        return {"ok": False, "error": "git 不可用", "state": get_state()}
+        error = "未连接宿主更新服务，且当前部署不是可用的 git 工作区"
+        _set_state(phase="error", running=False, last_error=error, message="更新器不可用")
+        return {"ok": False, "error": error, "state": get_state()}
 
     if not _op_lock.acquire(blocking=False):
         return {"ok": False, "busy": True, "state": get_state()}
 
     try:
+        if mode == "remote":
+            return _run_remote_check_and_maybe_update(trigger=trigger, auto_apply=auto_apply)
+
         _set_state(
             phase="checking",
             running=True,

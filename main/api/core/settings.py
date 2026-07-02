@@ -115,6 +115,17 @@ class Settings(BaseSettings):
         description="HTTP base of the ai-runtime worker's internal status server "
         "(health + console tail). Empty = admin panel skips the worker.",
     )
+    repo_updater_url: str = Field(
+        default="",
+        description="HTTP base of the host-side repository updater used by Docker "
+        "deployments. When set, version updates are requested over HTTP instead of "
+        "reading a Git worktree from inside the gateway container.",
+    )
+    repo_updater_token: str = Field(
+        default="",
+        description="Bearer token for the host-side repository updater. Empty falls "
+        "back to HEYSURE_INTERNAL_TOKEN.",
+    )
     connector_runtime_port: int = Field(default=3002)
     mcp_runtime_port: int = Field(default=3001)
     ai_runtime_port: int = Field(default=3003)
@@ -248,6 +259,8 @@ class Settings(BaseSettings):
         "mcp_runtime_url",
         "connector_runtime_url",
         "ai_runtime_url",
+        "repo_updater_url",
+        "repo_updater_token",
         "agent_token",
         "smtp_host",
         "smtp_username",
