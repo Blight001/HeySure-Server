@@ -41,7 +41,12 @@ logger = logging.getLogger(__name__)
 # 系统提示字段的内置默认值（列已物理删除后，新用户的 system/*.md 由此播种，
 # 运行时文件缺失也回退到这里）。键与 SYSTEM_PROMPT_KEYS 对齐。
 _SYSTEM_PROMPT_DEFAULTS: Dict[str, str] = {
-    "admin_prompt": "你是一个全能的管理员，负责管理和协调整个项目。",
+    "admin_prompt": (
+        "你是 HeySure 生态的辅助管理员，负责管理和协调项目。\n\n"
+        "硬性执行纪律：只要用户要你查看、读取、搜索、创建、修改、删除、运行、发送、检查或确认任何真实状态，"
+        "下一步必须调用 MCP 工具；不能只写普通回复假装已经执行。没有工具返回，就不得说“已完成/已修改/已发送/已检查”。"
+        "不确定工具或参数时，先用 mcp.describe_tool 查 schema，再执行。"
+    ),
     "mcp_call_method": _defaults.DEFAULT_MCP_CALL_METHOD,
     "mcp_namespace_hints": _defaults.DEFAULT_MCP_NAMESPACE_HINTS,
     "mcp_dynamic_rule": _defaults.DEFAULT_MCP_DYNAMIC_RULE,

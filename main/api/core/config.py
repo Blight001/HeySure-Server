@@ -24,11 +24,6 @@ USER_SHARED_SUBFOLDERS = ()
 # Backwards-compatible alias for older imports.
 USER_WORKSPACE_SUBFOLDERS = USER_SHARED_SUBFOLDERS
 
-# Admin AIs (``ai_role == "assistant_admin"``) share a single working
-# directory instead of each getting their own.
-ADMIN_WORKSPACE_DIRNAME = "_admins"
-
-
 def user_workspace_dir(user_id: int) -> str:
     return os.path.join(WORKSPACE_DIR, str(user_id))
 
@@ -50,12 +45,10 @@ def _ai_dir_slug(name: str) -> str:
 def ai_workspace_dirname(ai_config_id, name, ai_role) -> str:
     """Per-AI working directory name under the user workspace.
 
-    Admin AIs share ``_admins``; every other AI gets a readable
-    ``<id>-<slug>`` directory so workspace folders are no longer opaque
-    integers.
+    Every AI, including assistant admins, gets a readable ``<id>-<slug>``
+    directory so workspace folders are no longer opaque integers or role-based
+    shared buckets.
     """
-    if str(ai_role or "").strip() == "assistant_admin":
-        return ADMIN_WORKSPACE_DIRNAME
     slug = _ai_dir_slug(name)
     cid = int(ai_config_id or 0)
     return f"{cid}-{slug}" if cid else slug

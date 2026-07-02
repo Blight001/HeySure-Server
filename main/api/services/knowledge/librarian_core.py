@@ -71,9 +71,9 @@ _BUILTIN_ENTRIES = {
         "summary": "系统固定注册的服务端 MCP 工具定义（按 namespace 分组）。",
     },
     "builtin.inheritance_tools": {
-        "title": "传承思想",
-        "triggers": ["传承思想", "Markdown文件", "思想沉淀"],
-        "summary": "从 ClawHub 安装到本地知识库的 Markdown 思想与技能快照。",
+        "title": "传承知识",
+        "triggers": ["传承知识", "传承思想", "Markdown文件", "思想沉淀"],
+        "summary": "KnowledgeBase/topics 下的 Markdown 知识、思想与技能快照。",
     },
 }
 

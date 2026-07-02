@@ -114,12 +114,14 @@ def start_chat_run(
     if trimmed_system:
         merged_system_prompt = f"{system_prompt}\n\n" + "\n\n".join(trimmed_system)
 
+    visible_tags = str(req.get("visible_tags") or "").strip()
     user_msg = _save_message(
         session,
         user.id,
         ChatMessageCreate(
             role="user",
             content=visible_content or model_content,
+            tags=visible_tags,
             ai_config_id=ai_config_id,
             ai_kind=ai_kind,
             session_id=session_id,
@@ -433,8 +435,12 @@ def list_files(
     user = get_current_user(authorization, session)
     project_root = get_project_root(user.id, None)
     all_paths = []
+    ignored_dirs = {".git", "__pycache__", "venv", "node_modules", ".aider", ".sandbox_home", ".sandbox_tmp", "_admins"}
     for root, dirs, files in os.walk(project_root):
-        dirs[:] = [d for d in dirs if d not in {".git", "__pycache__", "venv", "node_modules", ".aider"}]
+        dirs[:] = [
+            d for d in dirs
+            if d not in ignored_dirs and not d.startswith(".sandbox")
+        ]
         rel_root = os.path.relpath(root, project_root)
         rel_root = "" if rel_root == "." else rel_root
         for directory in dirs:

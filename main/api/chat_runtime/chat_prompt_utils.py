@@ -704,7 +704,13 @@ def _sanitize_large_media(value):
 
 def _safe_json(value, max_len: int = 12000) -> str:
     try:
-        text = json.dumps(_sanitize_large_media(value), ensure_ascii=False, indent=2)
+        sanitized = _sanitize_large_media(value)
+        text = json.dumps(sanitized, ensure_ascii=False, indent=2)
+        if len(text) > max_len:
+            # Pretty-printing bloats large payloads 2-3x with whitespace; retry
+            # compact so element-heavy tool results (e.g. browser_observe on a
+            # busy page) keep their full item list instead of being cut mid-way.
+            text = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
     except Exception:
         text = str(value)
     if len(text) <= max_len:

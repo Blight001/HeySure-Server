@@ -30,6 +30,7 @@ from .librarian_core import (
     _read_text,
     _split_frontmatter,
     _clawhub_installed_items,
+    _load_user_knowledge_entries,
     _upsert_thought,
     _delete_thought_file,
     _find_thought,
@@ -42,8 +43,39 @@ logger = logging.getLogger(__name__)
 
 def _inheritance_thoughts_payload(user_id: int) -> Dict[str, Any]:
     installed = _clawhub_installed_items(user_id)
+    thought_paths = {
+        str(item.get("path") or "").strip().replace("\\", "/")
+        for item in installed
+        if str(item.get("path") or "").strip()
+    }
+    for entry in _load_user_knowledge_entries(user_id):
+        path = str(entry.get("file_path") or "").strip().replace("\\", "/")
+        if not path or path in thought_paths:
+            continue
+        if str(entry.get("status") or "active") != "active":
+            continue
+        memory_id = str(entry.get("memory_id") or "").strip()
+        if not memory_id:
+            continue
+        installed.append({
+            "slug": memory_id,
+            "memory_id": memory_id,
+            "displayName": str(entry.get("title") or memory_id),
+            "summary": str(entry.get("summary") or ""),
+            "triggers": entry.get("triggers") or [],
+            "version": None,
+            "ownerHandle": "",
+            "source": "topic",
+            "path": path,
+            "installed_at": float(entry.get("created_at") or entry.get("updated_at") or 0),
+            "auto_enabled": False,
+            "endpoint_kind": "any",
+            "present": True,
+            "kind": "knowledge",
+        })
+    installed.sort(key=lambda item: float(item.get("installed_at") or 0), reverse=True)
     return {
-        "description": "传承思想以单文件 .md 落盘在 KnowledgeBase/topics/ 下（frontmatter 即元数据），可由 AI 主动创建或从 ClawHub / npx skills 安装；运行时只使用本地文件。",
+        "description": "传承知识以单文件 .md 落盘在 KnowledgeBase/topics/ 下（frontmatter 即元数据），可由 AI 主动创建或从 ClawHub / npx skills 安装；运行时只使用本地文件。",
         "registry_url": clawhub.registry_base_url(),
         "storage_root": _TOPICS_DIR,
         "installed_total": len(installed),
@@ -610,7 +642,7 @@ def install_npx_skill_package(
 
 def _render_inheritance_thoughts_body(payload: Dict[str, Any]) -> str:
     lines = [
-        "# 传承思想",
+        "# 传承知识",
         "",
         str(payload.get("description") or ""),
         "",
@@ -621,12 +653,12 @@ def _render_inheritance_thoughts_body(payload: Dict[str, Any]) -> str:
     ]
     installed = payload.get("installed") if isinstance(payload.get("installed"), list) else []
     if installed:
-        lines.append("## 已安装 ClawHub 技能")
+        lines.append("## 已安装 / 已沉淀条目")
         lines.append("")
         for item in installed:
             slug = str(item.get("slug") or "")
             name = str(item.get("displayName") or slug)
-            version = str(item.get("version") or "latest")
+            version = str(item.get("version") or ("knowledge" if item.get("kind") == "knowledge" else "latest"))
             owner = str(item.get("ownerHandle") or "")
             present = "可用" if item.get("present") else "文件缺失"
             lines.append(f"- `{slug}` {name} · {version} · {owner} · {present}")
