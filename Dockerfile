@@ -4,8 +4,14 @@ WORKDIR /app
 
 ENV PYTHONPATH=/app/main:/app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl \
+RUN sed -i \
+        -e 's|http://deb.debian.org/debian-security|http://mirrors.tuna.tsinghua.edu.cn/debian-security|g' \
+        -e 's|http://deb.debian.org/debian|http://mirrors.tuna.tsinghua.edu.cn/debian|g' \
+        /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
+    && HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+        apt-get update -o Acquire::Retries=5 \
+    && HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= \
+        apt-get install -y --no-install-recommends -o Acquire::Retries=5 git curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
