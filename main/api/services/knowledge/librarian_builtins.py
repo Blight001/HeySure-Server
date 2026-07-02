@@ -90,7 +90,7 @@ def _builtin_entry(memory_id: str, *, user_id: Optional[int] = None, with_body: 
             out["body"] = _render_inheritance_thoughts_body(thoughts)
     return out
 _INTRINSIC_SCOPE_DESCRIPTIONS = {
-    "all": "系统当前固定注册的服务端 MCP 工具定义如下；默认中文展示，编辑后会同步影响 [动态 MCP 说明] 目录与 mcp.describe_tool 的返回。",
+    "all": "系统当前固定注册的服务端 MCP 工具定义如下；默认中文展示，编辑后会同步影响随消息附带的 [本轮可用 MCP 工具] 目录与 mcp.describe_tool 的返回。",
     "toolbox": "「工具箱」：每个 AI 默认即可用的系统固定 MCP 工具（无需绑定）；编辑后会同步影响 mcp.describe_tool 的返回。",
     "library": "「图书馆」管理工具：需要该 AI 绑定图书馆后才能调用的治理 / 管理类 MCP（prompt 管理、管理员操作、设备管理、知识库管理）。",
 }

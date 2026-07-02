@@ -21,11 +21,9 @@ from api.services.tasks.task_system import with_workspace_read_by_name_compat
 from .run_state import _RUN_LIVE_STATE, _RUN_STATE_LOCK
 from .chat_prompt_utils import (
     _append_prompt_section,
-    _build_dynamic_mcp_explanation,
     _clear_run_live_text,
     _emit_run_done,
     _filter_tools_for_current_bindings,
-    _render_mcp_tool_catalog,
     _strip_prompt_section,
     _strip_runtime_injected_sections,
     _strip_task_runtime_sections,
@@ -81,6 +79,12 @@ def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id
         )
     return cfg, api_key, base_url, model, system_prompt
 
+# Web 前端勾选工坊/工具组后，会把该组 MCP 工具目录以这个段标题追加进当轮用户
+# 消息（model_content），随消息动态携带。系统提示不再注入 [动态 MCP 说明]
+# 目录（见 build_runtime_system_prompt_and_tools 内的说明）；模型侧的工具发现
+# 依赖该段 + mcp.describe_tool（tool / tools / query）。
+CLIENT_MCP_CATALOG_MARKER = "[本轮可用 MCP 工具]"
+
 def build_runtime_system_prompt_and_tools(
     session: Session,
     user: User,
@@ -98,9 +102,11 @@ def build_runtime_system_prompt_and_tools(
 
     Both the inference worker (``ai_runtime``) and the live ``/system-prompt-preview``
     endpoint (``gateway``) call this, so the prompt shown to the user is assembled by
-    the exact same logic the model receives — same dynamic MCP catalog, same task
-    sections. This prevents the two paths from drifting (e.g. a tool listed in the
-    preview but missing from the prompt the model actually got).
+    the exact same logic the model receives — same MCP discovery hint, same task
+    sections. This prevents the two paths from drifting. Note: the full MCP tool
+    catalog ([动态 MCP 说明]) is no longer injected into the system prompt; the web
+    client attaches the checked tool groups' catalog to the current user message
+    instead (see ``CLIENT_MCP_CATALOG_MARKER``).
 
     ``cfg`` / ``base_system_prompt`` / ``task_payload`` may be passed in by a caller
     that already resolved them (the inference loop) to avoid recomputation; when
@@ -236,28 +242,20 @@ def build_runtime_system_prompt_and_tools(
             task_plan_flow_text,
         )
 
-    # Always strip any stale catalog first (prevents accumulation from previous
-    # injections or loaded prompts that had repeated sections).
+    # [动态 MCP 说明] 目录已从系统提示中卸载：工具目录改为由 Web 前端在勾选
+    # 工坊/工具组后随当轮用户消息携带（段标题 CLIENT_MCP_CATALOG_MARKER），
+    # 未携带时模型通过 mcp.describe_tool（tool / tools / query）按需发现工具。
+    # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。
     system_prompt = _strip_prompt_section(system_prompt, "动态 MCP 说明")
     system_prompt = _strip_prompt_section(system_prompt, "可用MCP工具")
 
-    mcp_catalog_active = bool(effective_tool_allowlist) and (
-        cfg is None or getattr(cfg, "mcp_enabled", False)
-    )
-    if mcp_catalog_active:
-        endpoint_catalog_tools = endpoint_tools_for_config(ai_config_id, uid)
-        endpoint_catalog_tools |= endpoint_bridge_tools_for_config(ai_config_id, uid)
-        catalog_body = (
-            "以下是你当前可调用的全部 MCP 工具（名称 + 简介，`!` 表示有副作用）。"
-            "直接从这里定位需要的工具。\n"
-            "确定工具后，用一次 mcp.describe_tool 取参数 schema 再调用："
-            "可在 tools 数组里一次传多个工具名，或用 query 关键词搜索相关工具。\n\n"
-            + _build_dynamic_mcp_explanation(effective_tool_allowlist, endpoint_catalog_tools, uid, ai_config_id)
-        )
+    if bool(effective_tool_allowlist) and (cfg is None or getattr(cfg, "mcp_enabled", False)):
         system_prompt = _append_prompt_section(
-            _strip_prompt_section(system_prompt, "动态 MCP 说明"),
-            "动态 MCP 说明",
-            catalog_body,
+            _strip_prompt_section(system_prompt, "MCP 工具发现"),
+            "MCP 工具发现",
+            "工具目录不再内置于系统提示。当轮用户消息若附带 [本轮可用 MCP 工具] 段，"
+            "优先从该目录定位工具；否则用 mcp.describe_tool 发现工具"
+            "（tool 单个 / tools 批量 / query 关键词搜索），取到参数 schema 后即可直接调用。",
         )
     return system_prompt, effective_tool_allowlist
 

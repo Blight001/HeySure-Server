@@ -50,13 +50,11 @@ from api.services.tasks.task_system import (
 from api.chat_runtime.chat_prompt_utils import (
     _append_mcp_state_to_tags,
     _append_prompt_section,
-    _build_dynamic_mcp_explanation,
     _build_mcp_display_result,
     _build_mcp_stream_warning,
     _extract_first_mcp_call,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
-    _render_mcp_tool_catalog,
     _sanitize_large_media,
     _safe_json,
     _set_run_live_meta,
@@ -1368,9 +1366,10 @@ def _run_worker_impl(
                         token_threshold_override = None
 
             # Single source of truth shared with the live /system-prompt-preview
-            # endpoint: identical dynamic MCP catalog + task sections, so the prompt
-            # shown to the user is exactly the prompt the model receives (no drift
-            # where a tool is listed in the preview but missing from the real prompt).
+            # endpoint: identical MCP discovery hint + task sections, so the prompt
+            # shown to the user is exactly the prompt the model receives. The MCP
+            # tool catalog itself is no longer injected here — the web client
+            # attaches it per-turn inside the user message (CLIENT_MCP_CATALOG_MARKER).
             system_prompt, effective_tool_allowlist = build_runtime_system_prompt_and_tools(
                 bg,
                 user,
