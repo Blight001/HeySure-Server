@@ -111,7 +111,8 @@ def _record_last_update(*, from_sha: str, to_sha: str) -> None:
 # ---------------------------------------------------------------------------
 
 # 阶段：idle 空闲 / checking 检测中 / up_to_date 已是最新 / update_available 有新版本
-#       / pulling 拉取中 / restarting 重启中 / error 失败
+#       / pulling 拉取中 / queued_restart 等待重建 / rebuilding 构建镜像
+#       / restarting 重建容器 / done 完成 / error 失败
 _STEP_CHECK = "check"
 _STEP_PULL = "pull"
 _STEP_RESTART = "restart"
@@ -365,6 +366,63 @@ def _remote_version_info() -> Optional[Dict[str, Any]]:
         return None
 
 
+_REMOTE_RESTART_PHASES = {"queued_restart", "rebuilding", "restarting"}
+_REMOTE_PHASE_MESSAGES = {
+    "queued_restart": "代码已更新，等待宿主更新服务开始重建…",
+    "rebuilding": "正在构建 Docker 镜像…",
+    "restarting": "正在重建并启动 Docker 容器…",
+    "done": "服务已更新并启动",
+    "error": "宿主更新服务重建失败",
+}
+
+
+def sync_remote_update_state() -> None:
+    """Mirror the host updater's rebuild/restart phase into the gateway state."""
+    if not settings.repo_updater_url:
+        return
+    phase = str(_state.get("phase") or "")
+    if phase not in _REMOTE_RESTART_PHASES and not bool(_state.get("running")):
+        return
+    try:
+        payload = _remote_request("GET", "/state", timeout=5)
+    except Exception as exc:
+        logger.debug("repo-update: remote state unavailable: %s", exc)
+        return
+    remote_state = payload.get("state")
+    if not isinstance(remote_state, dict):
+        return
+    remote_phase = str(remote_state.get("phase") or "")
+    if not remote_phase:
+        return
+
+    if remote_phase in _REMOTE_RESTART_PHASES:
+        _set_state(
+            phase=remote_phase,
+            running=True,
+            message=_REMOTE_PHASE_MESSAGES.get(remote_phase) or str(remote_state.get("message") or ""),
+            last_error="",
+        )
+        _set_step(_STEP_PULL, "done")
+        _set_step(_STEP_RESTART, "active")
+    elif remote_phase == "done":
+        _set_state(
+            phase="done",
+            running=False,
+            message=_REMOTE_PHASE_MESSAGES["done"],
+            last_error="",
+        )
+        _set_step(_STEP_PULL, "done")
+        _set_step(_STEP_RESTART, "done")
+    elif remote_phase == "error":
+        _set_state(
+            phase="error",
+            running=False,
+            message=_REMOTE_PHASE_MESSAGES["error"],
+            last_error=str(remote_state.get("last_error") or "宿主更新服务重建失败"),
+        )
+        _set_step(_STEP_RESTART, "error")
+
+
 def _fetch_and_compare() -> Dict[str, Any]:
     """``git fetch`` 后比较本地与远程，返回领先/落后提交数及双方 commit 信息。"""
     branch = _current_branch()
@@ -448,8 +506,9 @@ def _run_remote_check_and_maybe_update(*, trigger: str, auto_apply: bool) -> Dic
     if to_sha:
         _record_last_update(from_sha=from_sha, to_sha=to_sha)
     _set_step(_STEP_PULL, "done")
-    _set_state(phase="restarting", message="代码已更新，宿主更新服务正在重建并重启容器…")
+    _set_state(phase="queued_restart", running=True, message="代码已更新，等待宿主更新服务开始重建…")
     _set_step(_STEP_RESTART, "active")
+    sync_remote_update_state()
     return {"ok": True, "updated": True, "restarting": True, "state": get_state()}
 
 
