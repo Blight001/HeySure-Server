@@ -617,6 +617,12 @@ def _rel_to_root(full: str) -> str:
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".avif"}
+TEXT_EXTS = {
+    ".md", ".markdown", ".txt", ".log", ".csv", ".tsv",
+    ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".env",
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".html", ".htm", ".css", ".scss",
+    ".bat", ".cmd", ".ps1", ".sh", ".sql",
+}
 
 
 def _file_kind(name: str) -> str:
@@ -628,6 +634,8 @@ def _file_kind(name: str) -> str:
     ext = os.path.splitext(name)[1].lower()
     if ext in IMAGE_EXTS:
         return "image"
+    if ext in TEXT_EXTS:
+        return "text"
     mime, _ = mimetypes.guess_type(name)
     if mime and (mime.startswith("text/") or mime in ("application/json", "application/xml", "application/javascript")):
         return "text"

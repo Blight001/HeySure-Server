@@ -13,7 +13,6 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from api.database import engine
-from mcp_runtime.mcp import get_project_root
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatRun, User
 from api.common.value_utils import safe_json_obj
 from api.services.model_presets import resolve_model_preset
@@ -56,8 +55,6 @@ def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id
         api_key, base_url, model = resolve_model_preset(user, cfg)
         # 方案 A：人格 Prompt 直接读 KnowledgeBase/personas/*.md（文件缺失回退 DB）。
         system_prompt = _strip_runtime_injected_sections(kb_store.effective_ai_prompt(user.id, cfg))
-        # Show the effective runtime workspace (absolute path), not only raw config text like ".".
-        system_prompt = _append_prompt_section(system_prompt, "AI 工作目录", get_project_root(user.id, cfg.id))
         if cfg.database_uri:
             system_prompt = _append_prompt_section(system_prompt, "AI 数据库连接", cfg.database_uri)
     else:
@@ -224,12 +221,6 @@ def build_runtime_system_prompt_and_tools(
     if merged_system_prompt:
         system_prompt = merged_system_prompt
     if is_task_runtime:
-        # Keep only one effective workspace section in task runtime prompt.
-        system_prompt = _append_prompt_section(
-            _strip_prompt_section(system_prompt, "AI 工作目录"),
-            "AI 工作目录",
-            get_project_root(uid, ai_config_id),
-        )
         # Remove legacy task-runtime prompt sections; task constraints are enforced server-side.
         system_prompt = _strip_task_runtime_sections(system_prompt)
         # Steer the planned task flow: plan -> phased execution -> summarized end.
@@ -242,21 +233,9 @@ def build_runtime_system_prompt_and_tools(
             task_plan_flow_text,
         )
 
-    # [动态 MCP 说明] 目录已从系统提示中卸载：工具目录改为由 Web 前端在勾选
-    # 工坊/工具组后随当轮用户消息携带（段标题 CLIENT_MCP_CATALOG_MARKER），
-    # 未携带时模型通过 mcp.describe_tool（tool / tools / query）按需发现工具。
     # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。
     system_prompt = _strip_prompt_section(system_prompt, "动态 MCP 说明")
     system_prompt = _strip_prompt_section(system_prompt, "可用MCP工具")
-
-    if bool(effective_tool_allowlist) and (cfg is None or getattr(cfg, "mcp_enabled", False)):
-        system_prompt = _append_prompt_section(
-            _strip_prompt_section(system_prompt, "MCP 工具发现"),
-            "MCP 工具发现",
-            "工具目录不再内置于系统提示。当轮用户消息若附带 [本轮可用 MCP 工具] 段，"
-            "优先从该目录定位工具；否则用 mcp.describe_tool 发现工具"
-            "（tool 单个 / tools 批量 / query 关键词搜索），取到参数 schema 后即可直接调用。",
-        )
     return system_prompt, effective_tool_allowlist
 
 

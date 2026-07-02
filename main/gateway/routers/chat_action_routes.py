@@ -5,6 +5,7 @@ and stream run output (SSE) by dispatching to the AI runtime worker."""
 IS_ROUTER_ENTRY = False
 
 import json
+import mimetypes
 import os
 import threading
 import time
@@ -12,6 +13,7 @@ import uuid
 from typing import List, Optional
 
 from fastapi import Depends, Header, HTTPException, Response
+from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse  # 用于 /stream 端点的 SSE 流式响应
 from sqlmodel import Session, select
 
@@ -34,6 +36,56 @@ from api.chat_runtime.chat_prompt_utils import (
 )
 from api.chat_runtime.chat_runtime_helpers import _resolve_ai_runtime
 from ai_runtime.inference.core import _raise_for_upstream_error, _run_worker
+
+
+MAX_WORKSPACE_PREVIEW_BYTES = 1024 * 1024
+WORKSPACE_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico", ".avif"}
+WORKSPACE_VIDEO_EXTS = {".mp4", ".webm", ".ogg", ".ogv", ".mov", ".m4v"}
+WORKSPACE_TEXT_EXTS = {
+    ".md", ".markdown", ".txt", ".log", ".csv", ".tsv",
+    ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".env",
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".html", ".htm", ".css", ".scss",
+    ".bat", ".cmd", ".ps1", ".sh", ".sql",
+}
+
+
+def _safe_user_workspace_path(user_id: int, rel: str) -> str:
+    root = os.path.realpath(get_project_root(user_id, None))
+    clean = str(rel or "").strip().replace("\\", "/").lstrip("/")
+    full = os.path.realpath(os.path.join(root, clean))
+    if full != root and not full.startswith(root + os.sep):
+        raise HTTPException(status_code=400, detail="非法的文件路径")
+    return full
+
+
+def _workspace_rel_path(user_id: int, full: str) -> str:
+    root = os.path.realpath(get_project_root(user_id, None))
+    rel = os.path.relpath(full, root).replace(os.sep, "/")
+    return "" if rel == "." else rel
+
+
+def _workspace_file_kind(name: str) -> str:
+    ext = os.path.splitext(name)[1].lower()
+    if ext in WORKSPACE_IMAGE_EXTS:
+        return "image"
+    if ext in WORKSPACE_VIDEO_EXTS:
+        return "video"
+    if ext in WORKSPACE_TEXT_EXTS:
+        return "text"
+    mime, _ = mimetypes.guess_type(name)
+    if mime and (mime.startswith("text/") or mime in ("application/json", "application/xml", "application/javascript")):
+        return "text"
+    return "text" if not ext else "binary"
+
+
+def _is_probably_text(data: bytes) -> bool:
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
 
 
 def _ai_dispatch_mode() -> str:
@@ -449,6 +501,63 @@ def list_files(
             all_paths.append((os.path.join(rel_root, filename) if rel_root else filename).replace(os.sep, "/"))
     return sorted(set(all_paths))
 
+
+@router.get("/files/read")
+def read_workspace_file(
+    path: str,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    full = _safe_user_workspace_path(user.id, path)
+    if not os.path.isfile(full):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    size = os.path.getsize(full)
+    kind = _workspace_file_kind(os.path.basename(full))
+    if size > MAX_WORKSPACE_PREVIEW_BYTES:
+        return {
+            "path": _workspace_rel_path(user.id, full),
+            "size": size,
+            "binary": False,
+            "too_large": True,
+            "content": "",
+            "kind": kind,
+        }
+    with open(full, "rb") as handle:
+        data = handle.read()
+    if not _is_probably_text(data):
+        return {
+            "path": _workspace_rel_path(user.id, full),
+            "size": size,
+            "binary": True,
+            "too_large": False,
+            "content": "",
+            "kind": kind,
+        }
+    return {
+        "path": _workspace_rel_path(user.id, full),
+        "size": size,
+        "binary": False,
+        "too_large": False,
+        "content": data.decode("utf-8"),
+        "kind": kind,
+    }
+
+
+@router.get("/files/raw")
+def raw_workspace_file(
+    path: str,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    full = _safe_user_workspace_path(user.id, path)
+    if not os.path.isfile(full):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    media_type, _ = mimetypes.guess_type(full)
+    return FileResponse(full, media_type=media_type or "application/octet-stream")
+
+
 @router.get("/tree")
 async def get_tree(
     session: Session = Depends(get_session),
@@ -582,7 +691,6 @@ def stream_chat(
         api_key, base_url, model = resolve_model_preset(user, cfg)
         # 方案 A：人格 Prompt 直接读 KnowledgeBase/personas/*.md（文件缺失回退 DB）。
         system_prompt = _strip_runtime_injected_sections(kb_store.effective_ai_prompt(user.id, cfg))
-        system_prompt = _append_prompt_section(system_prompt, "AI 工作目录", get_project_root(user.id, cfg.id))
         if cfg.database_uri:
             system_prompt = _append_prompt_section(system_prompt, "AI 数据库连接", cfg.database_uri)
     else:

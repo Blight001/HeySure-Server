@@ -35,14 +35,14 @@ def _is_workspace_tool(tool: Dict[str, Any]) -> bool:
 def _agent_display_name(agent: Dict[str, Any]) -> str:
     # 只用用户可读的设备名；未起名的设备 name 往往回落成设备编号
     # （如 br-mh4a3wc0），编号对用户和模型都没有信息量，一律改用
-    # 设备类型的友好名称展示（浏览器端 / 桌面端 / 安卓端 / 图书馆）。
+    # 设备类型的友好名称展示（浏览器插件 / 桌面端 / 安卓端 / 图书馆）。
     device_id = str(agent.get("id") or agent.get("deviceId") or "").strip()
     name = str(agent.get("name") or agent.get("deviceName") or "").strip()
     if name and name.lower() != device_id.lower():
         return name
     device_type = device_type_of(agent)
     if device_type == "browser":
-        return "浏览器端"
+        return "浏览器插件"
     if device_type == "android":
         return "安卓端"
     if device_type == "workshop":

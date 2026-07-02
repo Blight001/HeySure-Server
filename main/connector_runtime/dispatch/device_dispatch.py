@@ -301,15 +301,17 @@ def _device_kind_label(device_id: str) -> str:
             continue
         platform = str(agent.get("platform") or "").lower()
         if bool(agent.get("isWorkshop")) or "workshop" in platform:
-            return "图书馆Agent"
+            return "图书馆"
         if bool(agent.get("isBrowserExtension")) or "browser-extension" in platform:
-            return "浏览器Agent"
+            return "浏览器插件"
         if bool(agent.get("isAndroid")) or "android" in platform:
-            return "安卓端Agent"
+            return "安卓端"
         if bool(agent.get("isWindowsDesktop")) or "desktop" in platform:
-            return "桌面端Agent"
-        return "端侧Agent"
-    return "端侧Agent"
+            return "桌面端"
+        if "browser" in platform:
+            return "浏览器端"
+        return "端侧设备"
+    return "端侧设备"
 
 
 def _context_from_dispatch_row(row: AgentDispatchTask) -> Dict[str, Any]:
@@ -670,7 +672,7 @@ async def handle_task_result(data: Dict[str, Any]) -> None:
     agent_label = _device_kind_label(device_id)
     content = (
         f"[{agent_label}执行结果]\n"
-        f"Agent: {device_id}\n"
+        f"端侧: {agent_label}\n"
         f"工具: {tool or '(综合任务)'}\n"
         f"状态: {status}\n\n"
         f"[摘要]\n{summary or '(无摘要)'}\n\n"
@@ -722,7 +724,7 @@ async def handle_task_error(data: Dict[str, Any]) -> None:
     agent_label = _device_kind_label(device_id)
     content = (
         f"[{agent_label}执行失败]\n"
-        f"Agent: {device_id}\n"
+        f"端侧: {agent_label}\n"
         f"工具: {ctx.get('tool') or '(综合任务)'}\n\n"
         f"[错误]\n{error}"
     )
