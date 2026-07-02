@@ -97,6 +97,23 @@ def _git(args: list[str], timeout: float = 120.0) -> subprocess.CompletedProcess
     return _run(["git", *args], timeout=timeout)
 
 
+def _git_output(args: list[str], timeout: float = 120.0) -> str:
+    return _git(args, timeout=timeout).stdout.strip()
+
+
+def _discard_local_changes() -> None:
+    _git(["reset", "--hard", "HEAD"], timeout=120)
+    _git(["clean", "-fd"], timeout=120)
+
+
+def _reset_to_remote(branch: str, upstream: str) -> None:
+    _discard_local_changes()
+    if branch:
+        _git(["checkout", branch], timeout=120)
+    _git(["reset", "--hard", upstream], timeout=120)
+    _git(["clean", "-fd"], timeout=120)
+
+
 def _read_version_file() -> dict[str, Any] | None:
     try:
         payload = json.loads(VERSION_FILE.read_text(encoding="utf-8"))
@@ -226,8 +243,8 @@ def _check_and_update(apply: bool) -> dict[str, Any]:
 
         from_sha = ((info.get("current") or {}).get("sha") or "")
         _set_state(phase="pulling", message="pulling latest code")
-        _git(["pull", "--ff-only", "origin", info["branch"]] if info["branch"] else ["pull", "--ff-only"], timeout=300)
-        _git(["submodule", "update", "--init", "--recursive"], timeout=300)
+        _reset_to_remote(str(info.get("branch") or ""), str(info.get("upstream") or ""))
+        _git(["submodule", "update", "--init", "--recursive", "--force"], timeout=300)
         version = _version()
         to_sha = ((version.get("current") or {}).get("sha") or "")
         _write_version_file(version)
