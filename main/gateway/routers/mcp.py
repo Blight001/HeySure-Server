@@ -209,8 +209,6 @@ async def call_mcp_tool(
         ).first()
         if not cfg:
             raise HTTPException(status_code=404, detail="AI config not found")
-        if not cfg.enabled:
-            raise HTTPException(status_code=400, detail="AI is stopped")
         if not cfg.mcp_enabled:
             raise HTTPException(status_code=400, detail="MCP is disabled for this AI")
         try:

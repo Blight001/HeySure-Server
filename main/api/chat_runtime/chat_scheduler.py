@@ -260,7 +260,6 @@ def process_task_scheduler() -> Dict[str, int]:
         cfgs = session.exec(
             select(AssistantAIConfig).where(
                 AssistantAIConfig.ai_role == "digital_member",
-                AssistantAIConfig.enabled == True,
             )
         ).all()
         from api.services.knowledge import kb_store

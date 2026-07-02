@@ -1,5 +1,5 @@
-"""``/api/ai`` config routes: CRUD for ``AssistantAIConfig`` members plus run
-toggling, parent binding, governance tree, cloning, and MCP enable/disable."""
+"""``/api/ai`` config routes: CRUD for ``AssistantAIConfig`` members plus
+parent binding, governance tree, cloning, and MCP enable/disable."""
 
 IS_ROUTER_ENTRY = False
 
@@ -105,7 +105,40 @@ def list_ai_configs(
         .where(AssistantAIConfig.user_id == user.id)
         .order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
     ).all()
+    if _ensure_configs_enabled(session, user.id, rows):
+        rows = session.exec(
+            select(AssistantAIConfig)
+            .where(AssistantAIConfig.user_id == user.id)
+            .order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
+        ).all()
     return [_cfg_response(row, user.id) for row in rows]
+
+
+def _ensure_configs_enabled(session: Session, user_id: int, rows: list[AssistantAIConfig]) -> bool:
+    """One-time repair for configs stopped before AI stop controls were removed."""
+    changed = False
+    for cfg in rows:
+        if cfg.enabled:
+            continue
+        cfg.enabled = True
+        cfg.updated_at = time.time()
+        session.add(cfg)
+        status = session.exec(
+            select(AIRuntimeStatus).where(
+                AIRuntimeStatus.user_id == user_id,
+                AIRuntimeStatus.ai_config_id == cfg.id,
+                AIRuntimeStatus.ai_kind == "assistant",
+            )
+        ).first()
+        if not status:
+            status = AIRuntimeStatus(user_id=user_id, ai_config_id=cfg.id, ai_kind="assistant")
+        status.running = True
+        status.updated_at = time.time()
+        session.add(status)
+        changed = True
+    if changed:
+        session.commit()
+    return changed
 
 @router.post("/configs")
 def create_ai_config(
@@ -162,7 +195,7 @@ def create_ai_config(
         project_id=body.project_id,
         project_name=body.project_name,
         sort_order=body.sort_order or 100,
-        enabled=body.enabled if body.enabled is not None else True,
+        enabled=True,
         mcp_enabled=body.mcp_enabled if body.mcp_enabled is not None else True,
         switch_key=switch_key,
         mcp_tools=clamped_mcp_tools,
@@ -305,8 +338,10 @@ def update_ai_config(
         updates["system_auto_control"] = compact_system_auto_control(updates["system_auto_control"])
     if next_ai_role == "assistant_admin":
         updates["token_limit"] = 0
+    updates.pop("enabled", None)
     for key, value in updates.items():
         setattr(cfg, key, value)
+    cfg.enabled = True
     # Narrow the saved tool set to what this AI's role tier is permitted to use.
     cfg.mcp_tools = clamp_tools_json(user, config_role_tier(cfg), cfg.mcp_tools)
     # Strip server toolbox-gated tools (now sourced only from toolbox scope).
@@ -343,32 +378,6 @@ def update_ai_config(
         status = AIRuntimeStatus(user_id=user.id, ai_config_id=cfg.id, ai_kind="assistant")
     status.running = cfg.enabled
     status.mcp_enabled = cfg.mcp_enabled
-    status.updated_at = time.time()
-    session.add(status)
-    session.commit()
-    return _cfg_response(cfg, user.id)
-
-@router.post("/configs/{config_id}/toggle-run")
-def toggle_ai_run(
-    config_id: int,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None),
-):
-    user = get_current_user(authorization, session)
-    cfg = get_ai_config_or_404(session, config_id, user.id)
-    cfg.enabled = not cfg.enabled
-    cfg.updated_at = time.time()
-    session.add(cfg)
-    status = session.exec(
-        select(AIRuntimeStatus).where(
-            AIRuntimeStatus.user_id == user.id,
-            AIRuntimeStatus.ai_config_id == cfg.id,
-            AIRuntimeStatus.ai_kind == "assistant",
-        )
-    ).first()
-    if not status:
-        status = AIRuntimeStatus(user_id=user.id, ai_config_id=cfg.id, ai_kind="assistant")
-    status.running = cfg.enabled
     status.updated_at = time.time()
     session.add(status)
     session.commit()
@@ -530,7 +539,7 @@ def clone_ai_config(
         parent_ai_config_id=src.parent_ai_config_id,
         management_scope=src.management_scope,
         sort_order=(src.sort_order or 100) + 1,
-        enabled=False,
+        enabled=True,
         mcp_enabled=src.mcp_enabled,
         switch_key=f"assistant_{int(time.time() * 1000)}",
         mcp_tools=clamp_tools_json(user, config_role_tier(src), src.mcp_tools),

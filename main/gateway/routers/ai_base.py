@@ -73,13 +73,12 @@ def _resolve_task_owner_cfg(
         select(AssistantAIConfig).where(
             AssistantAIConfig.user_id == user_id,
             AssistantAIConfig.ai_role == "digital_member",
-            AssistantAIConfig.enabled == True,
         ).order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
     ).all()
     if not candidates:
         raise HTTPException(
             status_code=400,
-            detail="No enabled digital_member available for task scheduling; provide target_ai_config_id or enable one",
+            detail="No digital_member available for task scheduling; provide target_ai_config_id or create one",
         )
     manager = next(
         (cfg for cfg in candidates if str(cfg.digital_member_role or "").strip().lower() == "manager"),

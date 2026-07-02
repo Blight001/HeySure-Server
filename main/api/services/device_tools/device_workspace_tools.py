@@ -355,7 +355,7 @@ def device_payload(user_id: int, device_type: str) -> Dict[str, Any]:
 def seed_defaults(user_id: int, device_type: str = "desktop") -> int:
     """Seed factory-default tools into the user's workspace (idempotent: never
     clobbers an existing file). Desktop → python/shell runtime tools; browser →
-    program wrappers + browser.run dispatcher."""
+    program wrappers for the plugin-advertised browser tools."""
     dtype = normalize_device_type(device_type)
     if dtype == "desktop":
         from api.services.device_tools.device_runtime_tools import load_default_tools as _load

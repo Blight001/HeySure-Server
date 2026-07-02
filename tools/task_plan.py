@@ -96,7 +96,8 @@ def _plan_create(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
         "plan": progress,
         "next_step_hint": (
             "计划已登记。现在从第 1 个阶段开始执行；完成一个阶段后调用 plan.phase_complete 收尾该阶段"
-            "（系统会自动精简上一阶段的上下文）；全部阶段完成后调用 plan.finish 总结。"
+            "（系统会自动精简上一阶段的上下文）；完成最后一个阶段时系统会自动收尾整个计划并归档，"
+            "无需再单独调用收尾工具。"
         ),
     }
 
@@ -127,7 +128,7 @@ def _phase_complete(user_id: int, args: Dict[str, Any], ai_config_id: Optional[i
         result = plan_service.complete_current_phase(session, plan, summary=summary, status=status)
         progress = plan_service.plan_progress(session, plan)
     hint = (
-        "已是最后一个阶段：系统将要求你调用 plan.finish 总结整个计划。"
+        "已是最后一个阶段：系统会自动收尾整个计划并归档，你无需再调用任何收尾工具。"
         if result["all_phases_done"]
         else "本阶段已收尾、上下文已精简。系统会下发下一个阶段，按系统调度执行即可。"
     )
@@ -217,13 +218,3 @@ def _plan_finish(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
 
     return result
 
-
-def _task_finish_redirect(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "task.finish 不存在。"
-            "简单任务执行完成后自然结束即可，无需调用任何收尾工具；"
-            "若你已使用 plan.create 制定了分阶段计划，请调用 plan.finish（带 outcome + summary）正式收尾。"
-        ),
-    )

@@ -14,6 +14,8 @@ from sqlmodel import Session, select
 from ..database import engine
 from ..models import DevicePresence
 
+NON_MCP_CAPABILITIES: Set[str] = {"remote_control", "remote.control"}
+
 
 def _int(value) -> Optional[int]:
     try:
@@ -34,6 +36,16 @@ def _decode(row: DevicePresence) -> Set[str]:
     return {str(x).strip() for x in parsed if str(x).strip()}
 
 
+def mcp_capabilities(caps: Set[str]) -> Set[str]:
+    """Endpoint capabilities that are real MCP tools.
+
+    Some device capabilities, such as live remote-control support, are transport
+    features rather than callable MCP tools and must not appear in prompt/tool
+    permission surfaces.
+    """
+    return {name for name in caps if name not in NON_MCP_CAPABILITIES}
+
+
 def _decode_defs(row: DevicePresence) -> Dict[str, dict]:
     try:
         parsed = json.loads(getattr(row, "tool_defs_json", "") or "{}")
@@ -44,7 +56,7 @@ def _decode_defs(row: DevicePresence) -> Dict[str, dict]:
     out: Dict[str, dict] = {}
     for name, spec in parsed.items():
         key = str(name or "").strip()
-        if not key or not isinstance(spec, dict):
+        if not key or key in NON_MCP_CAPABILITIES or not isinstance(spec, dict):
             continue
         schema = spec.get("input_schema")
         out[key] = {
@@ -142,8 +154,8 @@ def mark_all_offline() -> None:
 
 
 def online_devices_for_config(user_id, ai_config_id) -> List[Tuple[str, str, Set[str]]]:
-    """``(device_id, device_type, capabilities)`` for every online agent bound to a
-    config. ``device_id`` lets callers apply per-agent MCP scope."""
+    """``(device_id, device_type, mcp_capabilities)`` for every online agent bound
+    to a config. ``device_id`` lets callers apply per-agent MCP scope."""
     cfg = _int(ai_config_id)
     if not cfg:
         return []
@@ -164,7 +176,7 @@ def online_devices_for_config(user_id, ai_config_id) -> List[Tuple[str, str, Set
             seen_agents.add(device_id)
             if uid and row.user_id and row.user_id != uid:
                 continue
-            out.append((device_id, str(row.device_type or "").strip(), _decode(row)))
+            out.append((device_id, str(row.device_type or "").strip(), mcp_capabilities(_decode(row))))
     return out
 
 
@@ -184,7 +196,7 @@ def online_tool_names() -> Tuple[Set[str], Set[str]]:
             if not device_id or device_id in seen_agents:
                 continue
             seen_agents.add(device_id)
-            caps = _decode(row)
+            caps = mcp_capabilities(_decode(row))
             device_type = str(row.device_type or "").strip()
             if device_type == "workshop":
                 continue
@@ -298,7 +310,7 @@ def online_tool_catalog_for_user(user_id) -> List[Dict[str, object]]:
             device_type = str(row.device_type or "desktop").strip() or "desktop"
             if device_type == "workshop":
                 continue
-            capabilities = _decode(row)
+            capabilities = mcp_capabilities(_decode(row))
             defs = _decode_defs(row)
             tools = []
             for name in sorted(capabilities):

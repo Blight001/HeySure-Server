@@ -12,6 +12,7 @@ const candidates = [
   path.resolve(__dirname, '../../../../../device/extension/src/lib/tools/definitions.ts'), // old monorepo
   path.resolve(__dirname, '../../../../device/extension/src/lib/tools/definitions.ts'),     // server at workspace root
   path.resolve(__dirname, '../../../../../device/extension/src/lib/tools/definitions.ts'),    // safety
+  path.resolve(process.cwd(), 'device/extension/src/lib/tools/definitions.ts'),
   path.resolve(process.cwd(), '../device/extension/src/lib/tools/definitions.ts'),
   path.resolve(process.cwd(), '../../device/extension/src/lib/tools/definitions.ts'),
 ]

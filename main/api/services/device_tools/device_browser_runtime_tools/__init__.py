@@ -5,8 +5,9 @@ seeded into ``<workspace>/device_tools/browser/`` where they become the editable
 source of truth.
 
 Each builtin ``browser_*`` tool gets a thin program wrapper (call builtin + return)
-so operators can tweak descriptions / input_schema on the server. A meta
-``browser.run`` tool dispatches to any builtin by name (like ``shell.run``).
+so operators can tweak descriptions / input_schema on the server. The former
+server-side generic dispatcher ``browser.run`` is intentionally not generated:
+browser capability limits should be visible on the plugin's own tool surface.
 """
 
 import json
@@ -27,6 +28,7 @@ REMOVED_TOOL_NAMES = frozenset({
     "browser_hover",
     "browser_dom_snapshot",
     "browser_close_popup",
+    "browser.run",
 })
 
 
@@ -37,41 +39,6 @@ def _wrapper_program(builtin_name: str) -> List[Dict[str, Any]]:
     ]
 
 
-def _browser_run_tool(catalog: List[Dict[str, Any]]) -> Dict[str, Any]:
-    names = sorted(t["name"] for t in catalog)
-    return {
-        "name": "browser.run",
-        "description": (
-            "统一浏览器动作调度入口（类似 shell.run）：指定 tool 与 params，转发到任意内置 "
-            "browser_* 工具。可在服务器工作区直接修改本工具的 schema、说明与默认参数描述。"
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "tool": {
-                    "type": "string",
-                    "enum": names,
-                    "description": "要调用的内置浏览器工具名（browser_*）。",
-                },
-                "params": {
-                    "type": "object",
-                    "description": "传给目标工具的参数对象；字段随 tool 变化，见各 browser_* 工具 schema。",
-                },
-            },
-            "required": ["tool"],
-        },
-        "code_kind": "program",
-        "code": [
-            {"op": "call", "tool": "${args.tool}", "args": "${args.params}"},
-            {"op": "return", "value": "${last}"},
-        ],
-        "js": "",
-        "runtime": "",
-        "source": "",
-        "permissions": [],
-    }
-
-
 def _load_catalog() -> List[Dict[str, Any]]:
     with open(os.path.join(_DIR, "catalog.json"), encoding="utf-8") as f:
         return json.load(f)
@@ -79,7 +46,7 @@ def _load_catalog() -> List[Dict[str, Any]]:
 
 def load_default_tools() -> List[Dict[str, Any]]:
     catalog = _load_catalog()
-    out: List[Dict[str, Any]] = [_browser_run_tool(catalog)]
+    out: List[Dict[str, Any]] = []
     for entry in catalog:
         name = str(entry.get("name") or "").strip()
         if not name:
@@ -99,14 +66,42 @@ def load_default_tools() -> List[Dict[str, Any]]:
 
 
 def sync_workspace_after_catalog_change(user_id: int) -> int:
-    """Drop removed builtin wrappers and refresh ``browser.run`` enum from catalog."""
+    """Sync browser builtin wrappers already seeded in a user's workspace.
+
+    Browser tools are exposed to the prompt from the workspace copies, not
+    directly from ``catalog.json``. Seeding is intentionally idempotent, so a
+    catalog/schema wording change would otherwise leave old prompt text in
+    existing ``browser_*.json`` files forever. Keep enabled/disabled state, but
+    refresh the builtin wrapper metadata from the current catalog.
+    """
     from api.services.device_tools import device_workspace_tools as ws
 
-    removed = 0
+    changed = 0
+    for spec in load_default_tools():
+        name = str(spec.get("name") or "").strip()
+        if not name:
+            continue
+        current = ws.get_tool(user_id, "browser", name)
+        if not current:
+            continue
+        if (
+            current.get("description") == spec.get("description")
+            and current.get("input_schema") == spec.get("input_schema")
+            and current.get("code") == spec.get("code")
+            and current.get("code_kind") == spec.get("code_kind")
+        ):
+            continue
+        ws.upsert_tool(
+            user_id,
+            "browser",
+            spec,
+            enabled=bool(current.get("enabled", True)),
+            actor="web",
+            action="upsert",
+        )
+        changed += 1
+
     for name in REMOVED_TOOL_NAMES:
         if ws.delete_tool(user_id, "browser", name, actor="web"):
-            removed += 1
-
-    run_tool = _browser_run_tool(_load_catalog())
-    ws.upsert_tool(user_id, "browser", run_tool, enabled=True, actor="web", action="upsert")
-    return removed
+            changed += 1
+    return changed

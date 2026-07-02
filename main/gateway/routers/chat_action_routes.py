@@ -562,7 +562,6 @@ def stream_chat(
             cfg = session.exec(
                 select(AssistantAIConfig).where(
                     AssistantAIConfig.user_id == user.id,
-                    AssistantAIConfig.enabled == True,
                 )
             ).first()
         else:
@@ -574,8 +573,6 @@ def stream_chat(
             ).first()
         if not cfg:
             raise HTTPException(status_code=400, detail="No available assistant AI config")
-        if not cfg.enabled:
-            raise HTTPException(status_code=400, detail="Selected assistant AI is stopped")
         api_key, base_url, model = resolve_model_preset(user, cfg)
         # 方案 A：人格 Prompt 直接读 KnowledgeBase/personas/*.md（文件缺失回退 DB）。
         system_prompt = _strip_runtime_injected_sections(kb_store.effective_ai_prompt(user.id, cfg))

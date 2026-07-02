@@ -224,6 +224,12 @@ async def list_ai_cards(
         .where(AssistantAIConfig.user_id == user.id)
         .order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
     ).all()
+    if _ensure_card_configs_enabled(session, user.id, cfgs):
+        cfgs = session.exec(
+            select(AssistantAIConfig)
+            .where(AssistantAIConfig.user_id == user.id)
+            .order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
+        ).all()
     statuses = session.exec(
         select(AIRuntimeStatus).where(
             AIRuntimeStatus.user_id == user.id,
@@ -536,7 +542,7 @@ async def list_ai_cards(
                 "parent_ai_config_id": cfg.parent_ai_config_id,
                 "root_manager_ai_config_id": cfg.root_manager_ai_config_id,
                 "management_scope": cfg.management_scope,
-                "enabled": cfg.enabled,
+                "enabled": True,
                 "mcp_enabled": cfg.mcp_enabled,
                 "bot_channel": bot_channel,
                 # Per-channel config slices (replaces the flat feishu_*/qq_* columns).
@@ -567,6 +573,33 @@ async def list_ai_cards(
             }
         )
     return cards
+
+
+def _ensure_card_configs_enabled(session: Session, user_id: int, cfgs: List[AssistantAIConfig]) -> bool:
+    """Repair old stopped configs so dashboards do not expose a dead state."""
+    changed = False
+    for cfg in cfgs:
+        if cfg.enabled:
+            continue
+        cfg.enabled = True
+        cfg.updated_at = time.time()
+        session.add(cfg)
+        status = session.exec(
+            select(AIRuntimeStatus).where(
+                AIRuntimeStatus.user_id == user_id,
+                AIRuntimeStatus.ai_config_id == cfg.id,
+                AIRuntimeStatus.ai_kind == "assistant",
+            )
+        ).first()
+        if not status:
+            status = AIRuntimeStatus(user_id=user_id, ai_config_id=cfg.id, ai_kind="assistant")
+        status.running = True
+        status.updated_at = time.time()
+        session.add(status)
+        changed = True
+    if changed:
+        session.commit()
+    return changed
 
 @router.post("/sessions")
 def create_session(

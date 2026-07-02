@@ -16,7 +16,6 @@ from tools.task_plan import (
     _phase_complete,
     _plan_create,
     _plan_finish,
-    _task_finish_redirect,
 )
 from tools.prompts import (
     _prompt_manage,
@@ -185,7 +184,8 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
             "把整体目标拆成有序的多个阶段，"
             "每个阶段有明确的目标(goal)与结束标志(done_signal)，并可在 actions 里列出该阶段的子行动"
             "（每个子行动也有自己的 goal 与 done_signal）。"
-            "登记后从第 1 个阶段开始执行：每完成一个阶段调用 plan.phase_complete，全部完成后调用 plan.finish。"
+            "登记后从第 1 个阶段开始执行：每完成一个阶段调用 plan.phase_complete；"
+            "完成最后一个阶段时，系统会自动收尾整个计划并归档，无需再单独调用收尾工具。"
             "同一会话只保留一份进行中的计划，重复调用会覆盖旧计划。"
         ),
         input_schema={
@@ -227,8 +227,8 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         name="plan.phase_complete",
         description=(
             "plan 的子操作：完成当前阶段并收尾（无需总结）。调用后系统会自动隐藏上一阶段的深度思考与 MCP "
-            "详细结果、只保留调用状态，并自动下发下一个阶段；若已是最后一个阶段，系统会要求你"
-            "调用 plan.finish 收尾。若该阶段未达成目标，可传 status=failed 如实记录后继续。"
+            "详细结果、只保留调用状态，并自动下发下一个阶段；若已是最后一个阶段，系统会自动收尾整个计划"
+            "并归档，无需你再调用其它收尾工具。若该阶段未达成目标，可传 status=failed 如实记录后继续。"
             "summary 可选，一般留空即可。"
         ),
         input_schema={
@@ -248,10 +248,10 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="plan.finish",
         description=(
-            "收尾整个计划（无论成功或失败都要调用）。系统会隐藏全过程的深度思考与 MCP 详细结果，"
-            "把完整行动流程写入工作区的成功/失败日志（logs/success 或 logs/failure），"
-            "便于后续沉淀为可复用、稳定的知识。outcome=success 写成功日志，failure 写失败日志。"
-            "若创建了计划，则必须调用本工具收尾；小任务可不使用计划，直接执行结束即可。"
+            "手动收尾整个计划（可选，正常情况下无需调用）。完成最后一个阶段（plan.phase_complete）时"
+            "系统会自动收尾并归档；本工具仅作为需要亲自给出完整复盘时的备用手段，且要求所有阶段均已收尾。"
+            "系统会隐藏全过程的深度思考与 MCP 详细结果，把完整行动流程写入工作区的成功/失败日志"
+            "（logs/success 或 logs/failure）。outcome=success 写成功日志，failure 写失败日志。"
         ),
         input_schema={
             "type": "object",
@@ -272,17 +272,6 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         handler=_plan_finish,
         destructive=True,
     ))
-    registry.register(MCPTool(
-        name="task.finish",
-        description=(
-            "【此工具不存在】task.finish 已被移除。"
-            "简单任务执行完成后自然结束即可；若已使用 plan.create 制定计划，请调用 plan.finish 收尾。"
-        ),
-        input_schema={"type": "object", "properties": {}},
-        handler=_task_finish_redirect,
-        destructive=False,
-    ))
-
     # 与用户通信：把底层机器人投递封装为业务语义上的"给用户发消息"。
     registry.register(MCPTool(
         name="message.send_to_user",

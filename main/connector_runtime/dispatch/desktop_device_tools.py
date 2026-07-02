@@ -155,9 +155,13 @@ def _agent_capabilities(agent: Dict[str, Any], device_type: str) -> Set[str]:
             if name:
                 names.add(name)
         return names
+    try:
+        from api.devices.presence import NON_MCP_CAPABILITIES
+    except Exception:
+        NON_MCP_CAPABILITIES = {"remote_control", "remote.control"}
     for cap in agent.get("capabilities") or []:
         name = str(cap or "").strip()
-        if not name:
+        if not name or name in NON_MCP_CAPABILITIES:
             continue
         if device_type == "workshop":
             if is_workshop_tool(name):
