@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(os.environ.get("HEYSURE_REPO_ROOT") or Path(__file__).resolve().parents[1]).resolve()
+ROOT = Path(os.environ.get("HEYSURE_REPO_ROOT") or Path(__file__).resolve().parents[3]).resolve()
 HOST = os.environ.get("HEYSURE_REPO_UPDATER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("HEYSURE_REPO_UPDATER_PORT", "58151"))
 TOKEN = os.environ.get("HEYSURE_REPO_UPDATER_TOKEN") or os.environ.get("HEYSURE_INTERNAL_TOKEN") or ""
