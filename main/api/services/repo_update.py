@@ -401,6 +401,7 @@ def sync_remote_update_state() -> None:
             running=True,
             message=_REMOTE_PHASE_MESSAGES.get(remote_phase) or str(remote_state.get("message") or ""),
             last_error="",
+            logs=list(remote_state.get("logs") or [])[-120:],
         )
         _set_step(_STEP_PULL, "done")
         _set_step(_STEP_RESTART, "active")
@@ -410,6 +411,7 @@ def sync_remote_update_state() -> None:
             running=False,
             message=_REMOTE_PHASE_MESSAGES["done"],
             last_error="",
+            logs=list(remote_state.get("logs") or [])[-120:],
         )
         _set_step(_STEP_PULL, "done")
         _set_step(_STEP_RESTART, "done")
@@ -419,6 +421,7 @@ def sync_remote_update_state() -> None:
             running=False,
             message=_REMOTE_PHASE_MESSAGES["error"],
             last_error=str(remote_state.get("last_error") or "宿主更新服务重建失败"),
+            logs=list(remote_state.get("logs") or [])[-120:],
         )
         _set_step(_STEP_RESTART, "error")
 

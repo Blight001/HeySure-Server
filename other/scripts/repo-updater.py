@@ -64,6 +64,7 @@ _state: dict[str, Any] = {
     "phase": "idle",
     "message": "",
     "last_error": "",
+    "logs": [],
     "updated_at": time.time(),
 }
 
@@ -75,6 +76,17 @@ class UpdateError(RuntimeError):
 def _set_state(**fields: Any) -> None:
     _state.update(fields)
     _state["updated_at"] = time.time()
+
+
+def _append_log(line: str) -> None:
+    text = line.strip()
+    if not text:
+        return
+    logs = list(_state.get("logs") or [])
+    logs.append(text)
+    _state["logs"] = logs[-120:]
+    _state["updated_at"] = time.time()
+    print(text, flush=True)
 
 
 def _run(cmd: list[str], timeout: float = 300.0) -> subprocess.CompletedProcess[str]:
@@ -91,6 +103,34 @@ def _run(cmd: list[str], timeout: float = 300.0) -> subprocess.CompletedProcess[
         detail = (proc.stderr or proc.stdout or "").strip()
         raise UpdateError(f"{' '.join(cmd)} failed: {detail}")
     return proc
+
+
+def _run_streaming(cmd: list[str], timeout: float = 1800.0) -> None:
+    started_at = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            _append_log(line)
+            if time.monotonic() - started_at > timeout:
+                proc.kill()
+                raise UpdateError(f"{' '.join(cmd)} timed out after {int(timeout)}s")
+        code = proc.wait(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    if code != 0:
+        tail = "\n".join((_state.get("logs") or [])[-20:])
+        raise UpdateError(f"{' '.join(cmd)} failed with exit code {code}: {tail}")
 
 
 def _git(args: list[str], timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
@@ -220,19 +260,24 @@ def _write_version_file(payload: dict[str, Any]) -> None:
 def _compose_rebuild() -> None:
     try:
         _set_state(phase="rebuilding", message="building docker images")
-        _run([*COMPOSE_CMD, "build", "--progress", "plain"], timeout=1800)
+        _append_log("开始构建 Docker 镜像...")
+        _run_streaming([*COMPOSE_CMD, "--progress", "plain", "build"], timeout=1800)
         _set_state(phase="restarting", message="recreating compose services")
-        _run([*COMPOSE_CMD, "up", "-d", "--remove-orphans"], timeout=900)
+        _append_log("开始重建并启动 Docker 容器...")
+        _run_streaming([*COMPOSE_CMD, "up", "-d", "--remove-orphans"], timeout=900)
+        _append_log("Docker 服务已更新并启动")
         _set_state(running=False, phase="done", message="services updated", last_error="")
     except Exception as exc:
         _set_state(running=False, phase="error", message="update failed", last_error=str(exc))
+        _append_log(f"更新失败：{exc}")
 
 
 def _check_and_update(apply: bool) -> dict[str, Any]:
     if not _lock.acquire(blocking=False):
         return {"ok": False, "busy": True, "state": dict(_state)}
     try:
-        _set_state(running=True, phase="checking", message="checking remote updates", last_error="")
+        _set_state(running=True, phase="checking", message="checking remote updates", last_error="", logs=[])
+        _append_log("开始检测远程更新...")
         info = _compare()
         if info["behind"] <= 0:
             _set_state(running=False, phase="up_to_date", message="already up to date")
@@ -243,12 +288,14 @@ def _check_and_update(apply: bool) -> dict[str, Any]:
 
         from_sha = ((info.get("current") or {}).get("sha") or "")
         _set_state(phase="pulling", message="pulling latest code")
+        _append_log("开始拉取最新代码...")
         _reset_to_remote(str(info.get("branch") or ""), str(info.get("upstream") or ""))
         _git(["submodule", "update", "--init", "--recursive", "--force"], timeout=300)
         version = _version()
         to_sha = ((version.get("current") or {}).get("sha") or "")
         _write_version_file(version)
         _set_state(phase="queued_restart", message="compose rebuild queued")
+        _append_log("代码已更新，已排队重建 Docker 服务")
         threading.Thread(target=_compose_rebuild, name="heysure-compose-rebuild", daemon=True).start()
         return {
             "ok": True,
