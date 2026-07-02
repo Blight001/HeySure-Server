@@ -7,13 +7,15 @@ from the gateway, and performs the real deployment update in the workspace:
 
     git fetch -> git pull --ff-only -> git submodule update -> docker compose up
 
-Bind it to 127.0.0.1 and expose it to containers through host.docker.internal.
+Bind it to 0.0.0.0 and expose it to containers through host.docker.internal.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import secrets
 import shlex
 import subprocess
 import threading
@@ -24,11 +26,37 @@ from typing import Any
 
 
 ROOT = Path(os.environ.get("HEYSURE_REPO_ROOT") or Path(__file__).resolve().parents[3]).resolve()
-HOST = os.environ.get("HEYSURE_REPO_UPDATER_HOST", "127.0.0.1")
+HOST = os.environ.get("HEYSURE_REPO_UPDATER_HOST", "0.0.0.0")
 PORT = int(os.environ.get("HEYSURE_REPO_UPDATER_PORT", "58151"))
-TOKEN = os.environ.get("HEYSURE_REPO_UPDATER_TOKEN") or os.environ.get("HEYSURE_INTERNAL_TOKEN") or ""
 COMPOSE_CMD = shlex.split(os.environ.get("HEYSURE_REPO_UPDATER_COMPOSE_CMD", "docker compose"))
 VERSION_FILE = ROOT / "server" / "data" / "deployed-version.json"
+
+
+def _read_dotenv_key(name: str) -> str:
+    env_path = ROOT / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    prefix = f"{name}="
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or not line.startswith(prefix):
+            continue
+        value = line[len(prefix):].strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        return value.strip()
+    return ""
+
+
+TOKEN = (
+    os.environ.get("HEYSURE_REPO_UPDATER_TOKEN")
+    or os.environ.get("HEYSURE_INTERNAL_TOKEN")
+    or _read_dotenv_key("HEYSURE_REPO_UPDATER_TOKEN")
+    or _read_dotenv_key("HEYSURE_INTERNAL_TOKEN")
+    or ""
+).strip()
 
 _lock = threading.Lock()
 _state: dict[str, Any] = {
@@ -67,6 +95,21 @@ def _run(cmd: list[str], timeout: float = 300.0) -> subprocess.CompletedProcess[
 
 def _git(args: list[str], timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
     return _run(["git", *args], timeout=timeout)
+
+
+def _read_version_file() -> dict[str, Any] | None:
+    try:
+        payload = json.loads(VERSION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    current = payload.get("current")
+    if not isinstance(current, dict):
+        return None
+    payload.setdefault("git_available", False)
+    payload.setdefault("branch", "")
+    return payload
 
 
 def _branch() -> str:
@@ -110,7 +153,20 @@ def _commit_info(ref: str = "HEAD") -> dict[str, Any] | None:
 
 
 def _version() -> dict[str, Any]:
-    return {"git_available": True, "branch": _branch(), "current": _commit_info("HEAD")}
+    try:
+        payload = {"git_available": True, "branch": _branch(), "current": _commit_info("HEAD")}
+        if payload["current"]:
+            _write_version_file(payload)
+            return payload
+    except Exception:
+        cached = _read_version_file()
+        if cached is not None:
+            return cached
+        raise
+    cached = _read_version_file()
+    if cached is not None:
+        return cached
+    return {"git_available": False, "branch": "", "current": None}
 
 
 def _compare() -> dict[str, Any]:
@@ -200,7 +256,14 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         if not TOKEN:
             return True
-        return self.headers.get("Authorization", "") == f"Bearer {TOKEN}"
+        expected = f"Bearer {TOKEN}"
+        got = self.headers.get("Authorization", "").strip()
+        return secrets.compare_digest(got, expected)
+
+    def _token_fingerprint(self) -> str:
+        if not TOKEN:
+            return ""
+        return hashlib.sha256(TOKEN.encode("utf-8")).hexdigest()[:12]
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -212,10 +275,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._json(200, {"ok": True, "root": str(ROOT), "state": dict(_state)})
+            self._json(200, {
+                "ok": True,
+                "root": str(ROOT),
+                "state": dict(_state),
+                "token_configured": bool(TOKEN),
+                "token_fingerprint": self._token_fingerprint(),
+            })
             return
         if not self._authorized():
-            self._json(401, {"ok": False, "error": "unauthorized"})
+            self._json(401, {
+                "ok": False,
+                "error": "unauthorized",
+                "token_configured": bool(TOKEN),
+                "token_fingerprint": self._token_fingerprint(),
+            })
             return
         try:
             if self.path == "/version":
@@ -229,7 +303,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         if not self._authorized():
-            self._json(401, {"ok": False, "error": "unauthorized"})
+            self._json(401, {
+                "ok": False,
+                "error": "unauthorized",
+                "token_configured": bool(TOKEN),
+                "token_fingerprint": self._token_fingerprint(),
+            })
             return
         length = int(self.headers.get("Content-Length") or "0")
         raw = self.rfile.read(length) if length else b"{}"
@@ -247,7 +326,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"HeySure repo updater listening on http://{HOST}:{PORT} (root={ROOT})", flush=True)
+    try:
+        _version()
+    except Exception as exc:
+        print(f"repo updater could not collect startup version: {exc}", flush=True)
+    token_note = "configured" if TOKEN else "disabled"
+    print(f"HeySure repo updater listening on http://{HOST}:{PORT} (root={ROOT}, token={token_note})", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
