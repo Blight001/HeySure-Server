@@ -147,3 +147,6 @@ class Token(SQLModel):
     token_type: str
     user: UserRead
     agent_socket_url: str = ""
+    # WebRTC ICE servers (STUN + optional TURN) for remote control, resolved
+    # server-side from admin config / env so every client shares one source.
+    ice_servers: list = []

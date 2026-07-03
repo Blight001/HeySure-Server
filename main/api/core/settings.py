@@ -199,6 +199,25 @@ class Settings(BaseSettings):
         description="Transport security used when talking to the SMTP server.",
     )
 
+    # ---- WebRTC / Remote control ---------------------------------------------
+    # ICE servers handed to every remote-control peer (web console, game viewer,
+    # desktop / browser / mobile agents) at login. DB values saved from the admin
+    # console (SystemSetting table, see api.services.access.ice_settings) take
+    # precedence; these only seed headless deploys. Without a TURN relay the
+    # session is STUN-only and dies on symmetric NAT.
+
+    stun_url: str = Field(
+        default="stun:stun.l.google.com:19302",
+        description="STUN server URL delivered to remote-control peers. Empty omits STUN.",
+    )
+    turn_url: str = Field(
+        default="",
+        description="TURN server URL (e.g. turn:relay.example.com:3478) used for NAT "
+        "traversal when direct P2P fails. Empty disables TURN.",
+    )
+    turn_username: str = Field(default="", description="TURN long-term credential username.")
+    turn_password: str = Field(default="", description="TURN long-term credential password.")
+
     # ---- Third-party ---------------------------------------------------------
 
     tavily_api_key: str = Field(
@@ -266,6 +285,10 @@ class Settings(BaseSettings):
         "smtp_username",
         "smtp_password",
         "smtp_from",
+        "stun_url",
+        "turn_url",
+        "turn_username",
+        "turn_password",
         "tavily_api_key",
         "tavily_api_url",
         "clawhub_registry_url",

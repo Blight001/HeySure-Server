@@ -24,7 +24,7 @@ from api.database import get_session
 from api.models import Token, User, UserCreate, UserLogin, UserRead, UserUpdate
 from api.models.defaults import DEFAULT_MCP_NAMESPACE_HINTS
 from ai_runtime.inference.ai_service import ensure_default_ai_for_user
-from api.services.access import auth_settings
+from api.services.access import auth_settings, ice_settings
 from api.services import email_service
 from api.services.model_presets import model_presets_json
 from api.core.settings import settings
@@ -291,6 +291,7 @@ def login(user_in: UserLogin, request: Request, session: Session = Depends(get_s
         "token_type": "bearer",
         "user": _user_payload(user),
         "agent_socket_url": _agent_socket_url(request),
+        "ice_servers": ice_settings.build_ice_servers(session),
     }
 
 
@@ -319,6 +320,7 @@ def login_with_email(payload: EmailLoginPayload, request: Request, session: Sess
         "token_type": "bearer",
         "user": _user_payload(user),
         "agent_socket_url": _agent_socket_url(request),
+        "ice_servers": ice_settings.build_ice_servers(session),
     }
 
 
@@ -331,7 +333,10 @@ def agent_endpoint(
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authentication token")
     get_current_user(authorization, session)
-    return {"agent_socket_url": _agent_socket_url(request)}
+    return {
+        "agent_socket_url": _agent_socket_url(request),
+        "ice_servers": ice_settings.build_ice_servers(session),
+    }
 
 
 @router.put("/profile", response_model=UserRead)

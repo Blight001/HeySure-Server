@@ -1625,3 +1625,73 @@ def send_test_email(
         detail=f"发送测试邮件至 {to}",
     )
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Remote-control ICE settings (STUN + TURN)
+#
+# One server-side source of truth for the ICE servers every remote-control peer
+# uses (web console, game viewer, desktop / browser / mobile agents). Without a
+# TURN relay the session is STUN-only and cannot traverse symmetric NAT, so the
+# feature dies on many real deployments. Configuring TURN here (or via
+# HEYSURE_TURN_* env) fixes it for all clients at once.
+# ---------------------------------------------------------------------------
+
+
+class RtcSettingsPayload(BaseModel):
+    stun_url: str = ""
+    turn_url: str = ""
+    turn_username: str = ""
+    # None = 保留已存密码；空串 = 清空
+    turn_password: Optional[str] = None
+
+
+def _rtc_settings_response(session: Session) -> dict:
+    from api.services.access import ice_settings
+
+    cfg = ice_settings.get_ice_config(session)
+    return {
+        "stun_url": cfg["stun_url"],
+        "turn_url": cfg["turn_url"],
+        "turn_username": cfg["turn_username"],
+        # 密码永不回传，只回传是否已配置。
+        "turn_password_set": bool(cfg["turn_password"]),
+        "turn_enabled": bool(str(cfg["turn_url"]).strip()),
+        # Preview of exactly what clients receive, minus the credential.
+        "ice_servers": [
+            {k: v for k, v in server.items() if k != "credential"}
+            for server in ice_settings.build_ice_servers(session)
+        ],
+    }
+
+
+@router.get("/rtc-settings")
+def get_rtc_settings(
+    session: Session = Depends(get_session),
+    _admin: User = Depends(require_admin_user),
+) -> dict:
+    return _rtc_settings_response(session)
+
+
+@router.put("/rtc-settings")
+def update_rtc_settings(
+    payload: RtcSettingsPayload,
+    session: Session = Depends(get_session),
+    actor: User = Depends(require_owner_user),
+) -> dict:
+    from api.services.access import ice_settings
+
+    ice_settings.save_ice_config(
+        session,
+        stun_url=payload.stun_url or "",
+        turn_url=payload.turn_url or "",
+        turn_username=payload.turn_username or "",
+        turn_password=payload.turn_password,
+    )
+    session.commit()
+    _record_audit(
+        session, actor, "update_rtc_settings",
+        target_type="settings", target_id="rtc", target_label="远程控制 ICE 设置",
+        detail=f"STUN「{payload.stun_url or '(未设置)'}」，TURN「{payload.turn_url or '(未设置)'}」",
+    )
+    return _rtc_settings_response(session)
