@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
@@ -131,6 +132,23 @@ def _can_connect(host: str, port: int, timeout: float = 1.5) -> bool:
             return True
     except OSError:
         return False
+
+
+def _wait_for_port_free(port: str, timeout: float = 8.0, poll: float = 0.25) -> bool:
+    """Wait until nothing is listening on the port (or timeout).
+    Returns True if port appears free.
+    Used during restart to avoid "卡死" bind failures.
+    """
+    deadline = time.time() + timeout
+    host = "127.0.0.1"
+    p = int(port)
+    while time.time() < deadline:
+        if not _can_connect(host, p, timeout=0.3):
+            # Double check with netstat in case of TIME_WAIT only
+            if not _find_pids_for_port(port):
+                return True
+        time.sleep(poll)
+    return not _find_pids_for_port(port)
 
 
 def _ensure_postgres_database(database_url: str, admin_user: str, admin_password: str) -> str:
@@ -603,17 +621,34 @@ class ServicePane:
             self.append("服务已经在运行", "warning")
             return
 
+        self.append("正在准备启动（检查环境/DB/端口）...", "meta")
+        self.set_status("启动中...", "#d97706")
+        # Offload potentially blocking DB check, node check, port release/wait to a thread
+        # so the launcher UI does not freeze ("卡死").
+        threading.Thread(target=self._start_worker, daemon=True).start()
+
+    def _start_worker(self) -> None:
+        """Heavy prep work in background thread. Use root.after for thread-safe UI updates."""
+        def ui_append(msg, level="info"):
+            self.controller.root.after(0, lambda: self.append(msg, level))
+        def ui_set_status(status, color=None):
+            self.controller.root.after(0, lambda: self.set_status(status, color))
+        def ui_update_toggle():
+            self.controller.root.after(0, self._update_toggle_button)
+
         env = build_env()
         if self.spec.requires_database:
             ok, detail = _database_is_reachable(env.get("DATABASE_URL", ""))
             if not ok:
-                self.set_status("数据库未连接", "#b91c1c")
-                self.append(detail, "error")
-                self.controller.show_setup_dialog(
+                ui_set_status("数据库未连接", "#b91c1c")
+                ui_append(detail, "error")
+                # show dialog must be on main thread
+                self.controller.root.after(0, lambda: self.controller.show_setup_dialog(
                     "PostgreSQL 未连接",
                     detail + "\n\n如果已经安装 PostgreSQL，请优先按上面的提示修复账号、密码、数据库和权限；如果尚未安装，再打开下载页安装。",
                     [("\u81ea\u52a8\u521b\u5efa\u6570\u636e\u5e93", self.controller.show_postgres_init_dialog), ("\u6253\u5f00 PostgreSQL \u4e0b\u8f7d\u9875", POSTGRES_DOWNLOAD_URL)],
-                )
+                ))
+                ui_update_toggle()
                 return
 
         if self.spec.key == "web":
@@ -623,46 +658,61 @@ class ServicePane:
             if not _command_exists("npm"):
                 missing.append("npm")
             if missing:
-                self.set_status("缺少 Node.js", "#b91c1c")
-                self.append(f"缺少前端运行环境：{', '.join(missing)}。请安装 {NODE_RECOMMENDED}。", "error")
-                self.controller.show_setup_dialog(
+                ui_set_status("缺少 Node.js", "#b91c1c")
+                ui_append(f"缺少前端运行环境：{', '.join(missing)}。请安装 {NODE_RECOMMENDED}。", "error")
+                self.controller.root.after(0, lambda: self.controller.show_setup_dialog(
                     "缺少前端运行环境",
                     f"Web 控制台需要 {NODE_RECOMMENDED}。安装 Node.js 后重新打开启动器即可。",
                     [("打开 Node.js 下载页", NODE_DOWNLOAD_URL)],
-                )
+                ))
+                ui_update_toggle()
                 return
         if self.spec.requires_database and not env.get("DATABASE_URL"):
-            self.set_status("缺少 DATABASE_URL", "#b91c1c")
-            self.append("请先在 .env 里配置 DATABASE_URL，或者参考 .env.example 补齐数据库配置。", "error")
+            ui_set_status("缺少 DATABASE_URL", "#b91c1c")
+            ui_append("请先在 .env 里配置 DATABASE_URL，或者参考 .env.example 补齐数据库配置。", "error")
+            ui_update_toggle()
             return
+
+        # 端口清理（快速 release + 短等待，只在需要时）
+        if self.spec.port:
+            pids = _find_pids_for_port(self.spec.port)
+            if pids:
+                ui_append(f"端口 {self.spec.port} 仍被占用，自动释放中...", "warning")
+                # release_port may do Tk ops; schedule on main to be safe
+                self.controller.root.after(0, self.release_port)
+            # short wait in this thread (no Tk)
+            _wait_for_port_free(self.spec.port, timeout=3.0)
 
         self.run_id += 1
         run_id = self.run_id
 
         if self.spec.launch_mode == "python":
             if not self.spec.module:
-                self.set_status("配置错误", "#b91c1c")
-                self.append("Python 服务缺少 module 配置。", "error")
+                ui_set_status("配置错误", "#b91c1c")
+                ui_append("Python 服务缺少 module 配置。", "error")
+                ui_update_toggle()
                 return
             cmd = [get_python_executable(), "-u", "-m", self.spec.module]
             cwd = SERVER_DIR
         elif self.spec.launch_mode == "command":
             if not self.spec.command:
-                self.set_status("配置错误", "#b91c1c")
-                self.append("命令模式缺少 command 配置。", "error")
+                ui_set_status("配置错误", "#b91c1c")
+                ui_append("命令模式缺少 command 配置。", "error")
+                ui_update_toggle()
                 return
             cmd = list(self.spec.command)
             cwd = self.spec.cwd or ROOT_DIR
         else:
-            self.set_status("配置错误", "#b91c1c")
-            self.append(f"未知启动模式：{self.spec.launch_mode}", "error")
+            ui_set_status("配置错误", "#b91c1c")
+            ui_append(f"未知启动模式：{self.spec.launch_mode}", "error")
+            ui_update_toggle()
             return
 
-        self.append(f"启动命令：{' '.join(cmd)}", "meta")
-        self.set_status("启动中...", "#d97706")
+        ui_append(f"启动命令：{' '.join(cmd)}", "meta")
+        ui_set_status("启动中...", "#d97706")
 
         try:
-            self.process = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 cwd=str(cwd),
                 env=env,
@@ -674,15 +724,16 @@ class ServicePane:
                 bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
+            self.process = proc
         except Exception as exc:
             self.process = None
-            self.set_status("启动失败", "#b91c1c")
-            self.append(f"启动失败：{exc}", "error")
-            self._update_toggle_button()
+            ui_set_status("启动失败", "#b91c1c")
+            ui_append(f"启动失败：{exc}", "error")
+            ui_update_toggle()
             return
 
-        self.set_status("运行中", "#15803d")
-        self._update_toggle_button()
+        ui_set_status("运行中", "#15803d")
+        ui_update_toggle()
         threading.Thread(target=self._read_output, args=(run_id,), daemon=True).start()
         threading.Thread(target=self._watch_exit, args=(run_id,), daemon=True).start()
 
@@ -702,6 +753,14 @@ class ServicePane:
 
         try:
             if os.name == "nt":
+                # 先尝试较温和的终止（让 lifespan 有机会跑 cleanup），再 force
+                subprocess.run(
+                    ["taskkill", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                time.sleep(0.6)
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                     stdout=subprocess.DEVNULL,
@@ -711,9 +770,15 @@ class ServicePane:
             else:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=4)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+            # 主动关闭管道，避免 Windows 下 readline 线程残留导致状态异常
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
         finally:
             self.process = None
             self.set_status("已停止", "#334155")
@@ -722,8 +787,16 @@ class ServicePane:
 
     def restart(self) -> None:
         self.append("正在重启服务...", "meta")
+        was_running = self.is_running()
         self.stop()
-        self.controller.root.after(350, self.start)
+        # 强制释放端口 + 主动等待端口真正可用（关键修复“重启卡死”）
+        if self.spec.port:
+            self.release_port()
+            # 不再只靠固定时间，等到端口真正 free 再启动
+            free = _wait_for_port_free(self.spec.port, timeout=6.0)
+            if not free:
+                self.append(f"警告：端口 {self.spec.port} 在等待后仍可能被占用，将尝试启动", "warning")
+        self.controller.root.after(100, self.start)
 
     def release_port(self) -> None:
         """一键解除端口占用（直接强制释放，无需确认、无弹窗）。"""
@@ -760,6 +833,8 @@ class ServicePane:
 
         if killed:
             self.append(f"端口 {port} 解除完成，共结束 {len(killed)} 个进程。", "success")
+            # 给 OS 一点时间回收 socket（尤其是 Windows TIME_WAIT）
+            time.sleep(0.4)
         else:
             self.append("未能结束任何进程。", "warning")
 
@@ -1150,15 +1225,25 @@ class LauncherApp:
         self._update_toggle_button()
 
     def restart_all(self) -> None:
-        for pane in self.panes.values():
-            pane.restart()
+        # Gateway 先（它做 schema bootstrap + 很多初始化）
+        if "gateway" in self.panes:
+            self.panes["gateway"].restart()
+        # 其余服务延迟调度，让 gateway 有时间把端口真正 bind 好
+        self.root.after(1800, lambda: self._restart_group(["mcp", "connector", "ai"]))
+        self.root.after(2600, lambda: self._restart_group(["web"]))
         self._update_toggle_button()
 
     def restart_backends(self) -> None:
         """重启 4 个后端服务（gateway、mcp、connector、ai）"""
-        for key in ("gateway", "mcp", "connector", "ai"):
-            if key in self.panes:
-                self.panes[key].restart()
+        if "gateway" in self.panes:
+            self.panes["gateway"].restart()
+        self.root.after(1600, lambda: self._restart_group(["mcp", "connector", "ai"]))
+        self._update_toggle_button()
+
+    def _restart_group(self, keys: list[str]) -> None:
+        for k in keys:
+            if k in self.panes:
+                self.panes[k].restart()
         self._update_toggle_button()
 
     def restart_frontend(self) -> None:

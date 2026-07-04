@@ -23,6 +23,7 @@ class AssistantAIConfig(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     name: str = Field(index=True)
     description: str = Field(default="")
+    avatar: Optional[str] = None
     api_key: str = Field(default="")
     base_url: str = Field(default="")
     model: str = Field(default="")
@@ -79,6 +80,7 @@ class AssistantAIConfig(SQLModel, table=True):
 class AssistantAIConfigCreate(SQLModel):
     name: str
     description: Optional[str] = ""
+    avatar: Optional[str] = None
     api_key: Optional[str] = ""
     base_url: Optional[str] = ""
     model: Optional[str] = ""
@@ -114,6 +116,7 @@ class AssistantAIConfigCreate(SQLModel):
 class AssistantAIConfigUpdate(SQLModel):
     name: Optional[str] = None
     description: Optional[str] = None
+    avatar: Optional[str] = None
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     model: Optional[str] = None

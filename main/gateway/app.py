@@ -12,6 +12,8 @@ import sys
 import importlib
 import glob
 import asyncio
+import threading
+import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from fastapi import FastAPI
@@ -65,15 +67,23 @@ async def lifespan(app: FastAPI):
             )
     except Exception:
         logger.exception("migrate_legacy_switch_files_to_db failed")
-    try:
-        result = align_token_snapshots_with_history()
-        if result.get("changed_rows") or result.get("deleted_rows"):
-            logger.info(
-                f"align_token_snapshots_with_history changed={result.get('changed_rows', 0)} "
-                f"deleted={result.get('deleted_rows', 0)}"
-            )
-    except Exception:
-        logger.exception("align_token_snapshots_with_history failed")
+    def _run_alignment():
+        try:
+            t0 = time.time()
+            result = align_token_snapshots_with_history()
+            dt = time.time() - t0
+            if result.get("changed_rows") or result.get("deleted_rows") or dt > 1.0:
+                logger.info(
+                    f"align_token_snapshots_with_history changed={result.get('changed_rows', 0)} "
+                    f"deleted={result.get('deleted_rows', 0)} took={dt:.2f}s"
+                )
+        except Exception:
+            logger.exception("align_token_snapshots_with_history failed")
+
+    # Run heavy reconciliation in background so lifespan yields quickly and
+    # the gateway becomes available faster on restart. Previously this could
+    # make the whole server "卡" for a long time.
+    threading.Thread(target=_run_alignment, daemon=True, name="token-align").start()
     stop_event = asyncio.Event()
 
     watchdog_counter = {"ticks": 0}
@@ -143,6 +153,13 @@ if _avatars_dir.is_dir():
     app.mount("/avatars", StaticFiles(directory=str(_avatars_dir)), name="avatars")
 else:
     logger.warning("avatars static dir not found: %s", _avatars_dir)
+
+# Serve AI member preset avatars (used for digital life cards and workshop bindings).
+_ai_avatars_dir = Path(__file__).resolve().parent.parent.parent / "static" / "ai_avatars"
+if _ai_avatars_dir.is_dir():
+    app.mount("/ai_avatars", StaticFiles(directory=str(_ai_avatars_dir)), name="ai_avatars")
+else:
+    logger.warning("ai_avatars static dir not found: %s", _ai_avatars_dir)
 
 # 自动注册路由：扫描 gateway/routers/ 目录下所有 HTTP 路由模块。
 # 网关进程现在拥有所有真路由；推理 helper（chat_prompt_utils/chat_runtime_helpers/

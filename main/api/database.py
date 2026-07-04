@@ -23,21 +23,38 @@ _BOOTSTRAP_ADVISORY_LOCK_KEY = 518_329_771_405_339_013
 
 @contextlib.contextmanager
 def _bootstrap_lock():
-    """Serialize schema/bootstrap work across concurrently starting services."""
+    """Serialize schema/bootstrap work across concurrently starting services.
+
+    Uses a *raw* psycopg connection (separate from the SQLAlchemy engine pool)
+    to hold the advisory lock. This prevents the long-held lock connection from
+    consuming a slot in the main pool or causing checkout waits/hangs during
+    the subsequent _db_state() and Alembic upgrade (a common cause of "卡死"
+    at "checking DB state").
+    """
+    import psycopg
+    from .core.config import psycopg_dsn  # noqa: F401  (used below)
+
     deadline = time.time() + 120.0
-    with engine.connect() as conn:
+    logger.info("Acquiring bootstrap advisory lock for DB schema...")
+    # Use raw psycopg so we don't hold a pooled SA connection for the entire migration.
+    lock_conn = psycopg.connect(psycopg_dsn(), autocommit=True)
+    try:
+        attempt = 0
         while True:
-            locked = conn.exec_driver_sql(
+            attempt += 1
+            locked = lock_conn.execute(
                 f"SELECT pg_try_advisory_lock({_BOOTSTRAP_ADVISORY_LOCK_KEY})"
-            ).scalar()
+            ).fetchone()[0]
             if locked:
+                logger.info("Acquired bootstrap lock (raw conn), running schema migration...")
                 try:
                     yield
                 finally:
                     try:
-                        conn.exec_driver_sql(
+                        lock_conn.execute(
                             f"SELECT pg_advisory_unlock({_BOOTSTRAP_ADVISORY_LOCK_KEY})"
                         )
+                        logger.info("Released bootstrap lock.")
                     except Exception:
                         logger.exception("failed to release postgres bootstrap lock")
                 return
@@ -45,7 +62,14 @@ def _bootstrap_lock():
                 raise RuntimeError(
                     "database is busy; another process is still bootstrapping the Postgres database"
                 )
+            if attempt % 4 == 0:  # log every ~2s
+                logger.info(f"Waiting for bootstrap lock (attempt {attempt})...")
             time.sleep(0.5)
+    finally:
+        try:
+            lock_conn.close()
+        except Exception:
+            pass
 
 
 # pool_pre_ping handles dropped connections after server restarts;
@@ -84,16 +108,31 @@ def create_db_and_tables() -> None:
     from .core.settings import settings
     from . import db as _db
 
+    logger.info("create_db_and_tables starting (auto_migrate=%s)", settings.db_auto_migrate)
     if settings.db_auto_migrate:
         _db.ensure_schema()
-        return
+        logger.info("create_db_and_tables completed via ensure_schema")
+    else:
+        has_version, has_core = _db._db_state(engine)
+        if not (has_version or has_core):
+            raise RuntimeError(
+                "database schema is not initialized and HEYSURE_DB_AUTO_MIGRATE is off; "
+                "run `python -m api.db migrate` before starting the app"
+            )
+        logger.info("create_db_and_tables completed (no auto migrate)")
 
-    has_version, has_core = _db._db_state(engine)
-    if not (has_version or has_core):
-        raise RuntimeError(
-            "database schema is not initialized and HEYSURE_DB_AUTO_MIGRATE is off; "
-            "run `python -m api.db migrate` before starting the app"
-        )
+    # Always ensure the avatar column (added to model without migration).
+    # This was the cause of "assistantaiconfig.avatar 不存在" errors on startup.
+    # Safe, idempotent (IF NOT EXISTS), and runs early so subsequent queries succeed.
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql(
+                "ALTER TABLE assistantaiconfig ADD COLUMN IF NOT EXISTS avatar VARCHAR"
+            )
+            conn.commit()
+        logger.info("create_db_and_tables: ensured 'avatar' column exists")
+    except Exception:
+        logger.exception("create_db_and_tables: failed to ensure avatar column (non-fatal)")
 
 
 def get_session():

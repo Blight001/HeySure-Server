@@ -35,7 +35,7 @@ import sys
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect
+
 
 from .core.config import SERVER_DIR
 
@@ -60,9 +60,35 @@ def alembic_config() -> Config:
 
 
 def _db_state(engine) -> tuple[bool, bool]:
-    """Return ``(has_alembic_version, has_core_tables)`` for the given engine."""
-    tables = set(inspect(engine).get_table_names())
-    return ("alembic_version" in tables, _CORE_TABLE in tables)
+    """Return ``(has_alembic_version, has_core_tables)`` for the given engine.
+
+    Uses lightweight existence checks instead of full `get_table_names()` reflection,
+    which can be slow or appear to hang on large DBs or under load/locks.
+    """
+    from sqlalchemy import text
+
+    def _table_exists(name: str) -> bool:
+        try:
+            logger.info(f"_db_state: checking existence of table '{name}' ...")
+            with engine.connect() as conn:
+                # Use proper execute + text() to avoid TextClause len() error
+                stmt = text(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = :name LIMIT 1"
+                )
+                res = conn.execute(stmt, {"name": name}).scalar()
+                exists = res is not None
+                logger.info(f"_db_state: table '{name}' exists={exists}")
+                return exists
+        except Exception as exc:
+            logger.exception(f"_db_state: failed to check table '{name}': {exc}")
+            # If we can't even query, treat as not present (will trigger migration logic)
+            return False
+
+    has_alembic = _table_exists("alembic_version")
+    has_core = _table_exists(_CORE_TABLE)
+    logger.info(f"_db_state result: has_alembic={has_alembic}, has_core={has_core}")
+    return has_alembic, has_core
 
 
 def _legacy_adopt(engine, cfg: Config) -> None:
@@ -92,14 +118,20 @@ def ensure_schema() -> None:
     # imports nothing from this module at import time.
     from .database import _bootstrap_lock, engine
 
+    logger.info("ensure_schema: entering (will acquire bootstrap lock)")
     with _bootstrap_lock():
+        logger.info("ensure_schema: lock acquired, checking DB state")
         has_version, has_core = _db_state(engine)
         cfg = alembic_config()
         if not has_version and has_core:
+            logger.info("ensure_schema: adopting legacy DB")
             _legacy_adopt(engine, cfg)
+            logger.info("ensure_schema: legacy adopt done")
             return
         # Empty DB -> baseline creates everything; managed DB -> apply new revisions.
+        logger.info("ensure_schema: running alembic upgrade head")
         command.upgrade(cfg, "head")
+        logger.info("ensure_schema: upgrade completed")
 
 
 # --------------------------------------------------------------------------- #

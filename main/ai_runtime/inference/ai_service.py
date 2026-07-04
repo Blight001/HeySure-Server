@@ -193,6 +193,7 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
                 switch_key=spec["switch_key"],
                 name=spec["name"],
                 description=spec["description"],
+                avatar="ai_avatars1.png",
                 ai_role=spec["ai_role"],
                 digital_member_role=spec.get("digital_member_role", "member"),
                 is_librarian=bool(spec.get("is_librarian", False)),
@@ -269,30 +270,54 @@ def ensure_default_ai_for_user(session: Session, user_id: int) -> None:
 
 
 def align_token_snapshots_with_history() -> dict:
-    """On server startup, reduce snapshot totals when they exceed chat-history usage."""
+    """On server startup, reduce snapshot totals when they exceed chat-history usage.
+
+    Uses DB-side aggregation instead of loading the entire ChatMessage table
+    into memory. This was causing very slow gateway restarts ("卡死") when
+    there is non-trivial chat history.
+    """
     kinds = {"assistant", "core"}
     changed_rows = 0
     deleted_rows = 0
 
     with Session(engine) as session:
-        messages = session.exec(
-            select(ChatMessage).where(ChatMessage.ai_kind.in_(list(kinds)))
+        # Aggregate directly in Postgres — avoids loading every ChatMessage row.
+        # Bucket format must exactly match the legacy "%Y-%m-%d".
+        from sqlalchemy import text
+
+        kind_list = ",".join(f"'{k}'" for k in kinds)
+        history_rows = session.exec(
+            text(
+                f"""
+                SELECT user_id,
+                       ai_kind,
+                       ai_config_id,
+                       to_char(to_timestamp(created_at), 'YYYY-MM-DD') AS bucket,
+                       COALESCE(SUM(prompt_tokens), 0) AS prompt,
+                       COALESCE(SUM(completion_tokens), 0) AS completion,
+                       COALESCE(SUM(total_tokens), 0) AS total
+                FROM chatmessage
+                WHERE ai_kind IN ({kind_list})
+                GROUP BY user_id, ai_kind, ai_config_id, bucket
+                """
+            )
         ).all()
 
         history_usage: Dict[Tuple[int, str, Optional[int], str], Dict[str, int]] = {}
-        for msg in messages:
-            prompt = int(msg.prompt_tokens or 0)
-            completion = int(msg.completion_tokens or 0)
-            total = int(msg.total_tokens or 0)
+        for row in history_rows:
+            # row is a Row object; access by index or attribute
+            user_id = row[0]
+            ai_kind = row[1]
+            ai_config_id = row[2]
+            bucket = row[3]
+            prompt = int(row[4] or 0)
+            completion = int(row[5] or 0)
+            total = int(row[6] or 0)
+
             if prompt <= 0 and completion <= 0 and total <= 0:
                 continue
-            bucket = time.strftime("%Y-%m-%d", time.gmtime(msg.created_at))
-            key = (msg.user_id, msg.ai_kind, msg.ai_config_id, bucket)
-            if key not in history_usage:
-                history_usage[key] = {"prompt": 0, "completion": 0, "total": 0}
-            history_usage[key]["prompt"] += prompt
-            history_usage[key]["completion"] += completion
-            history_usage[key]["total"] += total
+            key = (user_id, ai_kind, ai_config_id, bucket)
+            history_usage[key] = {"prompt": prompt, "completion": completion, "total": total}
 
         snapshots = session.exec(
             select(TokenUsageSnapshot).where(TokenUsageSnapshot.ai_kind.in_(list(kinds)))

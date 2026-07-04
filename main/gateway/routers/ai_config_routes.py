@@ -4,6 +4,7 @@ parent binding, governance tree, cloning, and MCP enable/disable."""
 IS_ROUTER_ENTRY = False
 
 import logging
+import re
 import time
 from typing import Optional
 
@@ -173,10 +174,14 @@ def create_ai_config(
             clamped_mcp_tools = json.dumps(kept, ensure_ascii=False)
     except Exception:
         pass
+    raw_avatar = (body.avatar or "").strip()
+    m = re.search(r'ai_avatars([1-9])', raw_avatar)
+    avatar = f"ai_avatars{m.group(1)}.png" if m else "ai_avatars1.png"
     cfg = AssistantAIConfig(
         user_id=user.id,
         name=body.name,
         description=body.description or "",
+        avatar=avatar,
         api_key=model_fields["api_key"],
         base_url=model_fields["base_url"],
         model=model_fields["model"],
@@ -518,6 +523,7 @@ def clone_ai_config(
         user_id=user.id,
         name=f"{src.name} (副本)",
         description=src.description,
+        avatar=src.avatar or "ai_avatars1.png",
         api_key=src.api_key,
         base_url=src.base_url,
         model=src.model,

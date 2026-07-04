@@ -522,6 +522,7 @@ async def list_ai_cards(
                 "id": cfg.id,
                 "name": cfg.name,
                 "description": cfg.description,
+                "avatar": cfg.avatar,
                 "model": effective_model or cfg.model,
                 "model_preset_id": cfg.model_preset_id,
                 "strip_markdown_symbols": cfg.strip_markdown_symbols,
