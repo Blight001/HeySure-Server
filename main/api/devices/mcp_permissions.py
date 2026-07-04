@@ -111,6 +111,21 @@ def set_scope(user_id, device_id, tools: Iterable[str], *, ai_config_id=None, de
     return set(allowed)
 
 
+def delete_scope(user_id, device_id) -> None:
+    """Drop the saved allow-list for (user, agent), e.g. when forgetting an
+    offline device's record entirely."""
+    uid = _coerce_int(user_id)
+    aid = _device_id(device_id)
+    if uid is None or not aid:
+        return
+    with Session(engine) as session:
+        rows = _load_scope_rows(session, uid, aid)
+        for row in rows:
+            session.delete(row)
+        if rows:
+            session.commit()
+
+
 def reconcile_scope_with_capabilities(
     user_id,
     device_id,

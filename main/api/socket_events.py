@@ -220,6 +220,8 @@ def register_agent_socket_events():
                     capabilities,
                     online=True,
                     tool_defs=agent_endpoint_tool_defs(agents[sid]),
+                    name=agents[sid].get('name'),
+                    platform=agents[sid].get('platform'),
                 )
                 if owner_user_id is not None:
                     reconcile_scope_with_capabilities(

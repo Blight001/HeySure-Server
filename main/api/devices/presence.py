@@ -77,7 +77,8 @@ def _load_presence_rows(session: Session, device_id: str):
 
 
 def upsert_presence(
-    user_id, device_id, ai_config_id, device_type, capabilities, online: bool = True, tool_defs=None
+    user_id, device_id, ai_config_id, device_type, capabilities, online: bool = True, tool_defs=None,
+    name=None, platform=None,
 ) -> None:
     aid = str(device_id or "").strip()
     if not aid:
@@ -99,6 +100,10 @@ def upsert_presence(
         row.capabilities_json = json.dumps(caps, ensure_ascii=False)
         row.tool_defs_json = json.dumps(defs, ensure_ascii=False)
         row.online = bool(online)
+        if name is not None:
+            row.name = str(name or "").strip()
+        if platform is not None:
+            row.platform = str(platform or "").strip()
         row.updated_at = time.time()
         session.commit()
 
@@ -327,6 +332,54 @@ def online_tool_catalog_for_user(user_id) -> List[Dict[str, object]]:
                 "device_type": device_type,
                 "updated_at": float(row.updated_at or 0),
                 "tools": tools,
+            })
+    return out
+
+
+def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict]:
+    """Endpoint-agent rows the Workshop panel should still list while offline.
+
+    One row per ``device_id`` this user has ever registered (last-known name /
+    platform / capabilities), skipping ids already covered by the live socket
+    snapshot. Lets an operator save an AI assignment for a device that isn't
+    currently connected; the binding takes effect on its next register."""
+    uid = _int(user_id)
+    if uid is None:
+        return []
+    exclude = {str(x).strip() for x in (exclude_device_ids or set()) if str(x).strip()}
+    out: List[dict] = []
+    with Session(engine) as session:
+        rows = session.exec(
+            select(DevicePresence)
+            .where(DevicePresence.user_id == uid)
+            .order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
+        ).all()
+        seen: Set[str] = set()
+        for row in rows:
+            device_id = str(row.device_id or "").strip()
+            if not device_id or device_id in seen or device_id in exclude:
+                continue
+            seen.add(device_id)
+            device_type = str(row.device_type or "").strip()
+            if device_type in ("workshop", "toolbox"):
+                continue  # built-ins are synthesized live, never persisted offline rows
+            out.append({
+                "id": device_id,
+                "name": str(row.name or "").strip() or device_id,
+                "platform": str(row.platform or "").strip(),
+                "aiConfigId": row.ai_config_id,
+                "isWindowsDesktop": device_type == "desktop",
+                "isBrowserExtension": device_type == "browser",
+                "isAndroid": device_type == "android",
+                "capabilities": sorted(mcp_capabilities(_decode(row))),
+                "version": "",
+                "lifecycle": "offline",
+                "online": False,
+                "connectedAt": None,
+                "lastTaskId": None,
+                "lastTaskStatus": None,
+                "lastTaskAt": None,
+                "lastError": None,
             })
     return out
 

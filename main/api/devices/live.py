@@ -17,12 +17,16 @@ def _positive_int(value):
 
 
 def connected_agent_rows_for_user(user_id: int):
-    """Build the live agent snapshot visible to one user."""
+    """Build the device snapshot visible to one user: live sockets plus any
+    device this user has registered before that is currently offline (so the
+    Workshop panel can still show/assign it — the binding takes effect on its
+    next reconnect instead of requiring it to be online right now)."""
     uid = _positive_int(user_id)
     if uid is None:
         return []
     rows = [
-        agent for agent in agents.values()
+        {**agent, "online": True}
+        for agent in agents.values()
         if _positive_int(agent.get("userId") or agent.get("user_id")) == uid
     ]
     try:
@@ -30,10 +34,17 @@ def connected_agent_rows_for_user(user_id: int):
         from library import engine as workshop_engine
 
         workshop_engine.ensure_presence_for_user(uid)
-        rows.append(workshop_engine.connected_entry_for_user(uid))
-        rows.append(toolbox_engine.toolbox_connected_entry_for_user(uid))
+        rows.append({**workshop_engine.connected_entry_for_user(uid), "online": True})
+        rows.append({**toolbox_engine.toolbox_connected_entry_for_user(uid), "online": True})
     except Exception:
         logger.exception("failed to add builtin workshop to agent snapshot user=%s", uid)
+    try:
+        from api.devices.presence import offline_devices_for_user
+
+        live_ids = {str(row.get("id") or "").strip() for row in rows}
+        rows.extend(offline_devices_for_user(uid, live_ids))
+    except Exception:
+        logger.exception("failed to add offline devices to snapshot user=%s", uid)
     return rows
 
 

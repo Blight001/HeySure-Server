@@ -28,6 +28,11 @@ class DevicePresence(SQLModel, table=True):
     ai_config_id: Optional[int] = Field(default=None, index=True)
     # "desktop" | "browser"
     device_type: str = Field(default="")
+    # Last-seen display name / platform string reported at register time. Kept
+    # so a device that is currently offline can still be listed (and assigned
+    # an AI) in the Workshop panel instead of disappearing entirely.
+    name: str = Field(default="")
+    platform: str = Field(default="")
     # JSON array of the agent's (type-filtered) endpoint tool names.
     capabilities_json: str = Field(default="[]")
     # JSON object mapping each reported tool name to its self-described

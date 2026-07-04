@@ -236,6 +236,43 @@ async def bind_agent_ai(
     return {"ok": True, "deviceId": device_id, "aiConfigId": stored}
 
 
+@router.delete("/{device_id}")
+async def forget_device(
+    device_id: str,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Delete the persisted record (AI binding + presence + saved MCP scope)
+    for a device that isn't connected right now. Only meaningful for offline
+    devices — a live one would just recreate its presence row on its next
+    heartbeat, so this is refused while the device is connected."""
+    user = get_current_user(authorization, session)
+    aid = (device_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="deviceId required")
+    if _find_connected_agent(aid, user.id):
+        raise HTTPException(status_code=400, detail="设备在线时无法删除记录，请等待其离线后再试")
+
+    set_binding(user.id, aid, None)
+
+    presence_rows = session.exec(
+        select(DevicePresence).where(DevicePresence.device_id == aid)
+    ).all()
+    deleted = False
+    for row in presence_rows:
+        if row.user_id == user.id:
+            session.delete(row)
+            deleted = True
+    if deleted:
+        session.commit()
+
+    from api.devices.mcp_permissions import delete_scope
+    delete_scope(user.id, aid)
+
+    await emit_agent_list_for_user(user.id)
+    return {"ok": True, "deviceId": aid, "deleted": deleted}
+
+
 @router.get("/{device_id}/mcp-scope")
 def get_agent_mcp_scope(
     device_id: str,

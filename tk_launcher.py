@@ -47,6 +47,12 @@ POSTGRES_RECOMMENDED = "PostgreSQL 16"
 PYTHON_RECOMMENDED = "Python 3.11 或 3.12"
 NODE_RECOMMENDED = "Node.js 22 LTS 或更新的 LTS 版本"
 
+# 5 个服务面板在“全部启动”时会同时在各自后台线程里调用 netstat/tasklist/taskkill
+# 探测端口占用。并发 subprocess.Popen 曾在实测中偶发把启动器自身进程带崩（Windows 下
+# 这批 Python/venv 组合对多线程同时创建子进程不够稳固），因此这里把所有端口探测/
+# 结束进程相关的 subprocess 调用串行化，避免多线程同时 spawn 子进程。
+_PORT_TOOL_LOCK = threading.Lock()
+
 
 def _parse_env_file(path: Path) -> Dict[str, str]:
     if not path.exists():
@@ -327,14 +333,15 @@ def _find_pids_for_port(port: str) -> list[str]:
 
     def _run_netstat(proto: str) -> list[str]:
         try:
-            result = subprocess.run(
-                ["netstat", "-ano", "-p", proto],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-            )
+            with _PORT_TOOL_LOCK:
+                result = subprocess.run(
+                    ["netstat", "-ano", "-p", proto],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                )
             return result.stdout.splitlines()
         except Exception:
             return []
@@ -365,14 +372,18 @@ def _find_pids_for_port(port: str) -> list[str]:
 
 def _force_kill_pids(pids: list[str]) -> None:
     """Force kill the given list of PIDs (silent, no confirmation). Uses /T to terminate tree."""
+    own_pid = str(os.getpid())
     for pid in pids:
+        if pid == own_pid:
+            continue
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", pid],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-            )
+            with _PORT_TOOL_LOCK:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", pid],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                )
         except Exception:
             pass
 
@@ -418,6 +429,8 @@ class ServicePane:
         self.run_id = 0
         self.history: List[Tuple[str, str]] = []
         self.log_filter = "all"  # all | warning | error
+        self.is_visible = False
+        self._pending_refresh = False
 
         # 使用 customtkinter 现代卡片式面板
         # 直接 toolbar(0) → log(1)，状态颜色圆球只在顶部概览栏每个栏目左侧显示
@@ -537,24 +550,69 @@ class ServicePane:
         except Exception:
             pass
 
-    def append(self, message: str, level: str = "info") -> None:
-        line = f"[{timestamp()}] {message}"
+    def _store_history(self, level: str, line: str) -> None:
         self.history.append((level, line))
         if len(self.history) > 3000:
             self.history = self.history[-2000:]
 
-        if self._should_show(level):
-            self.text.configure(state="normal")
-            self._ensure_log_tags()
-            txt = self.text._textbox  # type: ignore[attr-defined]
-            # 注意：Text 控件结尾恒有一个隐式换行符，"end" 指向真正插入点的下一行，
-            # 必须用 "end-1c" 记录插入前的起点，否则 tag_add 得到空区间、颜色失效。
+    def append(self, message: str, level: str = "info") -> None:
+        line = f"[{timestamp()}] {message}"
+        self._store_history(level, line)
+
+        # 面板不可见时只记录历史，不做任何 Tk 部件操作；等切回该面板时一次性重建，
+        # 避免 5 个服务面板即使没显示也在后台逐行刷新 Text 控件造成的无谓开销。
+        if not self.is_visible:
+            self._pending_refresh = True
+            return
+        if not self._should_show(level):
+            return
+
+        self.text.configure(state="normal")
+        self._ensure_log_tags()
+        txt = self.text._textbox  # type: ignore[attr-defined]
+        # 注意：Text 控件结尾恒有一个隐式换行符，"end" 指向真正插入点的下一行，
+        # 必须用 "end-1c" 记录插入前的起点，否则 tag_add 得到空区间、颜色失效。
+        start_idx = txt.index("end-1c")
+        txt.insert("end", line + "\n")
+        end_idx = txt.index("end-1c")
+        txt.tag_add(level, start_idx, end_idx)
+        self.text.see("end")
+        self.text.configure(state="disabled")
+
+    def append_many(self, entries: List[Tuple[str, str]]) -> None:
+        """批量追加 (message, level)，只做一次 Tk 部件更新。
+
+        用于合并同一次 `_drain_queue` 周期内某个服务的所有输出行，避免高频日志
+        （如 uvicorn access log）逐行触发 configure/tag 重建/see("end")，这是
+        启动器卡顿的主因。
+        """
+        if not entries:
+            return
+
+        formatted: List[Tuple[str, str]] = []
+        for message, level in entries:
+            line = f"[{timestamp()}] {message}"
+            self._store_history(level, line)
+            formatted.append((level, line))
+
+        if not self.is_visible:
+            self._pending_refresh = True
+            return
+
+        visible_entries = [(level, line) for level, line in formatted if self._should_show(level)]
+        if not visible_entries:
+            return
+
+        self.text.configure(state="normal")
+        self._ensure_log_tags()
+        txt = self.text._textbox  # type: ignore[attr-defined]
+        for level, line in visible_entries:
             start_idx = txt.index("end-1c")
             txt.insert("end", line + "\n")
             end_idx = txt.index("end-1c")
             txt.tag_add(level, start_idx, end_idx)
-            self.text.see("end")
-            self.text.configure(state="disabled")
+        self.text.see("end")
+        self.text.configure(state="disabled")
 
     def set_status(self, status: str, color: Optional[str] = None) -> None:
         # 不再显示任何“运行中”“已停止”等文字状态
@@ -754,19 +812,21 @@ class ServicePane:
         try:
             if os.name == "nt":
                 # 先尝试较温和的终止（让 lifespan 有机会跑 cleanup），再 force
-                subprocess.run(
-                    ["taskkill", "/T", "/PID", str(proc.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
+                with _PORT_TOOL_LOCK:
+                    subprocess.run(
+                        ["taskkill", "/T", "/PID", str(proc.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
                 time.sleep(0.6)
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
+                with _PORT_TOOL_LOCK:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
             else:
                 proc.terminate()
                 try:
@@ -812,17 +872,23 @@ class ServicePane:
             self.append(f"未找到占用端口 {port} 的进程。", "success")
             return
 
+        own_pid = str(os.getpid())
         killed = []
         for pid in pids:
+            if pid == own_pid:
+                # 绝不误杀启动器自身：taskkill /T 会连带杀掉整棵进程树。
+                self.append(f"跳过 PID {pid}：这是启动器自身进程。", "warning")
+                continue
             name = self._get_proc_name(pid) or "未知进程"
             self.append(f"发现占用: {name} (PID {pid})", "warning")
             try:
-                r = subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", pid],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-                )
+                with _PORT_TOOL_LOCK:
+                    r = subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", pid],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                    )
                 if r.returncode == 0:
                     killed.append(pid)
                     self.append(f"  已强制结束 PID {pid}", "success")
@@ -840,14 +906,15 @@ class ServicePane:
 
     def _get_proc_name(self, pid: str) -> Optional[str]:
         try:
-            r = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-            )
+            with _PORT_TOOL_LOCK:
+                r = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
+                )
             line = r.stdout.strip()
             if line and "," in line:
                 return line.split(",")[0].strip().strip('"')
@@ -1126,13 +1193,20 @@ class LauncherApp:
         if self.current_service_key == key:
             return
         if self.current_service_key is not None:
-            if self.current_service_key in self.panes:
-                self.panes[self.current_service_key].frame.pack_forget()
+            prev = self.panes.get(self.current_service_key)
+            if prev is not None:
+                prev.frame.pack_forget()
+                prev.is_visible = False
             if self.current_service_key in self.status_items:
                 self.status_items[self.current_service_key].configure(fg_color="transparent")
         if key in self.panes:
-            self.panes[key].frame.pack(fill="both", expand=True)
+            pane = self.panes[key]
+            pane.frame.pack(fill="both", expand=True)
             self.current_service_key = key
+            pane.is_visible = True
+            if pane._pending_refresh:
+                pane._refresh_logs()
+                pane._pending_refresh = False
             if key in self.status_items:
                 # 高亮选中的栏目状态标签
                 self.status_items[key].configure(fg_color="#1f2937")
@@ -1176,44 +1250,65 @@ class LauncherApp:
     def enqueue_install_exit(self, exit_code: int) -> None:
         self.queue.put(("install-exit", exit_code))
 
+    def _handle_exit(self, service_key: str, exit_code: int, run_id: int) -> None:
+        pane = self.panes[service_key]
+        if run_id != pane.run_id:
+            return
+        pane.process = None
+        if exit_code == 0:
+            pane.set_status("已退出", "#334155")
+            pane.append("服务正常退出。", "warning")
+        else:
+            pane.set_status(f"退出 {exit_code}", "#b91c1c")
+            pane.append(f"服务异常退出，返回码 {exit_code}。", "error")
+            if pane._has_missing_dependency_error():
+                self.show_tip("检测到缺少 Python 依赖，请先运行“安装依赖”。", "error")
+        self._update_toggle_button()
+        pane._update_toggle_button()
+
+    def _handle_install_exit(self, exit_code: int) -> None:
+        self._set_installing(False)
+        if exit_code == 0:
+            self.show_tip("依赖安装完成。", "info")
+            self.panes[self.install_target_key].append("依赖安装完成。", "success")
+        else:
+            self.show_tip(f"依赖安装失败，返回码 {exit_code}。", "error")
+            self.panes[self.install_target_key].append(f"依赖安装失败，返回码 {exit_code}。", "error")
+
     def _drain_queue(self) -> None:
+        # 按服务分组缓冲本轮取出的日志行，最后一次性 append_many，
+        # 避免高频日志逐行触发 Tk 更新（这是启动器卡顿的主因）。
+        pending_logs: Dict[str, List[Tuple[str, str]]] = {}
+        pending_install_logs: List[Tuple[str, str]] = []
+
+        def _flush_install_logs() -> None:
+            if pending_install_logs:
+                self.panes[self.install_target_key].append_many(list(pending_install_logs))
+                pending_install_logs.clear()
+
         try:
             while True:
                 kind, *payload = self.queue.get_nowait()
                 if kind == "log":
                     service_key, line, level = payload
-                    self.panes[service_key].append(line, level)
+                    pending_logs.setdefault(service_key, []).append((line, level))
                 elif kind == "exit":
                     service_key, exit_code, run_id = payload
-                    pane = self.panes[service_key]
-                    if run_id != pane.run_id:
-                        continue
-                    pane.process = None
-                    if exit_code == 0:
-                        pane.set_status("已退出", "#334155")
-                        pane.append("服务正常退出。", "warning")
-                    else:
-                        pane.set_status(f"退出 {exit_code}", "#b91c1c")
-                        pane.append(f"服务异常退出，返回码 {exit_code}。", "error")
-                        if pane._has_missing_dependency_error():
-                            self.show_tip("检测到缺少 Python 依赖，请先运行“安装依赖”。", "error")
-                    self._update_toggle_button()
-                    pane._update_toggle_button()
+                    if service_key in pending_logs:
+                        self.panes[service_key].append_many(pending_logs.pop(service_key))
+                    self._handle_exit(service_key, exit_code, run_id)
                 elif kind == "install-log":
                     line, level = payload
-                    self.panes[self.install_target_key].append(f"[依赖安装] {line}", level)
+                    pending_install_logs.append((f"[依赖安装] {line}", level))
                 elif kind == "install-exit":
-                    exit_code = payload[0]
-                    self._set_installing(False)
-                    if exit_code == 0:
-                        self.show_tip("依赖安装完成。", "info")
-                        self.panes[self.install_target_key].append("依赖安装完成。", "success")
-                    else:
-                        self.show_tip(f"依赖安装失败，返回码 {exit_code}。", "error")
-                        self.panes[self.install_target_key].append(f"依赖安装失败，返回码 {exit_code}。", "error")
+                    _flush_install_logs()
+                    self._handle_install_exit(payload[0])
         except queue.Empty:
             pass
         finally:
+            for service_key, entries in pending_logs.items():
+                self.panes[service_key].append_many(entries)
+            _flush_install_logs()
             self.root.after(120, self._drain_queue)
 
     def _auto_start(self) -> None:
