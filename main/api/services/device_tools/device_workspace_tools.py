@@ -150,6 +150,34 @@ def _tool_names(d: str) -> List[str]:
     )
 
 
+# ---- tombstones: remember explicitly-deleted tool names --------------------
+#
+# ``seed_defaults`` re-creates any factory-default tool whose file is missing, so
+# without a tombstone a deleted default reappears on the next device connect
+# (seed runs on every register). A tombstone marks a name as intentionally gone
+# so seeding skips it; re-creating the tool (upsert/restore) clears the marker.
+
+def _deleted_dir(d: str) -> str:
+    return os.path.join(d, ".deleted")
+
+
+def _tombstone_add(d: str, name: str) -> None:
+    dd = _deleted_dir(d)
+    os.makedirs(dd, exist_ok=True)
+    _atomic_write(os.path.join(dd, name), "")
+
+
+def _tombstone_remove(d: str, name: str) -> None:
+    try:
+        os.remove(os.path.join(_deleted_dir(d), name))
+    except OSError:
+        pass
+
+
+def _is_tombstoned(d: str, name: str) -> bool:
+    return os.path.isfile(os.path.join(_deleted_dir(d), name))
+
+
 # ---- history (file-based, replaces the version table) ---------------------
 
 def _history_dir(d: str, name: str) -> str:
@@ -211,6 +239,8 @@ def upsert_tool(user_id: int, device_type: str, definition: Any, enabled: bool =
     d = _tools_dir(user_id, dtype)
     status = "draft" if actor == "ai" else "active"
     _write_files(d, clean, enabled, status)
+    # Re-creating a name clears any prior tombstone so it seeds normally again.
+    _tombstone_remove(d, clean["name"])
     serialized = _read_tool(d, clean["name"]) or {}
     _record_version(d, clean["name"], serialized, action, actor, ai_config_id)
     return serialized
@@ -252,12 +282,20 @@ def delete_tool(user_id: int, device_type: str, name: str, actor: str = "web", a
     if not current:
         return False
     _record_version(d, name, current, "delete", actor, ai_config_id)
-    for path in (_meta_path(d, name), os.path.join(d, f"{name}.py"), os.path.join(d, f"{name}.js")):
+    for path in (
+        _meta_path(d, name),
+        os.path.join(d, f"{name}.py"),
+        os.path.join(d, f"{name}.js"),
+        os.path.join(d, f"{name}.ps1"),
+        os.path.join(d, f"{name}.sh"),
+    ):
         try:
             if os.path.isfile(path):
                 os.remove(path)
         except OSError:
             pass
+    # Tombstone so seed_defaults won't resurrect a deleted factory-default tool.
+    _tombstone_add(d, name)
     return True
 
 
@@ -371,6 +409,9 @@ def seed_defaults(user_id: int, device_type: str = "desktop") -> int:
     created = 0
     for spec in _load():
         if os.path.isfile(_meta_path(d, spec["name"])):
+            continue
+        # Respect an explicit deletion: don't resurrect a tombstoned default.
+        if _is_tombstoned(d, spec["name"]):
             continue
         clean = validate_definition(spec)
         _write_files(d, clean, enabled=True, status="active")
