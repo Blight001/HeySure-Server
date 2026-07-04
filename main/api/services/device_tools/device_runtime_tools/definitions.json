@@ -32,8 +32,9 @@
   },
   {
     "name": "keyboard.type",
-    "file": "keyboard.type.py",
-    "description": "在当前焦点处输入文本（Python/pyautogui）。",
+    "file": "keyboard.type.ps1",
+    "runtime": "powershell",
+    "description": "在当前焦点处输入文本（PowerShell/SendInput Unicode）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -50,8 +51,9 @@
   },
   {
     "name": "keyboard.press",
-    "file": "keyboard.press.py",
-    "description": "按下组合键，如 ctrl+c（Python/pyautogui）。keys 可为字符串或数组。",
+    "file": "keyboard.press.ps1",
+    "runtime": "powershell",
+    "description": "按下组合键，如 ctrl+c（PowerShell/keybd_event）。keys 可为字符串或数组。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -67,8 +69,9 @@
   },
   {
     "name": "mouse.move",
-    "file": "mouse.move.py",
-    "description": "移动鼠标到 (x, y)（Python/pyautogui）。",
+    "file": "mouse.move.ps1",
+    "runtime": "powershell",
+    "description": "移动鼠标到 (x, y)（PowerShell/user32）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -88,7 +91,8 @@
   },
   {
     "name": "mouse.click",
-    "file": "mouse.click.py",
+    "file": "mouse.click.ps1",
+    "runtime": "powershell",
     "description": "在 (x, y) 单击（缺省在当前位置）。button: left/right/middle。",
     "input_schema": {
       "type": "object",
@@ -108,7 +112,8 @@
   },
   {
     "name": "mouse.double_click",
-    "file": "mouse.double_click.py",
+    "file": "mouse.double_click.ps1",
+    "runtime": "powershell",
     "description": "在 (x, y) 双击（缺省在当前位置）。",
     "input_schema": {
       "type": "object",
@@ -125,7 +130,8 @@
   },
   {
     "name": "mouse.right_click",
-    "file": "mouse.right_click.py",
+    "file": "mouse.right_click.ps1",
+    "runtime": "powershell",
     "description": "在 (x, y) 右键单击（缺省在当前位置）。",
     "input_schema": {
       "type": "object",
@@ -142,8 +148,9 @@
   },
   {
     "name": "mouse.scroll",
-    "file": "mouse.scroll.py",
-    "description": "滚动鼠标滚轮，amount 正为上、负为下（Python/pyautogui）。",
+    "file": "mouse.scroll.ps1",
+    "runtime": "powershell",
+    "description": "滚动鼠标滚轮，amount 正为上、负为下（PowerShell/user32，120 约等于一格）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -159,8 +166,9 @@
   },
   {
     "name": "mouse.drag",
-    "file": "mouse.drag.py",
-    "description": "从 (x1,y1) 拖拽到 (x2,y2)（Python/pyautogui）。",
+    "file": "mouse.drag.ps1",
+    "runtime": "powershell",
+    "description": "从 (x1,y1) 拖拽到 (x2,y2)（PowerShell/user32）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -188,8 +196,9 @@
   },
   {
     "name": "clipboard.get",
-    "file": "clipboard.get.py",
-    "description": "读取剪贴板文本（Python/pyperclip）。",
+    "file": "clipboard.get.ps1",
+    "runtime": "powershell",
+    "description": "读取剪贴板文本（PowerShell/WinForms Clipboard）。",
     "input_schema": {
       "type": "object"
     },
@@ -197,8 +206,9 @@
   },
   {
     "name": "clipboard.set",
-    "file": "clipboard.set.py",
-    "description": "写入剪贴板文本（Python/pyperclip）。",
+    "file": "clipboard.set.ps1",
+    "runtime": "powershell",
+    "description": "写入剪贴板文本（PowerShell/WinForms Clipboard）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -214,8 +224,9 @@
   },
   {
     "name": "process.list",
-    "file": "process.list.py",
-    "description": "列出进程（pid/name/cpu/mem，Python/psutil）。",
+    "file": "process.list.ps1",
+    "runtime": "powershell",
+    "description": "列出进程（pid/name，PowerShell/Get-Process）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -229,8 +240,9 @@
   },
   {
     "name": "process.kill",
-    "file": "process.kill.py",
-    "description": "结束指定 pid 的进程（Python/psutil）。",
+    "file": "process.kill.ps1",
+    "runtime": "powershell",
+    "description": "结束指定 pid 的进程（PowerShell/Stop-Process）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -246,8 +258,9 @@
   },
   {
     "name": "text.input",
-    "file": "text.input.py",
-    "description": "向当前焦点处一次性粘贴大段文本（剪贴板 + Ctrl+V，Python）。",
+    "file": "text.input.ps1",
+    "runtime": "powershell",
+    "description": "向当前焦点处一次性粘贴大段文本（剪贴板 + Ctrl+V，PowerShell）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -266,8 +279,9 @@
   },
   {
     "name": "fs.list",
-    "file": "fs.list.py",
-    "description": "列出工作区某路径下的文件/子目录（Python）。",
+    "file": "fs.list.ps1",
+    "runtime": "powershell",
+    "description": "列出工作区某路径下的文件/子目录（PowerShell）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -281,8 +295,9 @@
   },
   {
     "name": "fs.read",
-    "file": "fs.read.py",
-    "description": "读取工作区中某文件内容（Python，默认上限 200KB）。",
+    "file": "fs.read.ps1",
+    "runtime": "powershell",
+    "description": "读取工作区中某文件内容（PowerShell，默认上限 200KB）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -301,8 +316,9 @@
   },
   {
     "name": "fs.write",
-    "file": "fs.write.py",
-    "description": "在工作区中创建/覆盖一个文件（Python，属写入操作）。",
+    "file": "fs.write.ps1",
+    "runtime": "powershell",
+    "description": "在工作区中创建/覆盖一个文件（PowerShell，属写入操作）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -322,8 +338,9 @@
   },
   {
     "name": "git.diff",
-    "file": "git.diff.py",
-    "description": "查看工作区（或子目录）当前的 git diff（Python/subprocess）。",
+    "file": "git.diff.ps1",
+    "runtime": "powershell",
+    "description": "查看工作区（或子目录）当前的 git diff（PowerShell/git）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -337,8 +354,9 @@
   },
   {
     "name": "display.box",
-    "file": "display.box.py",
-    "description": "在桌面最上层短暂显示一个半透明高亮框（Python/tkinter），到时自动消失。用途：标记 AI 识别到的屏幕区域。需要 tkinter（Windows 自带；Linux 需 python3-tk）。",
+    "file": "display.box.ps1",
+    "runtime": "powershell",
+    "description": "在桌面最上层短暂显示一个半透明高亮框（PowerShell/WinForms，仅 Windows），到时自动消失。用途：标记 AI 识别到的屏幕区域。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -378,8 +396,9 @@
   },
   {
     "name": "screen.capture",
-    "file": "screen.capture.py",
-    "description": "整屏截图（Python/mss）。返回 JPEG dataUrl，服务器自动存到 Screenshots 并按需发用户。",
+    "file": "screen.capture.ps1",
+    "runtime": "powershell",
+    "description": "整屏截图（PowerShell/GDI+）。返回 JPEG dataUrl，服务器自动存到 Screenshots 并按需发用户。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -393,8 +412,9 @@
   },
   {
     "name": "screen.capture_region",
-    "file": "screen.capture_region.py",
-    "description": "截取屏幕矩形区域（Python/mss）。返回 JPEG dataUrl，服务器自动存盘。",
+    "file": "screen.capture_region.ps1",
+    "runtime": "powershell",
+    "description": "截取屏幕矩形区域（PowerShell/GDI+）。返回 JPEG dataUrl，服务器自动存盘。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -420,8 +440,9 @@
   },
   {
     "name": "screen.info",
-    "file": "screen.info.py",
-    "description": "列出显示器及分辨率（Python/mss）。",
+    "file": "screen.info.ps1",
+    "runtime": "powershell",
+    "description": "列出显示器及分辨率（PowerShell/WinForms Screen）。",
     "input_schema": {
       "type": "object"
     },
@@ -429,8 +450,9 @@
   },
   {
     "name": "vision.capture",
-    "file": "vision.capture.py",
-    "description": "采集整屏用于视觉理解（Python/mss）。返回 JPEG dataUrl，服务器存盘并发用户。",
+    "file": "vision.capture.ps1",
+    "runtime": "powershell",
+    "description": "采集整屏用于视觉理解（PowerShell/GDI+）。返回 JPEG dataUrl，服务器存盘并发用户。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -446,8 +468,9 @@
   },
   {
     "name": "vision.capture_mouse",
-    "file": "vision.capture_mouse.py",
-    "description": "采集鼠标周围区域用于视觉理解（Python/mss + pyautogui）。返回 JPEG dataUrl。",
+    "file": "vision.capture_mouse.ps1",
+    "runtime": "powershell",
+    "description": "采集鼠标周围区域用于视觉理解（PowerShell/GDI+）。返回 JPEG dataUrl。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -461,8 +484,9 @@
   },
   {
     "name": "window.list",
-    "file": "window.list.py",
-    "description": "列出可见顶层窗口标题（Python；Win 用 pygetwindow，Linux 用 wmctrl）。",
+    "file": "window.list.ps1",
+    "runtime": "powershell",
+    "description": "列出可见顶层窗口标题（PowerShell/user32 EnumWindows，仅 Windows）。",
     "input_schema": {
       "type": "object"
     },
@@ -470,8 +494,9 @@
   },
   {
     "name": "window.focus",
-    "file": "window.focus.py",
-    "description": "把标题匹配的窗口切到前台（Python；Win pygetwindow，Linux wmctrl -a）。",
+    "file": "window.focus.ps1",
+    "runtime": "powershell",
+    "description": "把标题匹配的窗口切到前台（PowerShell/user32 SetForegroundWindow，仅 Windows）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -487,8 +512,9 @@
   },
   {
     "name": "window.close",
-    "file": "window.close.py",
-    "description": "按标题关闭窗口（Python；Win pygetwindow，Linux wmctrl -c）。",
+    "file": "window.close.ps1",
+    "runtime": "powershell",
+    "description": "按标题关闭窗口（PowerShell/user32 WM_CLOSE，仅 Windows）。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -504,8 +530,9 @@
   },
   {
     "name": "ui.inspect",
-    "file": "ui.inspect.py",
-    "description": "读取前台窗口的 UI Automation 控件树（Python/uiautomation，仅 Windows）。返回每个控件的 name/control_type/automation_id/rect。",
+    "file": "ui.inspect.ps1",
+    "runtime": "powershell",
+    "description": "读取前台窗口的 UI Automation 控件树（PowerShell/System.Windows.Automation，仅 Windows）。返回每个控件的 name/control_type/automation_id/rect。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -524,8 +551,9 @@
   },
   {
     "name": "ui.click",
-    "file": "ui.click.py",
-    "description": "按 UI Automation 控件定位并点击（Python/uiautomation，仅 Windows）。优先 InvokePattern，不支持则真实点击控件中心。",
+    "file": "ui.click.ps1",
+    "runtime": "powershell",
+    "description": "按 UI Automation 控件定位并点击（PowerShell/System.Windows.Automation，仅 Windows）。优先 InvokePattern，不支持则真实点击控件中心。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -550,8 +578,9 @@
   },
   {
     "name": "speech.speak",
-    "file": "speech.speak.py",
-    "description": "文字转语音朗读（Python/pyttsx3，跨平台 SAPI/espeak）。",
+    "file": "speech.speak.ps1",
+    "runtime": "powershell",
+    "description": "文字转语音朗读（PowerShell/System.Speech，Windows SAPI）。",
     "input_schema": {
       "type": "object",
       "properties": {

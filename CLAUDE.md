@@ -137,7 +137,7 @@ server/
 | `device_tools/device_permission_policy.py` | 设备 MCP 工具权限管理 |
 | `device_tools/device_dynamic_tools.py` | 设备动态工具注册与管理 |
 | `device_tools/device_workspace_tools.py` | 设备工作区工具文件管理 |
-| `device_tools/device_runtime_tools/` | 出厂默认桌面工具体（bodies/*.py） |
+| `device_tools/device_runtime_tools/` | 出厂默认桌面工具体（bodies/*.ps1，PowerShell 驱动） |
 | `device_tools/device_browser_runtime_tools/` | 出厂默认浏览器工具体 |
 | **`access/`** | |
 | `access/governance.py` | AI 成员治理（状态/权限/生命周期） |

@@ -4,7 +4,8 @@ The source of truth for a user's device tools is now plain files under their
 workspace, NOT the database (设备端MCP代码下放长期方案；用户要求弃用 DB、改存工作区文件)：
 
     <workspace>/<user_id>/device_tools/<device_type>/
-        <name>.py        # runtime=python body（AI 可直接经工作区 MCP 读写）
+        <name>.ps1       # runtime=powershell body（出厂默认；AI 可直接经工作区 MCP 读写）
+        <name>.py        # runtime=python body
         <name>.js        # code_kind=js body
         <name>.json      # 元数据：description / input_schema / code_kind / runtime /
                          #         permissions / enabled / status（program 的 code 也在此）
@@ -12,7 +13,7 @@ workspace, NOT the database (设备端MCP代码下放长期方案；用户要求
 
 Public interface mirrors the old ``device_dynamic_tools`` so REST / AI manager /
 push only swap the import. ``validate_definition`` and friends are reused from
-that module (pure logic). Default desktop python tools are seeded from the
+that module (pure logic). Default desktop PowerShell tools are seeded from the
 ``device_runtime_tools`` package on first use; existing DB rows are migrated to
 files once so nothing is lost.
 """
@@ -392,8 +393,8 @@ def device_payload(user_id: int, device_type: str) -> Dict[str, Any]:
 
 def seed_defaults(user_id: int, device_type: str = "desktop") -> int:
     """Seed factory-default tools into the user's workspace (idempotent: never
-    clobbers an existing file). Desktop → python/shell runtime tools; browser →
-    program wrappers for the plugin-advertised browser tools."""
+    clobbers an existing file). Desktop → powershell/shell runtime tools;
+    browser → program wrappers for the plugin-advertised browser tools."""
     dtype = normalize_device_type(device_type)
     if dtype == "desktop":
         from api.services.device_tools.device_runtime_tools import load_default_tools as _load

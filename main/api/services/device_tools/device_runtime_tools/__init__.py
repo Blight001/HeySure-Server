@@ -1,13 +1,16 @@
-"""Factory-default desktop runtime tools, shipped as standalone .py bodies.
+"""Factory-default desktop runtime tools, shipped as standalone .ps1 bodies.
 
 These are the read-only "出厂默认" set. On first use they are seeded into each
 user's workspace (``<workspace>/device_tools/desktop/``) where they become the
 editable source of truth — the AI manages them as files via MCP, not the DB.
 
-Each tool is one ``bodies/<name>.py`` (the python body, using injected ``args``
-and assigning ``result``) plus an entry in ``definitions.json`` (metadata:
-name / description / input_schema / permissions). All defaults are
-``runtime=python``.
+Each tool is one ``bodies/<name>.ps1`` (the PowerShell body, reading the
+injected ``$toolArgs`` object and assigning ``$result``; executed by the
+device-side powershell-runner, Windows PowerShell 5.1 compatible) plus an
+entry in ``definitions.json`` (metadata: name / description / input_schema /
+permissions). All defaults are ``runtime=powershell`` except ``shell.run``
+(``runtime=shell``); the python runtime remains available for user-authored
+tools but is no longer the factory base.
 """
 
 import json
@@ -30,7 +33,7 @@ def load_default_tools() -> List[Dict[str, Any]]:
             "description": d["description"],
             "input_schema": d["input_schema"],
             "code_kind": "runtime",
-            "runtime": d.get("runtime", "python"),
+            "runtime": d.get("runtime", "powershell"),
             "source": source,
             "code": [],
             "js": "",
