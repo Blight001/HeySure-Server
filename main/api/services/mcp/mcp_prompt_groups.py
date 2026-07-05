@@ -179,19 +179,29 @@ def build_prompt_tool_groups(
     }]
 
     agents = _agents_for_prompt_groups(user_id, ai_config_id)
+    # 一个 AI 现在可绑定多台端侧设备（含同类型）。先算出每台设备的展示名，
+    # 对重名（如两台未命名桌面端都回落成"桌面端"）追加设备号短后缀，
+    # 这样对话"+"面板与系统 Prompt 里两台同类型设备可以区分。
+    device_entries: List[Dict[str, Any]] = []
+    label_counts: Dict[str, int] = {}
     for agent in agents:
         device_id = str(agent.get("id") or "").strip()
         if not device_id:
             continue
         agent_type = device_type_of(agent)
+        if agent_type == "workshop":
+            continue
+        base_label = _agent_display_name(agent)
+        label_counts[base_label] = label_counts.get(base_label, 0) + 1
+        device_entries.append((agent, device_id, agent_type, base_label))
+
+    for agent, device_id, agent_type, base_label in device_entries:
         names = _tool_names_for_agent(
             agent,
             user_id=user_id,
             ai_config_id=ai_config_id,
             allowed_tools=allowed_tools,
         )
-        if agent_type == "workshop":
-            continue
         device_tools: List[Dict[str, Any]] = []
         for name in sorted(names):
             tool = by_name.get(name)
@@ -207,9 +217,14 @@ def build_prompt_tool_groups(
                 "deviceId": device_id,
                 "allowedForCurrentAi": True,
             })
+        label = base_label
+        if label_counts.get(base_label, 0) > 1:
+            suffix = device_id[-4:] if len(device_id) >= 4 else device_id
+            if suffix:
+                label = f"{base_label}·{suffix}"
         groups.append({
             "groupKey": f"device:{device_id}",
-            "groupLabel": f"{_agent_display_name(agent)} MCP",
+            "groupLabel": f"{label} MCP",
             "groupKind": "device",
             "deviceId": device_id,
             "deviceType": str(agent_type or ""),

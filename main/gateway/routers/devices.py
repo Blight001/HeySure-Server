@@ -13,7 +13,7 @@ from sqlmodel import Session, select
 from api.devices.bindings import set_binding
 from api.devices.mcp_permissions import get_scope, set_scope
 from api.database import get_session
-from api.models import DeviceAiBinding, AssistantAIConfig, DevicePresence
+from api.models import AssistantAIConfig, DevicePresence
 from .auth import get_current_user
 from api.sio import agents, device_token_required
 from api.devices.live import connected_agent_rows_for_user, emit_agent_list_for_user
@@ -43,55 +43,6 @@ def _find_connected_agent(device_id: str, user_id: int) -> Optional[dict]:
             return toolbox_engine.toolbox_connected_entry_for_user(user_id)
     except Exception:
         pass
-    return None
-
-
-def _presence_device_type(session: Session, user_id: int, device_id: str) -> Optional[str]:
-    aid = str(device_id or "").strip()
-    if not aid:
-        return None
-    row = session.exec(
-        select(DevicePresence)
-        .where(
-            DevicePresence.device_id == aid,
-            DevicePresence.user_id == user_id,
-        )
-        .order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
-    ).first()
-    device_type = str(row.device_type or "").strip() if row else ""
-    return device_type if device_type in {"desktop", "browser", "android", "workshop", "toolbox", "custom"} else None
-
-
-def _device_type_for_binding(session: Session, user_id: int, device_id: str) -> Optional[str]:
-    connected = _find_connected_agent(device_id, user_id)
-    live_type = device_type_of(connected)
-    if live_type:
-        return live_type
-    return _presence_device_type(session, user_id, device_id)
-
-
-def _existing_same_type_binding(
-    session: Session,
-    *,
-    user_id: int,
-    ai_config_id: int,
-    device_id: str,
-    device_type: str,
-) -> Optional[str]:
-    """Return another bound agent id for this AI/type, if one exists."""
-    target_id = str(device_id or "").strip()
-    rows = session.exec(
-        select(DeviceAiBinding).where(
-            DeviceAiBinding.user_id == user_id,
-            DeviceAiBinding.ai_config_id == ai_config_id,
-        )
-    ).all()
-    for row in rows:
-        existing_id = str(row.device_id or "").strip()
-        if not existing_id or existing_id == target_id:
-            continue
-        if _device_type_for_binding(session, user_id, existing_id) == device_type:
-            return existing_id
     return None
 
 
@@ -189,7 +140,6 @@ async def bind_agent_ai(
     except Exception:
         pass
     cfg_id = payload.aiConfigId
-    previous_same_type_device_id = None
     if cfg_id:
         cfg_id = int(cfg_id)
         cfg = session.exec(
@@ -197,41 +147,22 @@ async def bind_agent_ai(
         ).first()
         if not cfg or cfg.user_id != user.id:
             raise HTTPException(status_code=404, detail="AI 配置不存在或不属于当前用户")
-        device_type = _device_type_for_binding(session, user.id, device_id)
-        if device_type:
-            existing_device_id = _existing_same_type_binding(
-                session,
-                user_id=user.id,
-                ai_config_id=cfg_id,
-                device_id=device_id,
-                device_type=device_type,
-            )
-            if existing_device_id:
-                previous_same_type_device_id = existing_device_id
 
+    # 一个 AI 可同时绑定多台端侧设备（含同类型）：这里只写入本设备的绑定，
+    # 不再解绑该 AI 名下"上一台同类型设备"。每台设备仍只归属一个 AI。
     stored = set_binding(user.id, device_id, cfg_id)
-    if previous_same_type_device_id:
-        set_binding(user.id, previous_same_type_device_id, None)
 
     # Reflect the assignment on any live socket(s) for this agent right away so
     # the next dispatch routes correctly without waiting for a reconnect.
     for agent in agents.values():
         if str(agent.get("id")) == device_id and agent.get("userId") == user.id:
             agent["aiConfigId"] = stored
-        elif (
-            previous_same_type_device_id
-            and str(agent.get("id")) == previous_same_type_device_id
-            and agent.get("userId") == user.id
-        ):
-            agent["aiConfigId"] = None
 
     # Keep the shared DB presence snapshot in sync so off-gateway processes
     # resolve endpoint tools against the new assignment immediately.
     try:
         from api.devices.presence import update_binding
         update_binding(device_id, stored)
-        if previous_same_type_device_id:
-            update_binding(previous_same_type_device_id, None)
     except Exception:
         pass
 

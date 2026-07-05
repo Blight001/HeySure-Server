@@ -150,20 +150,26 @@ def _describe_one_tool(name: str, endpoint_defs: Dict[str, Any], user_id: int = 
 
     if name in endpoint_defs or is_endpoint_agent_tool(name):
         spec = endpoint_defs.get(name) or {}
-        return {
+        result = {
             "name": name,
             "description": str(spec.get("description") or "").strip(),
             "inputSchema": spec.get("input_schema") if isinstance(spec.get("input_schema"), dict) else {},
             "destructive": bool(spec.get("destructive", True)),
             "implementation": spec.get("implementation") if isinstance(spec.get("implementation"), dict) else {},
-            "implementation_help": {
-                "inspect": {
-                    "tool": "mcp.manage_dynamic_tool",
-                    "arguments": {"action": "inspect", "name": name},
-                },
-                "note": "Call inspect to locate/read the underlying source and obtain a starter_definition before editing.",
-            },
         }
+        # Editing lives server-side now (device_mcp.manage, library-bound), and
+        # only covers desktop/browser device types — there is no device-side
+        # manager tool to fall back on anymore.
+        device_type = str(spec.get("mcpSource") or "").strip()
+        if device_type in ("desktop", "browser"):
+            result["implementation_help"] = {
+                "inspect": {
+                    "tool": "device_mcp.manage",
+                    "arguments": {"action": "get", "device_type": device_type, "name": name},
+                },
+                "note": "Call get to read the stored definition before editing via upsert (requires library binding).",
+            }
+        return result
     tool = registry.get(name)
     description = str(tool.description or "").strip()
     input_schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
