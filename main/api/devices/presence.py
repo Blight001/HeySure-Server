@@ -6,6 +6,7 @@ discovery and classification. See ``api.models.device_presence``.
 """
 
 import json
+import re
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -15,6 +16,33 @@ from ..database import engine
 from ..models import DevicePresence
 
 NON_MCP_CAPABILITIES: Set[str] = {"remote_control", "remote.control"}
+
+# ``device:register`` may carry an ``icon`` choice. Presets live under
+# ``server/static/device_png/`` (mounted at ``/device_png`` on the gateway).
+_PRESET_ICON_RE = re.compile(r"^(\d{1,3})(?:\.webp|\.png)?$")
+_PRESET_ICON_PATH_RE = re.compile(r"^/device_png/[a-z0-9_\-]+\.(?:webp|png)$")
+
+
+def normalize_device_icon(value) -> str:
+    """Normalize a device-chosen icon into a URL the web can render.
+
+    Accepted forms: a preset number (``3`` / ``"3"`` / ``"3.webp"`` →
+    ``/device_png/3.webp``), an explicit ``/device_png/...`` path, or an
+    absolute http(s) URL. Anything else collapses to ``""`` — the web then
+    falls back to its built-in per-type rendering.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered.startswith(("http://", "https://")):
+        return raw[:2048]
+    match = _PRESET_ICON_RE.match(lowered)
+    if match:
+        return f"/device_png/{int(match.group(1))}.webp"
+    if _PRESET_ICON_PATH_RE.match(lowered):
+        return lowered
+    return ""
 
 
 def _int(value) -> Optional[int]:
@@ -78,7 +106,7 @@ def _load_presence_rows(session: Session, device_id: str):
 
 def upsert_presence(
     user_id, device_id, ai_config_id, device_type, capabilities, online: bool = True, tool_defs=None,
-    name=None, platform=None,
+    name=None, platform=None, icon=None,
 ) -> None:
     aid = str(device_id or "").strip()
     if not aid:
@@ -104,6 +132,8 @@ def upsert_presence(
             row.name = str(name or "").strip()
         if platform is not None:
             row.platform = str(platform or "").strip()
+        if icon is not None:
+            row.icon = normalize_device_icon(icon)
         row.updated_at = time.time()
         session.commit()
 
@@ -368,6 +398,8 @@ def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict
                 "name": str(row.name or "").strip() or device_id,
                 "platform": str(row.platform or "").strip(),
                 "aiConfigId": row.ai_config_id,
+                "deviceType": device_type,
+                "icon": str(getattr(row, "icon", "") or "").strip(),
                 "isWindowsDesktop": device_type == "desktop",
                 "isBrowserExtension": device_type == "browser",
                 "isAndroid": device_type == "android",

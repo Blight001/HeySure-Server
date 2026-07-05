@@ -161,6 +161,15 @@ if _ai_avatars_dir.is_dir():
 else:
     logger.warning("ai_avatars static dir not found: %s", _ai_avatars_dir)
 
+# Preset device icons. A device may pick one at register time (icon: "3" →
+# /device_png/3.webp, see api.devices.presence.normalize_device_icon); devices
+# that pick none keep the web's built-in per-type rendering.
+_device_png_dir = Path(__file__).resolve().parent.parent.parent / "static" / "device_png"
+if _device_png_dir.is_dir():
+    app.mount("/device_png", StaticFiles(directory=str(_device_png_dir)), name="device_png")
+else:
+    logger.warning("device_png static dir not found: %s", _device_png_dir)
+
 # 自动注册路由：扫描 gateway/routers/ 目录下所有 HTTP 路由模块。
 # 网关进程现在拥有所有真路由；推理 helper（chat_prompt_utils/chat_runtime_helpers/
 # chat_scheduler/chat_stream）已迁到 api/chat_runtime/，作为跨 runtime 共享代码。

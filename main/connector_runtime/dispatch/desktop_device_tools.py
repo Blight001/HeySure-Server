@@ -114,19 +114,31 @@ def is_workshop_tool(name: str) -> bool:
     return bool(tool) and tool.startswith(WORKSHOP_TOOL_PREFIXES)
 
 
+# Device types the server understands natively. Developer-built devices that
+# follow device/read.md register with ``deviceType: "custom"`` (any other
+# unrecognised declared type also lands on "custom") and are routed through
+# the desktop-class dispatch channel like android.
+KNOWN_DEVICE_TYPES = {"desktop", "browser", "android", "workshop", "toolbox", "custom"}
+
+
 def device_type_of(agent: Optional[Dict[str, Any]]) -> Optional[str]:
     """Classify a connected-agent record as ``"desktop"`` / ``"browser"`` /
-    ``"android"`` (手机端) / ``"workshop"`` (知识与进化工坊) / ``"toolbox"`` (内置工具箱).
+    ``"android"`` (手机端) / ``"workshop"`` (知识与进化工坊) / ``"toolbox"`` (内置工具箱)
+    / ``"custom"`` (开发者自建设备，见 device/read.md).
 
     Android phones are a distinct type (so they are never seeded the desktop
     python/shell dynamic tools they cannot run, and get their own label /
     permission group), but for *dispatch routing* they are a desktop-class
     executor — their tap/swipe/screen tools flow through the desktop channel
-    (see ``_reported_endpoint_tools`` / ``get_connected_desktop_agent``)."""
+    (see ``_reported_endpoint_tools`` / ``get_connected_desktop_agent``).
+    Custom devices are desktop-class for routing too."""
     if not isinstance(agent, dict):
         return None
     if bool(agent.get("isToolbox")):
         return "toolbox"
+    declared = str(agent.get("deviceType") or agent.get("device_type") or "").strip().lower()
+    if declared in KNOWN_DEVICE_TYPES:
+        return declared
     platform = str(agent.get("platform") or "").lower()
     if bool(agent.get("isWorkshop")) or "workshop" in platform:
         return "workshop"
@@ -136,6 +148,11 @@ def device_type_of(agent: Optional[Dict[str, Any]]) -> Optional[str]:
         return "android"
     if bool(agent.get("isWindowsDesktop")) or "desktop" in platform or "windows" in platform:
         return "desktop"
+    # A device that declares *some* type (or the explicit flag) but matches no
+    # builtin form is a developer-built custom device — accept it instead of
+    # dropping it from presence / tool discovery.
+    if declared or bool(agent.get("isCustomDevice")):
+        return "custom"
     return None
 
 
@@ -216,10 +233,10 @@ def agent_endpoint_tool_defs(agent: Optional[Dict[str, Any]]) -> Dict[str, Dict[
 def _reported_endpoint_tools(*, want_desktop: bool) -> Set[str]:
     """Every tool name advertised by currently-connected agents of one kind.
 
-    ``want_desktop`` covers both real desktops and Android phones: both are
-    desktop-class executors for dispatch, so their tools are routed through
-    ``is_desktop_tool`` → ``get_connected_desktop_agent``."""
-    targets = {"desktop", "android"} if want_desktop else {"browser"}
+    ``want_desktop`` covers real desktops, Android phones and custom devices:
+    all are desktop-class executors for dispatch, so their tools are routed
+    through ``is_desktop_tool`` → ``get_connected_desktop_agent``."""
+    targets = {"desktop", "android", "custom"} if want_desktop else {"browser"}
     names: Set[str] = set()
     for agent in list(agents.values()):
         atype = device_type_of(agent)
@@ -371,15 +388,29 @@ def _iter_agents_for_config(ai_config_id: Optional[int], user_id: Optional[int] 
         yield agent
 
 
-def get_connected_desktop_agent(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
-    # Android phones are desktop-class executors for dispatch: their tap/swipe/
-    # screen tools route through the desktop channel, so this resolver returns
-    # them too. (Bindings are 1:1 in practice; with both a desktop and a phone
-    # bound to the same AI the first match wins — same loose behavior as before.)
+def get_connected_desktop_agent(
+    ai_config_id: Optional[int], user_id: Optional[int] = None, tool: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    # Android phones and custom devices are desktop-class executors for
+    # dispatch: their tools route through the desktop channel, so this resolver
+    # returns them too. An AI may legitimately hold one binding per type
+    # (desktop + android + custom simultaneously), so when ``tool`` is given the
+    # agent that actually advertises it wins over blind first-match; without a
+    # tool (or when nobody advertises it) the first match keeps the old loose
+    # behavior.
+    fallback: Optional[Dict[str, Any]] = None
+    tool_name = str(tool or "").strip()
     for agent in _iter_agents_for_config(ai_config_id, user_id) or []:
-        if device_type_of(agent) in ("desktop", "android"):
+        if device_type_of(agent) not in ("desktop", "android", "custom"):
+            continue
+        if not tool_name:
             return agent
-    return None
+        caps = {str(c or "").strip() for c in (agent.get("capabilities") or [])}
+        if tool_name in caps:
+            return agent
+        if fallback is None:
+            fallback = agent
+    return fallback
 
 
 def get_connected_browser_agent(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -434,7 +465,7 @@ def endpoint_bridge_tools_for_config(ai_config_id: Optional[int], user_id: Optio
     from api.devices.presence import online_devices_for_config
 
     for _device_id, device_type, _caps in online_devices_for_config(user_id, config_id):
-        if str(device_type or "").strip().lower() in ("desktop", "android", "browser"):
+        if str(device_type or "").strip().lower() in ("desktop", "android", "browser", "custom"):
             return set(ENDPOINT_BRIDGE_MCP_TOOLS)
     return set()
 

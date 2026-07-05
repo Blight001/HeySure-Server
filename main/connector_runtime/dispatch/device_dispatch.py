@@ -28,6 +28,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from connector_runtime.dispatch.desktop_device_tools import (
+    device_type_of,
     get_connected_browser_agent,
     get_connected_desktop_agent,
     is_browser_tool,
@@ -310,6 +311,8 @@ def _device_kind_label(device_id: str) -> str:
             return "桌面端"
         if "browser" in platform:
             return "浏览器端"
+        if device_type_of(agent) == "custom":
+            return str(agent.get("name") or "").strip() or "自定义设备"
         return "端侧设备"
     return "端侧设备"
 
@@ -847,7 +850,7 @@ async def dispatch_endpoint_tool(
     if is_browser_tool(tool_name):
         agent = get_connected_browser_agent(ai_config_id, user_id)
     elif is_desktop_tool(tool_name):
-        agent = get_connected_desktop_agent(ai_config_id, user_id)
+        agent = get_connected_desktop_agent(ai_config_id, user_id, tool=tool_name)
     else:
         agent = None
     if not agent:
@@ -899,7 +902,7 @@ async def dispatch_endpoint_tool_and_wait(
     if is_browser_tool(tool_name):
         agent = get_connected_browser_agent(ai_config_id, user_id)
     elif is_desktop_tool(tool_name):
-        agent = get_connected_desktop_agent(ai_config_id, user_id)
+        agent = get_connected_desktop_agent(ai_config_id, user_id, tool=tool_name)
     if not agent:
         kind = "browser" if is_browser_tool(tool_name) else "desktop"
         return {"success": False, "error": f"No connected {kind} agent bound to ai_config_id={ai_config_id}"}

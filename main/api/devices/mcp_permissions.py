@@ -21,7 +21,7 @@ from sqlmodel import Session, select
 from ..database import engine
 from ..models import DeviceTypeMcpPermission
 
-VALID_AGENT_TYPES = ("linux", "desktop", "browser", "android", "workshop", "toolbox")
+VALID_AGENT_TYPES = ("linux", "desktop", "browser", "android", "workshop", "toolbox", "custom")
 
 
 def _coerce_int(value) -> Optional[int]:

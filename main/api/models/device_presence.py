@@ -33,6 +33,10 @@ class DevicePresence(SQLModel, table=True):
     # an AI) in the Workshop panel instead of disappearing entirely.
     name: str = Field(default="")
     platform: str = Field(default="")
+    # Device-chosen icon URL (normalized at register time): a preset under
+    # ``/device_png/N.webp`` or an absolute http(s) URL. Empty = the web falls
+    # back to its built-in per-type rendering.
+    icon: str = Field(default="")
     # JSON array of the agent's (type-filtered) endpoint tool names.
     capabilities_json: str = Field(default="[]")
     # JSON object mapping each reported tool name to its self-described

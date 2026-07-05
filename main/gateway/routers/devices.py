@@ -1,6 +1,9 @@
 """``/api/devices`` routes: list connected endpoint agents, bind an agent to an AI
-config, and get/set an agent's per-device MCP tool scope."""
+config, get/set an agent's per-device MCP tool scope, and read/edit the device
+developer manual shown in the web console."""
 
+import time
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -56,7 +59,7 @@ def _presence_device_type(session: Session, user_id: int, device_id: str) -> Opt
         .order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
     ).first()
     device_type = str(row.device_type or "").strip() if row else ""
-    return device_type if device_type in {"desktop", "browser", "android", "workshop", "toolbox"} else None
+    return device_type if device_type in {"desktop", "browser", "android", "workshop", "toolbox", "custom"} else None
 
 
 def _device_type_for_binding(session: Session, user_id: int, device_id: str) -> Optional[str]:
@@ -271,6 +274,66 @@ async def forget_device(
 
     await emit_agent_list_for_user(user.id)
     return {"ok": True, "deviceId": aid, "deleted": deleted}
+
+
+# ── 设备开发手册（控制台"设备开发文档"弹窗） ────────────────────────────────
+# 默认内容随服务端打包（server/static/device_dev_manual.md，与 device/read.md
+# 同源）；房主在控制台编辑后存入 SystemSetting，清空保存即恢复默认。
+DEV_MANUAL_SETTING_KEY = "devices.dev_manual_md"
+_DEV_MANUAL_DEFAULT_PATH = Path(__file__).resolve().parents[3] / "static" / "device_dev_manual.md"
+
+
+def _default_dev_manual() -> str:
+    try:
+        return _DEV_MANUAL_DEFAULT_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return "# 设备开发手册\n\n默认文档缺失（server/static/device_dev_manual.md）。"
+
+
+@router.get("/dev-manual")
+def get_device_dev_manual(
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    get_current_user(authorization, session)
+    from api.models import SystemSetting
+
+    row = session.get(SystemSetting, DEV_MANUAL_SETTING_KEY)
+    if row and str(row.value).strip():
+        return {"content": row.value, "isCustom": True, "updatedAt": row.updated_at}
+    return {"content": _default_dev_manual(), "isCustom": False, "updatedAt": None}
+
+
+class DeviceDevManualRequest(BaseModel):
+    content: str = ""
+
+
+@router.put("/dev-manual")
+def save_device_dev_manual(
+    payload: DeviceDevManualRequest,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Persist the operator-edited manual. Saving empty content resets to the
+    bundled default."""
+    get_current_user(authorization, session)
+    from api.models import SystemSetting
+
+    content = str(payload.content or "")
+    row = session.get(SystemSetting, DEV_MANUAL_SETTING_KEY)
+    if not content.strip():
+        if row is not None:
+            session.delete(row)
+            session.commit()
+        return {"content": _default_dev_manual(), "isCustom": False, "updatedAt": None}
+    if row is None:
+        row = SystemSetting(key=DEV_MANUAL_SETTING_KEY, value=content)
+        session.add(row)
+    else:
+        row.value = content
+        row.updated_at = time.time()
+    session.commit()
+    return {"content": content, "isCustom": True, "updatedAt": row.updated_at}
 
 
 @router.get("/{device_id}/mcp-scope")

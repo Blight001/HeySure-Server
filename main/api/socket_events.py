@@ -56,7 +56,7 @@ def _has_live_same_type_ai_binding(*, user_id: int, ai_config_id: int, device_id
     except Exception:
         return False
     incoming_type = device_type_of(agent_info)
-    if incoming_type not in {"desktop", "browser", "android", "workshop"}:
+    if incoming_type not in {"desktop", "browser", "android", "workshop", "custom"}:
         return False
     target_cfg = _coerce_positive_int(ai_config_id)
     if not target_cfg:
@@ -174,9 +174,11 @@ def register_agent_socket_events():
             del agents[old_sid]
 
         info.pop('token', None)
+        from api.devices.presence import normalize_device_icon
         agents[sid] = {
             **info,
             'id': device_id,
+            'icon': normalize_device_icon(info.get('icon')),
             'aiConfigId': claimed_ai,
             'socketId': sid,
             'userId': owner_user_id,
@@ -211,6 +213,9 @@ def register_agent_socket_events():
 
             atype = device_type_of(agents[sid])
             if atype:
+                # Normalized type on the live record so device:list rows carry
+                # it (custom devices have no is* flag the web could infer from).
+                agents[sid]['deviceType'] = atype
                 capabilities = sorted(agent_endpoint_tools(agents[sid]))
                 upsert_presence(
                     owner_user_id,
@@ -222,6 +227,7 @@ def register_agent_socket_events():
                     tool_defs=agent_endpoint_tool_defs(agents[sid]),
                     name=agents[sid].get('name'),
                     platform=agents[sid].get('platform'),
+                    icon=agents[sid].get('icon') or '',
                 )
                 if owner_user_id is not None:
                     reconcile_scope_with_capabilities(
