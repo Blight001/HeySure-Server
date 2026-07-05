@@ -848,7 +848,7 @@ async def dispatch_endpoint_tool(
         return task_id
 
     if is_browser_tool(tool_name):
-        agent = get_connected_browser_agent(ai_config_id, user_id)
+        agent = get_connected_browser_agent(ai_config_id, user_id, tool=tool_name)
     elif is_desktop_tool(tool_name):
         agent = get_connected_desktop_agent(ai_config_id, user_id, tool=tool_name)
     else:
@@ -900,7 +900,7 @@ async def dispatch_endpoint_tool_and_wait(
 
     agent = None
     if is_browser_tool(tool_name):
-        agent = get_connected_browser_agent(ai_config_id, user_id)
+        agent = get_connected_browser_agent(ai_config_id, user_id, tool=tool_name)
     elif is_desktop_tool(tool_name):
         agent = get_connected_desktop_agent(ai_config_id, user_id, tool=tool_name)
     if not agent:

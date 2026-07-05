@@ -6,10 +6,16 @@ the scope on every endpoint tool call) and the Workshop / AI-settings editors
 ``api.models.device_mcp_permission``.
 
 Scope is keyed by ``(user_id, device_id)`` — each individual connected agent has
-its own allow-list. A missing row means "closed" — the bound AI may not use any
-tool from that agent until the Workshop saves a scope. Callers distinguish that
-from an explicit empty allow-list: ``get_scope`` returns ``None`` for "no
-record" and a (possibly empty) ``set`` when a row exists.
+its own allow-list.
+
+A missing row means the agent has never had a scope initialized (treated as
+closed / no tools). On first registration of a real endpoint device,
+``reconcile_scope_with_capabilities`` automatically creates a full-allow record
+so that in the Workshop ("作坊") the device appears with *all* its MCPs
+pre-selected by default. The operator can later narrow the selection.
+
+``get_scope`` returns ``None`` only for "no record ever"; a row with ``[]``
+means explicitly none allowed.
 """
 
 import json
@@ -65,7 +71,8 @@ def _load_scope_rows(session: Session, user_id: int, device_id: str):
 
 def get_scope(user_id, device_id) -> Optional[Set[str]]:
     """Return the saved allow-list for (user, agent), or ``None`` when no row
-    exists (meaning: default closed)."""
+    exists (never initialized for this agent). For newly connected devices the
+    row is auto-created with the full capability set on first register."""
     uid = _coerce_int(user_id)
     aid = _device_id(device_id)
     if uid is None or not aid:
@@ -136,8 +143,10 @@ def reconcile_scope_with_capabilities(
 ) -> Optional[Set[str]]:
     """Prune any stored MCP scope entries that are no longer reported by the agent.
 
-    Called on reconnect so the persisted per-agent scope does not keep stale tools
-    after the device's advertised capability set changes.
+    Called on (re)connect. If no prior scope row exists for this endpoint agent,
+    a full allow-list is created from the live capabilities. This makes newly
+    connected devices default to *all* MCP tools checked in the Workshop 作坊
+    (instead of none). Subsequent reconnects only prune tools that disappeared.
     """
     uid = _coerce_int(user_id)
     aid = _device_id(device_id)
@@ -155,6 +164,10 @@ def reconcile_scope_with_capabilities(
         if not row:
             if dirty:
                 session.commit()
+            if live_caps:
+                # First time this device is seen: default to full set so the
+                # Workshop MCP permission editor shows everything pre-selected.
+                return set_scope(uid, aid, live_caps, ai_config_id=cfg, device_type=atype)
             return None
 
         current = _decode_tools(row.tools_json)

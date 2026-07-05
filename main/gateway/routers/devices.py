@@ -48,8 +48,9 @@ def _find_connected_agent(device_id: str, user_id: int) -> Optional[dict]:
 
 def _scope_view(agent: dict, user_id: int) -> dict:
     """Capabilities + effective allow-list for a connected agent. Scope is keyed
-    per individual agent; with no saved record no endpoint tool is allowed
-    (default-closed)."""
+    per individual agent. Newly connected endpoint devices auto-initialize with
+    a full allow-list (all MCPs pre-selected in 作坊); a missing record only
+    happens for agents that have never registered."""
     device_type = device_type_of(agent)
     device_id = str(agent.get("id") or "")
     capabilities = sorted(agent_endpoint_tools(agent))
@@ -276,8 +277,8 @@ def get_agent_mcp_scope(
     """Endpoint MCP permission scope for one connected agent.
 
     Returns the tools it advertises plus the currently-allowed subset. 404 when
-    the device is offline (an unbound agent still resolves, with aiConfigId
-    null and every tool allowed — it just can't be persisted until assigned)."""
+    the device is offline. For a newly connected (unbound) agent the scope row
+    is auto-created with every capability allowed."""
     user = get_current_user(authorization, session)
     agent = _find_connected_agent(device_id, user.id)
     if not agent:

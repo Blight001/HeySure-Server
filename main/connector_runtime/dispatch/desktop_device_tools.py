@@ -413,13 +413,30 @@ def get_connected_desktop_agent(
     return fallback
 
 
-def get_connected_browser_agent(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+def get_connected_browser_agent(
+    ai_config_id: Optional[int], user_id: Optional[int] = None, tool: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    # An AI may hold more than one browser extension binding at once (插件 A + B),
+    # each advertising its own dynamically-named tools. When ``tool`` is given the
+    # extension that actually advertises it wins over blind first-match, so a call
+    # to a tool that only exists on A is never dispatched to B (which would answer
+    # "no such MCP"). Without a tool (or when nobody advertises it) the first
+    # connected browser agent keeps the old loose behavior.
+    fallback: Optional[Dict[str, Any]] = None
+    tool_name = str(tool or "").strip()
     for agent in _iter_agents_for_config(ai_config_id, user_id) or []:
         platform = str(agent.get("platform") or "").lower()
         is_browser = bool(agent.get("isBrowserExtension")) or "browser-extension" in platform
-        if is_browser:
+        if not is_browser:
+            continue
+        if not tool_name:
             return agent
-    return None
+        caps = {str(c or "").strip() for c in (agent.get("capabilities") or [])}
+        if tool_name in caps:
+            return agent
+        if fallback is None:
+            fallback = agent
+    return fallback
 
 
 def get_connected_endpoint_agent(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -534,7 +551,8 @@ def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
     actually advertise — a disconnected agent contributes nothing:
 
     1. Each agent's saved per-agent permission scope (``DeviceTypeMcpPermission``).
-       No saved scope row → that agent is closed.
+       No saved scope row (agent never connected) → closed for it.
+       On first connect a full scope is initialized automatically.
     2. The AI config's own ``mcp_tools`` allow-list: an endpoint tool ticked in
        the AI config is granted as soon as some online endpoint agent advertises
        it. This keeps the AI-config checkbox and the per-agent scope consistent,
@@ -557,7 +575,9 @@ def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
         # the AI-config selection grant below.
         if str(device_type or "").strip() != "workshop":
             live_caps |= caps
-        # Each individual agent has its own MCP scope. No saved row → closed.
+        # Each individual agent has its own MCP scope.
+        # No saved row (never registered) → closed for that agent.
+        # Newly registered devices receive a full default scope on connect.
         scope = get_scope(user_id, device_id) if device_id else None
         if scope is None:
             continue

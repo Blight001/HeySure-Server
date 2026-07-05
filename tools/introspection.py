@@ -224,6 +224,22 @@ def _mcp_describe_tool(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     # execution allow-list; actual tool execution still checks permissions.
     if query and not requested:
         needle = query.lower()
+        # A bare parent namespace ("browser", "workspace", …) is not a real tool
+        # — it is only the first segment shared by many tools. Searching it used
+        # to dump every tool under that namespace (e.g. all browser_* schemas) in
+        # one shot. Return no content and point at the concrete-tool path instead,
+        # so the parent name itself never surfaces a payload.
+        available_lower = {name.lower() for name in available}
+        namespaces = {_tool_namespace(name) for name in available}
+        if needle in namespaces and needle not in available_lower:
+            example = next((name for name in sorted(available) if _tool_namespace(name) == needle), "")
+            hint = (
+                f"'{query}' 是 MCP 工具的父级 namespace，不是具体工具，不返回内容。"
+                "请改用 mcp.describe_tool 指定具体工具名"
+                + (f"（如 {example}）" if example else "")
+                + "，或用更具体的关键词搜索。"
+            )
+            return {"query": query, "count": 0, "tools": [], "hint": hint}
         matches: list[Dict[str, Any]] = []
         for name in sorted(available):
             described = _describe_one_tool(name, endpoint_defs, user_id)

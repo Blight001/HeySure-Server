@@ -280,6 +280,12 @@ def _parse_namespace_hints(raw: str) -> Dict[str, str]:
     return out
 
 def _render_mcp_namespace_lines(cfg: Optional[AssistantAIConfig], namespace_hints: str) -> str:
+    # ``namespace_hints`` kept for signature/back-compat. Parent namespace names
+    # (browser / workspace / …) are intentionally no longer enumerated here: a
+    # first-name segment is not itself a callable MCP, and listing it invited the
+    # model to describe/query the bare parent (dumping every tool under it). The
+    # concrete per-turn tool list is supplied via the "[本轮可用 MCP 工具]" catalog,
+    # so {MCP} only renders unified usage guidance now.
     if cfg is not None and not getattr(cfg, "mcp_enabled", True):
         return "- （MCP 未启用）"
     allowed = _parse_allowed_tools_for_cfg(cfg)
@@ -287,13 +293,11 @@ def _render_mcp_namespace_lines(cfg: Optional[AssistantAIConfig], namespace_hint
         allowed = {str(item.get("name") or "").strip() for item in registry.list_tools() if item.get("name")}
     if not allowed:
         return "- （空）"
-    namespaces = sorted({_tool_namespace(name) for name in allowed if name})
-    hints = _parse_namespace_hints(namespace_hints)
-    lines = []
-    for namespace in namespaces:
-        hint = hints.get(namespace, "该 namespace 下存在可用 MCP 工具；用 mcp.describe_tool（query 关键词搜索）查看其参数 schema。")
-        lines.append(f"- {namespace}：{hint}")
-    return "\n".join(lines) if lines else "- （空）"
+    return (
+        "- 本轮可用的具体 MCP 工具清单见对话中的「[本轮可用 MCP 工具]」；"
+        "需要某个工具的参数 schema 时用 mcp.describe_tool 传入具体工具名（如 workspace.search），"
+        "或用具体关键词搜索——不要传 browser/workspace 等父级 namespace 名，父级名不返回内容。"
+    )
 
 def _short_tool_desc(text: str, limit: int = 90) -> str:
     """Compress a tool description to a single short line for the catalog."""
