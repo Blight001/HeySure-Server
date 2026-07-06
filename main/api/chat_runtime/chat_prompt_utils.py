@@ -394,13 +394,14 @@ def _filter_tools_for_current_bindings(
 ) -> set[str]:
     """Filter out tools that the AI cannot actually use because of missing bindings.
 
-    - LIBRARY_BOUND_TOOLS require library (workshop) binding.
-    - System built-in server MCPs (knowledge.search, workspace.*, plan.*, task.*,
-      conversation.*, mode.*, etc.) are DIRECT (no toolbox binding required).
-      Device/endpoint MCPs remain governed by per-agent scopes.
-    - Always preserve introspection tools (mcp.describe_tool etc.) so the model
-      can still discover tools even before binding.
-    This keeps the catalog honest: only show what can actually be called.
+    - LIBRARY_BOUND_TOOLS (知识工坊/图书馆治理工具: knowledge.manage, prompt.manage 等)
+      require library (workshop) binding. They are now force-included by the
+      runtime allowlist builder (chat_runtime_helpers) so they survive task overrides
+      and narrow mcp_tools selections; this filter only removes them when unbound.
+    - System built-in server MCPs (knowledge.search, workspace.*, plan.*, etc.) are DIRECT.
+    - Device/endpoint MCPs remain governed by per-agent scopes.
+    - Always preserve introspection tools (mcp.describe_tool etc.).
+    This keeps the catalog honest: only show/callable what can actually be used.
     """
     if not ai_config_id:
         return set(allowed)

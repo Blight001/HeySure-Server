@@ -46,6 +46,11 @@ def test_build_prompt_tool_groups_includes_governance_tools(monkeypatch):
             "capabilities": [],
         }],
     )
+    # Ensure the library group is not cleared by the bound check inside the function.
+    monkeypatch.setattr(
+        "api.devices.workshop_bindings.config_bound_to_library",
+        lambda user_id, ai_config_id: True,
+    )
 
     allowed = set(LIBRARY_BOUND_TOOLS) | {"workspace.search"}
     groups = build_prompt_tool_groups(
