@@ -9,10 +9,12 @@ Scope is keyed by ``(user_id, device_id)`` — each individual connected agent h
 its own allow-list.
 
 A missing row means the agent has never had a scope initialized (treated as
-closed / no tools). On first registration of a real endpoint device,
-``reconcile_scope_with_capabilities`` automatically creates a full-allow record
-so that in the Workshop ("作坊") the device appears with *all* its MCPs
-pre-selected by default. The operator can later narrow the selection.
+closed / no tools at runtime dispatch). On (re)connect / push of dynamic tools
+for a real endpoint device, ``reconcile_scope_with_capabilities`` creates (or
+ensures) a full-allow record. The /mcp-scope response and DeviceMcpScopeEditor
+also default to showing all capabilities checked for !hasRecord cases so the
+device appears with *all* its MCPs pre-selected by default in 作坊. The
+operator can later narrow the selection.
 
 ``get_scope`` returns ``None`` only for "no record ever"; a row with ``[]``
 means explicitly none allowed.

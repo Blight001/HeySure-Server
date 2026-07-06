@@ -182,6 +182,8 @@ def register_agent_socket_events():
                     icon=agents[sid].get('icon') or '',
                 )
                 if owner_user_id is not None:
+                    # Best-effort first init (may see empty caps on very first register).
+                    # The post-push reconcile below will ensure full using actual tools.
                     reconcile_scope_with_capabilities(
                         owner_user_id,
                         device_id,
@@ -221,6 +223,26 @@ def register_agent_socket_events():
                 except Exception:
                     logger.exception('Failed to seed dynamic MCP tools: %s', device_id)
                 await push_device_dynamic_tools_to_sid(owner_user_id, push_type, sid)
+
+                # Reconcile (or create) the per-device MCP scope using the *pushed*
+                # dynamic tools. The very first register often carries empty
+                # capabilities (dynamics not yet delivered). Using the payload
+                # here guarantees a full-allow row is created with the real
+                # tool surface for this device, so UI sees defaults checked.
+                try:
+                    from api.devices.mcp_permissions import reconcile_scope_with_capabilities
+                    payload = _dyn.device_payload(owner_user_id, push_type)
+                    pushed = [str(t.get('name') or '').strip() for t in (payload.get('tools') or []) if str(t.get('name') or '').strip()]
+                    if pushed:
+                        reconcile_scope_with_capabilities(
+                            owner_user_id,
+                            device_id,
+                            pushed,
+                            ai_config_id=claimed_ai,
+                            device_type=push_type,
+                        )
+                except Exception:
+                    logger.exception('Failed to reconcile MCP scope from pushed tools: %s', device_id)
         except Exception:
             logger.exception('Failed to push dynamic MCP tools to device: %s', device_id)
         try:

@@ -1421,6 +1421,37 @@ def _run_worker_impl(
                         # user role to match the live injection (see plan.phase_complete
                         # handler) and avoid mid-conversation system messages.
                         convo.append({"role": "user", "content": m.content})
+                    elif "mcp_tool_call" in tags and "mode.manage" in (m.content or ""):
+                        # 初始模式设置记录（新会话种子或历史合成）：包含当前模式的 prompt/desc。
+                        # 作为 user 消息回放，让模型在对话开始就看到「模式初始设置」的数据。
+                        # 这与真实 mode.manage(use) 返回的工具结果进入上下文的机制一致。
+                        convo.append({"role": "user", "content": m.content})
+
+            # 鲁棒的「模式初始设置」保证：
+            # 如果到目前为止 convo 中还没有出现任何 mode.manage 结果（新会话、老会话、或被过滤），
+            # 则使用当前 AI 的 effective mode 合成一条上下文消息（等效工具结果），
+            # 确保模型从第一轮就拿到模式的 prompt 说明。UI 显示与此保持一致。
+            has_mode_context = any(
+                ("mode.manage" in str(c.get("content", "")) or "mode_key" in str(c.get("content", "")))
+                for c in convo
+            )
+            if not has_mode_context and ai_config_id is not None:
+                try:
+                    from api.services.mcp import agent_mode_store as mode_store
+                    eff = mode_store.effective_mode_prompt(user_id, ai_config_id) or {}
+                    key = mode_store.resolve_current_mode_key(user_id, ai_config_id) or mode_store.DEFAULT_MODE_KEY
+                    if eff or key:
+                        mode_name = eff.get("name") or ("初始对话模式" if key == mode_store.DEFAULT_MODE_KEY else key)
+                        mode_prompt = eff.get("prompt") or ""
+                        note = (
+                            f"对话开场处于「{mode_name}」。该模式说明如下，请据此调整本轮及后续行为：\n"
+                            f"{mode_prompt}\n"
+                            + ("（初始模式下只有基础对话工具；需要干活请用 mode.manage 切换。）" if key == mode_store.DEFAULT_MODE_KEY else "")
+                        )
+                        convo.append({"role": "user", "content": f"[模式初始设置]\n{note}"})
+                except Exception:
+                    pass  # 失败不阻断推理，回退无模式提示
+
             if model_user_content:
                 for i in range(len(convo) - 1, -1, -1):
                     if convo[i].get("role") == "user":

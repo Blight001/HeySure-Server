@@ -270,9 +270,10 @@ def build_runtime_system_prompt_and_tools(
         )
 
     # 当前工作模式：不改写系统提示（切换模式只在工具结果里返回模式说明），但**决定工具门禁**。
-    # 默认「初始对话模式」视为「不在工作房间」：只保留系统自带的基础对话工具（切换模式 /
-    # 工具自省 / 收发消息），收走全部设备 / 工作 MCP；切到 task / learning / fix 等工作模式，
-    # 系统才把设备 MCP 交回。DB 为准（gateway 预览与 ai-runtime 两进程一致）。
+    # 初始对话时，推理会把当前模式的说明作为一条上下文消息注入（等效初始 mode.use 结果），
+    # 保证模型从第一轮就看到模式 prompt。默认「初始对话模式」视为「不在工作房间」：
+    # 只保留系统自带的基础对话工具（切换模式 / 工具自省 / 收发消息），收走全部设备 / 工作 MCP；
+    # 切到 task / learning / fix 等工作模式，系统才把设备 MCP 交回。DB 为准（gateway 预览与 ai-runtime 两进程一致）。
     if ai_config_id is not None:
         try:
             from api.services.mcp.agent_mode_store import (
@@ -301,7 +302,7 @@ def build_runtime_system_prompt_and_tools(
                 }
         except Exception:
             pass
-    # 这里仍剥离历史可能残留的 [当前工作模式] 段，确保系统提示保持干净、不被模式改写。
+    # 剥离历史可能残留的 [当前工作模式] 段（旧设计曾尝试 section 注入，现已统一走工具结果/上下文消息）。
     system_prompt = _strip_prompt_section(system_prompt, "当前工作模式")
 
     # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。

@@ -7,9 +7,10 @@ from sqlmodel import Field, SQLModel, UniqueConstraint
 class AgentMode(SQLModel, table=True):
     """「工作模式」定义（按 AI 隔离）。
 
-    每个模式是一段可注入的前置 prompt：AI 在对话前判断当前工作环境，通过
-    ``mode.manage`` 工具切换到对应模式，其 ``prompt`` 会被运行时以
-    ``[当前工作模式]`` 段注入系统提示，覆盖上一模式。
+    每个模式是一段说明 prompt：AI 在对话前判断当前工作环境，通过
+    ``mode.manage`` 工具切换到对应模式。切换结果（含 prompt）会作为工具消息
+    进入模型上下文；新对话开场也会确保当前模式的 prompt 作为初始上下文可见。
+    不会以 section 形式直接改写系统提示。
 
     - **每个 AI 一套**：``ai_config_id`` 标识所属 AI，同一 user 下不同 AI 的模式
       清单互相独立（知识库固有人格里按 AI 分别展示与编辑）。

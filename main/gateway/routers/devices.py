@@ -48,9 +48,10 @@ def _find_connected_agent(device_id: str, user_id: int) -> Optional[dict]:
 
 def _scope_view(agent: dict, user_id: int) -> dict:
     """Capabilities + effective allow-list for a connected agent. Scope is keyed
-    per individual agent. Newly connected endpoint devices auto-initialize with
-    a full allow-list (all MCPs pre-selected in 作坊); a missing record only
-    happens for agents that have never registered."""
+    per individual agent. Newly connected endpoint devices surface full
+    capabilities as allowed (so UI defaults to all checked). A missing
+    DeviceTypeMcpPermission row (never initialized) yields hasRecord=false.
+    Reconcile on register creates the row for persistence."""
     device_type = device_type_of(agent)
     device_id = str(agent.get("id") or "")
     capabilities = sorted(agent_endpoint_tools(agent))
@@ -60,7 +61,16 @@ def _scope_view(agent: dict, user_id: int) -> dict:
     except (TypeError, ValueError):
         ai_config_id = None
     scope = get_scope(user_id, device_id) if device_id else None
-    allowed = [] if scope is None else sorted(set(capabilities) & scope)
+    # When no persisted scope row exists (first connect / before reconcile),
+    # surface the full live capabilities as "allowed". This makes the
+    # DeviceMcpScopeEditor (and other clients) default to all-checked for
+    # newly connected devices, matching the design intent and reconcile logic.
+    # Runtime dispatch (get_scope===None) still treats it as closed.
+    # hasRecord stays false so saves can distinguish "first time" vs explicit [].
+    if scope is None:
+        allowed = capabilities
+    else:
+        allowed = sorted(set(capabilities) & scope)
     try:
         from api.devices.presence import tool_defs_for_agent
 
