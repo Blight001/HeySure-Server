@@ -163,17 +163,9 @@ def create_ai_config(
         AssistantAIConfig(ai_role=role, digital_member_role=member_role)
     )
     clamped_mcp_tools = clamp_tools_json(user, tier, raw_mcp_tools)
-    # Strip legacy server toolbox tools from mcp_tools (they are now exclusively controlled
-    # via toolbox DeviceMcpScope). Prevents stale conflicts.
-    try:
-        import json
-        from tools.engine import is_toolbox_gated_tool
-        parsed = json.loads(clamped_mcp_tools or "[]")
-        if isinstance(parsed, list):
-            kept = [str(x) for x in parsed if not is_toolbox_gated_tool(x)]
-            clamped_mcp_tools = json.dumps(kept, ensure_ascii=False)
-    except Exception:
-        pass
+    # Note: system built-in MCP tools (e.g. knowledge.search) are now direct-callable.
+    # We no longer strip toolbox-gated names here; mcp_tools may contain them for legacy/display.
+    # Device scope / library binding still control what they should.
     raw_avatar = (body.avatar or "").strip()
     m = re.search(r'ai_avatars([1-9])', raw_avatar)
     avatar = f"ai_avatars{m.group(1)}.png" if m else "ai_avatars1.png"
@@ -350,15 +342,7 @@ def update_ai_config(
     # Narrow the saved tool set to what this AI's role tier is permitted to use.
     cfg.mcp_tools = clamp_tools_json(user, config_role_tier(cfg), cfg.mcp_tools)
     # Strip server toolbox-gated tools (now sourced only from toolbox scope).
-    try:
-        import json
-        from tools.engine import is_toolbox_gated_tool
-        parsed = json.loads(cfg.mcp_tools or "[]")
-        if isinstance(parsed, list):
-            kept = [str(x) for x in parsed if not is_toolbox_gated_tool(x)]
-            cfg.mcp_tools = json.dumps(kept, ensure_ascii=False)
-    except Exception:
-        pass
+    # Note: stopped stripping is_toolbox_gated from mcp_tools (system MCPs direct).
     cfg.updated_at = time.time()
     session.add(cfg)
     session.commit()
@@ -555,15 +539,7 @@ def clone_ai_config(
     session.commit()
     session.refresh(new_cfg)
     _ensure_ai_workspace_dir(user.id, new_cfg.id)
-    # Strip toolbox server tools from cloned mcp_tools (source of truth moved to toolbox scope)
-    try:
-        import json
-        from tools.engine import is_toolbox_gated_tool
-        p = json.loads(new_cfg.mcp_tools or "[]")
-        if isinstance(p, list):
-            new_cfg.mcp_tools = json.dumps([str(x) for x in p if not is_toolbox_gated_tool(str(x))], ensure_ascii=False)
-    except Exception:
-        pass
+    # System built-in MCPs are direct (no strip of toolbox-gated names on clone).
     _write_persona_file(user.id, new_cfg, prompt=src_prompt)
     return _cfg_response(new_cfg, user.id)
 

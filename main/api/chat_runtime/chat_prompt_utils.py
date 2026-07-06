@@ -395,13 +395,9 @@ def _filter_tools_for_current_bindings(
     """Filter out tools that the AI cannot actually use because of missing bindings.
 
     - LIBRARY_BOUND_TOOLS require library (workshop) binding.
-    - Toolbox-gated tools require toolbox binding. ``is_toolbox_gated_tool`` MUST
-      only return True for SERVER-REGISTRY tools — endpoint (device) and workshop
-      tools are governed by their own gate (per-agent MCP scope / workshop
-      binding), so they must pass through here untouched. A past regression where
-      ``is_toolbox_gated_tool`` also matched endpoint tools stripped every online
-      device tool from this allow-list whenever the AI was not bound to the
-      toolbox (locked down by ``test_prompt_groups_db_backed.py``).
+    - System built-in server MCPs (knowledge.search, workspace.*, plan.*, task.*,
+      conversation.*, mode.*, etc.) are DIRECT (no toolbox binding required).
+      Device/endpoint MCPs remain governed by per-agent scopes.
     - Always preserve introspection tools (mcp.describe_tool etc.) so the model
       can still discover tools even before binding.
     This keeps the catalog honest: only show what can actually be called.
@@ -413,18 +409,16 @@ def _filter_tools_for_current_bindings(
         from api.devices.workshop_bindings import config_bound_to_library
         from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
         from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
-        from tools.engine import config_bound_to_toolbox, is_toolbox_gated_tool
+        # Note: toolbox binding no longer gates system built-in MCPs (knowledge.search,
+        # workspace.*, plan.* etc. are direct). Only library governance remains gated.
+        # is_toolbox_gated_tool / config_bound_to_toolbox kept for UI grouping only.
 
         protected = set(MCP_INTROSPECTION_TOOLS or set())
         if not config_bound_to_library(int(user_id), int(ai_config_id)):
             result -= (set(LIBRARY_BOUND_TOOLS) - protected)
 
-        if not config_bound_to_toolbox(int(user_id), int(ai_config_id)):
-            # Remove tools that require toolbox binding (non-library, non-exempt)
-            gated = {n for n in result if is_toolbox_gated_tool(n)}
-            result -= gated
-            # but keep protected
-            result |= protected
+        # Toolbox-gated removal intentionally removed: system server MCPs are now
+        # always direct-callable (subject only to mcp_enabled + mode + library for gov tools).
     except Exception:
         # Fail open on any lookup error to avoid breaking catalogs.
         pass

@@ -144,7 +144,8 @@ def build_prompt_tool_groups(
             if name in by_name and _is_workspace_tool(by_name[name])
         }
 
-    # 工作区（服务端）MCP 再分两组：工具箱（默认即用）与 图书馆（需绑定图书馆）。
+    # 工作区（服务端）MCP 再分两组：工具箱（系统自带 MCP，直接可用）与 图书馆（需绑定图书馆）。
+    # 工具箱组中的系统工具现在由上游 allowlist 直接带入（不再依赖 toolbox 绑定）。
     from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
 
     toolbox_tools = [

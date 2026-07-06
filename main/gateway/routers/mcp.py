@@ -94,9 +94,32 @@ async def list_mcp_tools(
         else:
             allowed_tools = set()
 
+    # System built-in server MCPs (non-library) are direct-callable; force-include
+    # them here so they appear with allowedForCurrentAi=true and are not filtered.
+    # Only library tools still depend on binding (handled later in groups + runtime).
+    if (cfg is None or getattr(cfg, 'mcp_enabled', True)):
+        try:
+            from mcp_runtime.mcp import registry as _reg
+            from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS as _lib
+            _sys = {str(t.get("name") or "").strip() for t in _reg.list_tools() if t.get("name")}
+            _sys -= set(_lib or ())
+            if allowed_tools is None:
+                allowed_tools = set()
+            allowed_tools |= _sys
+            # Add library-bound governance tools only when actually bound
+            try:
+                from api.devices.workshop_bindings import config_bound_to_library
+                if config_bound_to_library(user.id, ai_config_id):
+                    allowed_tools |= set(_lib or ())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     # Server toolbox tools are now primarily granted via the bound toolbox's DeviceMcpScope
     # (edited in 工具箱 MCP 权限). Augment here so that /tools and catalog reflect the
-    # actual selectable tools after binding. This prevents conflicts with legacy cfg.mcp_tools.
+    # actual selectable tools after binding (for device-like display). System builtins
+    # are already forced above and not gated.
     if ai_config_id is not None and (cfg is None or getattr(cfg, 'mcp_enabled', True)):
         try:
             from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
@@ -240,10 +263,32 @@ async def call_mcp_tool(
             allowed_tools.update(endpoint_tools_for_config(req.ai_config_id, user.id))
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid AI MCP tool config")
-        if req.tool not in allowed_tools:
+
+        # System built-in MCPs (server registry non-library) allow direct call.
+        # Force them into allowed so the membership check below passes for them.
+        is_server_builtin = False
+        try:
+            from mcp_runtime.mcp import registry as _reg
+            from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS as _lib
+            from connector_runtime.dispatch.desktop_device_tools import is_endpoint_agent_tool
+            _sys_direct = {str(t.get("name") or "").strip() for t in _reg.list_tools() if t.get("name")}
+            _sys_direct -= set(_lib or ())
+            allowed_tools |= _sys_direct
+            is_server_builtin = _reg.has(req.tool) and not is_endpoint_agent_tool(req.tool)
+            # library ones: include if bound (for the check)
+            try:
+                from api.devices.workshop_bindings import config_bound_to_library
+                if config_bound_to_library(user.id, req.ai_config_id):
+                    allowed_tools |= set(_lib or ())
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        if not is_server_builtin and req.tool not in allowed_tools:
             raise HTTPException(status_code=403, detail=f"Tool not allowed for this AI: {req.tool}")
 
-        # Augment with toolbox scope (server toolbox tools are now sourced from the toolbox DeviceMcpScope)
+        # Augment with toolbox scope (for device display / grouping)
         try:
             from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
             allowed_tools |= toolbox_tools_for_config(req.ai_config_id, user.id)

@@ -196,6 +196,20 @@ def build_runtime_system_prompt_and_tools(
                 effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
             except Exception:
                 pass
+            # Even under task override, ensure core system built-ins are directly available
+            # (knowledge.search etc. must not be stripped for pre-plan / task flows).
+            try:
+                from mcp_runtime.mcp import registry as _mcp_registry
+                from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS as _LIB_BOUND
+                _server_direct = {
+                    str(t.get("name") or "").strip()
+                    for t in _mcp_registry.list_tools()
+                    if t.get("name")
+                }
+                _server_direct -= set(_LIB_BOUND or ())
+                effective_tool_allowlist |= _server_direct
+            except Exception:
+                pass
 
     # Task runtime must always allow task system tools.
     if is_task_runtime:
@@ -207,6 +221,24 @@ def build_runtime_system_prompt_and_tools(
     # Server toolbox MCP tools come from the toolbox DeviceMcpScope.
     try:
         effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
+    except Exception:
+        pass
+
+    # System built-in MCPs (from MCP registry, non-LIBRARY_BOUND) are allowed for
+    # direct AI calls. They are NOT gated behind toolbox binding/selection like
+    # device (endpoint) MCPs. This fixes "Tool not allowed for this task" for
+    # knowledge.search, workspace.*, plan.*, etc. (per user request).
+    # Library governance tools are still subject to library binding (see filter).
+    try:
+        from mcp_runtime.mcp import registry as _mcp_registry
+        from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS as _LIB_BOUND
+        _server_direct = {
+            str(t.get("name") or "").strip()
+            for t in _mcp_registry.list_tools()
+            if t.get("name")
+        }
+        _server_direct -= set(_LIB_BOUND or ())
+        effective_tool_allowlist |= _server_direct
     except Exception:
         pass
 
