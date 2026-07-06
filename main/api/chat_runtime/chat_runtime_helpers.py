@@ -241,6 +241,7 @@ def build_runtime_system_prompt_and_tools(
         try:
             from api.services.mcp.agent_mode_store import (
                 is_chat_only_mode,
+                mode_allows_device_mcp,
                 CHAT_MODE_TOOL_WHITELIST,
             )
 
@@ -248,6 +249,18 @@ def build_runtime_system_prompt_and_tools(
                 keep = set(CHAT_MODE_TOOL_WHITELIST) | set(MCP_INTROSPECTION_TOOLS)
                 effective_tool_allowlist = {
                     tool for tool in effective_tool_allowlist if tool in keep
+                }
+            elif not mode_allows_device_mcp(uid, ai_config_id):
+                # 模式类型不允许设备端 MCP：收走桌面 / 浏览器 / 安卓端执行器工具，
+                # 服务端工作工具（含图书馆 workshop 工具）保持不变。
+                from connector_runtime.dispatch.desktop_device_tools import (
+                    is_endpoint_agent_tool,
+                    is_workshop_tool,
+                )
+
+                effective_tool_allowlist = {
+                    tool for tool in effective_tool_allowlist
+                    if not (is_endpoint_agent_tool(tool) and not is_workshop_tool(tool))
                 }
         except Exception:
             pass

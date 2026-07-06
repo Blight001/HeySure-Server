@@ -522,25 +522,47 @@ def _intrinsic_personas_payload(user_id: int) -> Dict[str, Any]:
             .order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
         ).all()
 
-    # 可选模式清单（初始模式 + 4 场景模式 + 自定义），供前端为每个 AI 显示/切换其工作模式。
+    # 工作模式按 AI 隔离：每个 AI 的详情里有自己的「模式栏目」（标签切换查看 /
+    # 编辑各模式 prompt 与设备 MCP 开关）。顶层 available_modes 保留为用户级
+    # 模板桶视图（旧前端兼容），新前端应使用每个 agent 自己的 modes。
     available_modes: List[Dict[str, str]] = []
-    mode_name_by_key: Dict[str, str] = {}
     default_mode_key = "initial"
+    agent_mode_store = None
     try:
-        from api.services.mcp import agent_mode_store
+        from api.services.mcp import agent_mode_store as _agent_mode_store
 
+        agent_mode_store = _agent_mode_store
         default_mode_key = agent_mode_store.DEFAULT_MODE_KEY
         for m in agent_mode_store.list_modes(user_id):
-            key = str(m.get("mode_key") or "")
-            name = str(m.get("name") or "")
-            available_modes.append({"mode_key": key, "name": name})
-            mode_name_by_key[key] = name
+            available_modes.append({
+                "mode_key": str(m.get("mode_key") or ""),
+                "name": str(m.get("name") or ""),
+                "prompt": str(m.get("prompt") or ""),
+                "description": str(m.get("description") or ""),
+            })
     except Exception:
         available_modes = []
-        mode_name_by_key = {}
 
     agents: List[Dict[str, Any]] = []
     for cfg in rows:
+        # 该 AI 自己的模式清单（首次访问时从用户级模板桶复制播种）。
+        agent_modes: List[Dict[str, Any]] = []
+        mode_name_by_key: Dict[str, str] = {}
+        if agent_mode_store is not None and cfg.id:
+            try:
+                for m in agent_mode_store.list_modes(user_id, int(cfg.id)):
+                    key = str(m.get("mode_key") or "")
+                    agent_modes.append({
+                        "mode_key": key,
+                        "name": str(m.get("name") or ""),
+                        "prompt": str(m.get("prompt") or ""),
+                        "description": str(m.get("description") or ""),
+                        "allow_device_mcp": bool(m.get("allow_device_mcp", True)),
+                        "is_builtin": bool(m.get("is_builtin")),
+                    })
+                    mode_name_by_key[key] = str(m.get("name") or "")
+            except Exception:
+                agent_modes = []
         # 不存在「无模式」：空值按初始模式显示。
         mode_key = str(getattr(cfg, "current_mode_key", "") or "").strip() or default_mode_key
         agents.append({
@@ -557,11 +579,12 @@ def _intrinsic_personas_payload(user_id: int) -> Dict[str, Any]:
             "prompt": str(kb_store.effective_ai_prompt(cfg.user_id, cfg) or "").strip(),
             "current_mode_key": mode_key,
             "current_mode_name": mode_name_by_key.get(mode_key, ""),
+            "modes": agent_modes,
             "updated_at": cfg.updated_at,
         })
 
     return {
-        "description": "当前用户下所有 AI 的固定人格 prompt 与工作模式如下。",
+        "description": "当前用户下所有 AI 的固定人格 prompt。工作模式按 AI 隔离，在各 AI 详情的模式栏目里分别查看 / 编辑（AI 运行时动态切换当前模式）。",
         "total": len(agents),
         "available_modes": available_modes,
         "agents": agents,
@@ -583,8 +606,6 @@ def _render_intrinsic_personas_body(payload: Dict[str, Any]) -> str:
         lines.append(f"- ID：{agent.get('id')}")
         lines.append(f"- 角色：{agent.get('role') or ''}")
         lines.append(f"- 模型：{agent.get('model') or ''}")
-        _mode_label = str(agent.get("current_mode_name") or agent.get("current_mode_key") or "未设置")
-        lines.append(f"- 工作模式：{_mode_label}")
         lines.append("")
         lines.append("### 人格 Prompt")
         lines.append("")
@@ -622,6 +643,30 @@ def save_intrinsic_persona(
         session.commit()
         session.refresh(cfg)
 
+    return _builtin_entry("builtin.intrinsic_personas", user_id=user_id, with_body=True) or {}
+
+
+def save_intrinsic_mode_prompt(
+    *,
+    user_id: int,
+    mode_key: str = "initial",
+    prompt: Optional[str] = None,
+    ai_config_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """更新某模式的 prompt（供知识库固有人格的“模式栏目”编辑）。
+
+    工作模式按 AI 隔离：``ai_config_id`` 指定要编辑哪个 AI 的模式；省略时落在
+    用户级模板桶（旧前端兼容）。模式 prompt 由 AI 动态 use 切换使用，不在此
+    UI 中预设/切换 current_mode。
+    """
+    from api.services.mcp import agent_mode_store as store
+
+    key = str(mode_key or "").strip() or store.DEFAULT_MODE_KEY
+    if prompt is None:
+        return {}
+    store.ensure_builtin_modes(user_id, ai_config_id)
+    store.update_mode(user_id, key, prompt=str(prompt), ai_config_id=ai_config_id)
+    # 返回最新的固有人格视图，便于前端刷新
     return _builtin_entry("builtin.intrinsic_personas", user_id=user_id, with_body=True) or {}
 
 
