@@ -175,7 +175,10 @@ def _agent_capabilities(agent: Dict[str, Any], device_type: str) -> Set[str]:
     try:
         from api.devices.presence import NON_MCP_CAPABILITIES
     except Exception:
-        NON_MCP_CAPABILITIES = {"remote_control", "remote.control"}
+        NON_MCP_CAPABILITIES = {
+            "remote_control", "remote.control",
+            "remote_terminal", "remote.terminal",
+        }
     for cap in agent.get("capabilities") or []:
         name = str(cap or "").strip()
         if not name or name in NON_MCP_CAPABILITIES:

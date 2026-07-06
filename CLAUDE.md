@@ -45,7 +45,8 @@ server/
     connector_runtime/     ← 进程③ 连接器 (3002)
       main.py / app.py
       bots/                ← QQ / 飞书机器人（各含 adapter/router/service）
-      dispatch/            ← 端侧消息分发
+      dispatch/            ← 端侧消息分发（`device_dispatch.py` 任务队列 + 远程连接：
+                             `remote_control.py` 画面 rc:* / `remote_terminal.py` 命令行 rt:*）
     ai_runtime/            ← 进程④ AI worker (3003)
       main.py
       inference/           ← 推理核心 / 消息服务 / 阶段上下文

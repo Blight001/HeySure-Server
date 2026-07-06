@@ -15,7 +15,15 @@ from sqlmodel import Session, select
 from ..database import engine
 from ..models import DevicePresence
 
-NON_MCP_CAPABILITIES: Set[str] = {"remote_control", "remote.control"}
+# Transport-layer capabilities a device advertises to unlock a *remote-connection*
+# data plane (see device/read.md「统一远程连接」). They are reserved words, NOT
+# AI-callable MCP tools, so they must never surface in the tool catalog:
+#   remote_control  — 画面远程 (WebRTC screen mirror + input), gated by rc:* signaling
+#   remote_terminal — 命令行远程 (interactive PTY over the rt:* Socket.IO relay)
+NON_MCP_CAPABILITIES: Set[str] = {
+    "remote_control", "remote.control",
+    "remote_terminal", "remote.terminal",
+}
 
 # ``device:register`` may carry an ``icon`` choice. Presets live under
 # ``server/static/device_png/`` (mounted at ``/device_png`` on the gateway).

@@ -20,7 +20,7 @@ from connector_runtime.dispatch.device_dispatch import (
     purge_stale_dispatches,
     resume_device_dispatch_queue,
 )
-from connector_runtime.dispatch import remote_control
+from connector_runtime.dispatch import remote_control, remote_terminal
 
 
 logger = logging.getLogger(__name__)
@@ -292,6 +292,38 @@ def register_agent_socket_events():
     async def rc_stopped(sid, data):
         await remote_control.relay(sid, 'rc:stopped', data if isinstance(data, dict) else {})
 
+    # --- Remote terminal (命令行远程, PTY over Socket.IO relay) ------------
+    # Sibling channel to rc:* above. Unlike screen-remote (P2P WebRTC), the
+    # terminal byte stream itself is relayed through this server — low bandwidth,
+    # and it works across NAT with no TURN. See remote_terminal.py.
+    @sio.on('rt:open')
+    async def rt_open(sid, data):
+        await remote_terminal.open_session(sid, data if isinstance(data, dict) else {})
+
+    @sio.on('rt:input')
+    async def rt_input(sid, data):
+        await remote_terminal.relay(sid, 'rt:input', data if isinstance(data, dict) else {})
+
+    @sio.on('rt:resize')
+    async def rt_resize(sid, data):
+        await remote_terminal.relay(sid, 'rt:resize', data if isinstance(data, dict) else {})
+
+    @sio.on('rt:data')
+    async def rt_data(sid, data):
+        await remote_terminal.relay(sid, 'rt:data', data if isinstance(data, dict) else {})
+
+    @sio.on('rt:exit')
+    async def rt_exit(sid, data):
+        await remote_terminal.relay(sid, 'rt:exit', data if isinstance(data, dict) else {})
+
+    @sio.on('rt:error')
+    async def rt_error(sid, data):
+        await remote_terminal.relay(sid, 'rt:error', data if isinstance(data, dict) else {})
+
+    @sio.on('rt:close')
+    async def rt_close(sid, data):
+        await remote_terminal.relay(sid, 'rt:close', data if isinstance(data, dict) else {})
+
     @sio.on('task:progress')
     async def task_progress(sid, data):
         await handle_task_progress(data if isinstance(data, dict) else {})
@@ -319,6 +351,10 @@ def register_agent_socket_events():
             await remote_control.handle_disconnect(sid)
         except Exception:
             logger.exception('Failed to clean up remote-control session on disconnect: %s', sid)
+        try:
+            await remote_terminal.handle_disconnect(sid)
+        except Exception:
+            logger.exception('Failed to clean up remote-terminal session on disconnect: %s', sid)
         if sid in agents:
             device_id_for_presence = str(agents[sid].get('id') or '')
             owner_user_id = agents[sid].get('userId')
