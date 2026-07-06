@@ -19,6 +19,8 @@ import contextvars
 import asyncio
 import json
 import logging
+import os
+import re
 import threading
 import time
 import uuid
@@ -629,6 +631,112 @@ def _omit_screenshot_bytes(value: Any) -> Any:
     return value
 
 
+def _persist_cookies_result(
+    *,
+    user_id: int,
+    ai_config_id: Optional[int],
+    result: Any,
+) -> Any:
+    """If the browser agent returned full cookie data (when save_to_server=true),
+    write a JSON snapshot into the AI's per-directory cookies/ folder on server.
+    Clean the bulk arrays out of the result so chat logs stay small.
+    """
+    if not isinstance(result, dict):
+        return result
+    # data may be under "data" (from client) or top level for flexibility
+    cookies = result.get("cookies")
+    browser_storage = result.get("browserStorage") or result.get("browser_storage")
+    data_block = result.get("data") if isinstance(result.get("data"), dict) else result
+    has_cookies = bool(cookies) or bool(data_block and (data_block.get("cookies") or data_block.get("browserStorage")))
+    if not has_cookies:
+        return result
+    if not user_id:
+        return result
+
+    try:
+        # Resolve the target directory for this AI (per-user / per-AI layout).
+        # Mirrors logic in mcp_runtime/mcp/core.py so cookies land where AI tools expect.
+        from api.core.config import user_workspace_dir, ai_workspace_dirname
+        user_root = user_workspace_dir(int(user_id))
+        workspace_dir = user_root
+        if ai_config_id:
+            try:
+                with Session(engine) as session:
+                    from api.models import AssistantAIConfig
+                    cfg = session.exec(
+                        select(AssistantAIConfig).where(
+                            AssistantAIConfig.id == ai_config_id,
+                            AssistantAIConfig.user_id == int(user_id),
+                        )
+                    ).first()
+                if cfg:
+                    ai_role = str(getattr(cfg, "ai_role", "") or "").strip().lower()
+                    member_role = str(getattr(cfg, "digital_member_role", "") or "").strip().lower()
+                    if not (ai_role == "digital_member" and member_role == "manager"):
+                        dirname = ai_workspace_dirname(cfg.id, cfg.name, cfg.ai_role)
+                        workspace_dir = os.path.abspath(os.path.join(user_root, dirname))
+            except Exception:
+                workspace_dir = os.path.abspath(os.path.join(user_root, f"{int(ai_config_id)}-ai"))
+        os.makedirs(workspace_dir, exist_ok=True)
+
+        cookies_dir = os.path.join(workspace_dir, "cookies")
+        os.makedirs(cookies_dir, exist_ok=True)
+
+        ts = int(time.time() * 1000)
+        account = str((data_block or result).get("account") or "").strip() or "unknown"
+        safe_account = re.sub(r"[^a-zA-Z0-9_-]+", "_", account)[:30]
+        filename = f"cookies_{safe_account}_{ts}.json"
+        abs_path = os.path.abspath(os.path.join(cookies_dir, filename))
+
+        payload_to_write = data_block if (isinstance(data_block, dict) and data_block.get("cookies")) else {
+            "account": (data_block or result).get("account"),
+            "password": (data_block or result).get("password"),
+            "pageUrl": result.get("pageUrl") or (data_block or {}).get("pageUrl"),
+            "pageTitle": result.get("pageTitle") or (data_block or {}).get("pageTitle"),
+            "cookies": cookies or (data_block or {}).get("cookies"),
+            "browserStorage": browser_storage or (data_block or {}).get("browserStorage"),
+            "capturedAt": (data_block or result).get("capturedAt") or time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime()),
+            "source": "save_cookies_mcp",
+        }
+
+        with open(abs_path, "w", encoding="utf-8") as fh:
+            json.dump(payload_to_write, fh, ensure_ascii=False, indent=2)
+
+        try:
+            from api.core.config import user_workspace_dir as _uwd
+            user_root = _uwd(int(user_id))
+        except Exception:
+            user_root = workspace_dir
+            parent = os.path.dirname(workspace_dir)
+            if parent and str(os.path.basename(parent)).isdigit():
+                user_root = parent
+        rel_path = os.path.relpath(abs_path, user_root).replace(os.sep, "/")
+
+        next_result: Dict[str, Any] = dict(result)
+        next_result["saved_to_server"] = True
+        next_result["server_path"] = abs_path
+        next_result["workspace_path"] = rel_path
+        next_result["file_name"] = filename
+        next_result["cookieCount"] = len(cookies) if cookies else (len(payload_to_write.get("cookies") or []) if isinstance(payload_to_write.get("cookies"), list) else next_result.get("cookieCount"))
+
+        # Strip bulk sensitive data from the result echoed to chat / stored in dispatch row.
+        for k in ("cookies", "browserStorage", "browser_storage", "data"):
+            if k in next_result:
+                del next_result[k]
+
+        return next_result
+    except Exception as exc:
+        logger.exception("persist cookie snapshot to AI workspace failed")
+        next_result = dict(result) if isinstance(result, dict) else {}
+        next_result["saved_to_server"] = False
+        next_result["save_error"] = str(exc)
+        # still strip to avoid leaking in error path if present
+        for k in ("cookies", "browserStorage", "browser_storage", "data"):
+            if k in next_result:
+                del next_result[k]
+        return next_result
+
+
 async def _emit_to_user(ctx: Dict[str, Any], event: str, payload: Dict[str, Any]) -> None:
     user_id = ctx.get("user_id")
     if user_id is None:
@@ -668,6 +776,20 @@ async def handle_task_result(data: Dict[str, Any]) -> None:
                 result = dict(result)
                 result["uploaded"] = False
                 result["upload_error"] = str(exc)
+
+    if success and tool in ("save_cookies", "capture_cookies"):
+        try:
+            result = _persist_cookies_result(
+                user_id=int(ctx.get("user_id") or 0),
+                ai_config_id=ctx.get("ai_config_id"),
+                result=result,
+            )
+        except Exception as exc:
+            logger.exception("cookie persist wrapper failed")
+            if isinstance(result, dict):
+                result = dict(result)
+                result["saved_to_server"] = False
+                result["save_error"] = str(exc)
 
     status = "成功" if success else "失败"
     display_result = _omit_screenshot_bytes(result) if tool in _SCREENSHOT_TOOLS else result

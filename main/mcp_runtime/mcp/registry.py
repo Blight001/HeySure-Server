@@ -4,9 +4,7 @@ from tools.introspection import (
 )
 from tools.workspace import (
     _admin_manage,
-    _file_manage,
     _run_command,
-    FILE_MANAGE_SCHEMA,
 )
 from tools.tasks import (
     _task_manage,
@@ -20,6 +18,10 @@ from tools.task_plan import (
 from tools.prompts import (
     _prompt_manage,
     PROMPT_MANAGE_SCHEMA,
+)
+from tools.agent_mode import (
+    _mode_manage,
+    MODE_MANAGE_SCHEMA,
 )
 from tools.communication import (
     _ai_send_message,
@@ -130,17 +132,6 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
             "required": [],
         },
         handler=_run_command,
-        destructive=True,
-    ))
-    registry.register(MCPTool(
-        name="workspace.manage",
-        description=(
-            "工作区文件统一工具：用 action 选择 read 读取 / tree 列出文件树 / write 创建覆盖 / edit 按块编辑。"
-            "路径必须位于当前 AI 工作区内；普通成员仅限自己的 AI 目录，管理者可操作用户工作区。"
-            "（运行命令用 workspace.run_command，联网搜索用 workspace.search。）"
-        ),
-        input_schema=FILE_MANAGE_SCHEMA,
-        handler=_file_manage,
         destructive=True,
     ))
     registry.register(MCPTool(
@@ -404,6 +395,20 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         ),
         input_schema=PROMPT_MANAGE_SCHEMA,
         handler=_prompt_manage,
+        destructive=True,
+    ))
+
+    registry.register(MCPTool(
+        name="mode.manage",
+        description=(
+            "工作模式统一工具：AI 对话前先判断当前工作环境，再切换到对应模式，"
+            "该模式的前置 prompt 会被注入系统提示、覆盖上一模式。"
+            "用 action 选择 list 列出所有模式 / get 读取某模式 prompt / create 创建自定义模式 / "
+            "update 修改模式 / delete 删除自定义模式 / use 切换当前 AI 到某模式。"
+            "内置 4 种：chat 普通对话 / task 任务 / learning 学习 / fix 修复（可改 prompt，不可删）。"
+        ),
+        input_schema=MODE_MANAGE_SCHEMA,
+        handler=_mode_manage,
         destructive=True,
     ))
 

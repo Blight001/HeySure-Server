@@ -40,11 +40,6 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
     "prompt.write_ai": "prompt.manage",
     "prompt.read_system": "prompt.manage",
     "prompt.write_system": "prompt.manage",
-    # 文件（file.manage 已并入 workspace.manage）
-    "workspace.read_file": "workspace.manage",
-    "workspace.write_file": "workspace.manage",
-    "workspace.edit_file": "workspace.manage",
-    "file.manage": "workspace.manage",
     # admin 合并入 admin.manage
     "admin.list_agents": "admin.manage",
     "admin.get_overview": "admin.manage",

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class CallRequest(BaseModel):
-    tool: str = Field(..., description="MCP tool name (e.g. workspace.read_file)")
+    tool: str = Field(..., description="MCP tool name (e.g. workspace.run_command)")
     user_id: int = Field(..., description="Acting user id; tools scope file/DB access to this user")
     ai_config_id: Optional[int] = None
     arguments: Optional[Dict[str, Any]] = Field(default_factory=dict)

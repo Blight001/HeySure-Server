@@ -233,6 +233,27 @@ def build_runtime_system_prompt_and_tools(
             task_plan_flow_text,
         )
 
+    # 当前工作模式：按该 AI 的 current_mode_key 注入 [当前工作模式] 段（DB 为准，
+    # gateway 预览与 ai-runtime 两进程一致）。空 / 模式已删 → 不注入，向后兼容。
+    if ai_config_id is not None:
+        try:
+            from api.services.mcp.agent_mode_store import effective_mode_prompt
+
+            mode = effective_mode_prompt(uid, ai_config_id)
+        except Exception:
+            mode = None
+        # 先剥离历史遗留的同名段，避免与切换/合并路径重复。
+        system_prompt = _strip_prompt_section(system_prompt, "当前工作模式")
+        if mode and str(mode.get("prompt") or "").strip():
+            mode_body = (
+                f"当前模式：{mode.get('name') or ''}（{mode.get('mode_key') or ''}）\n\n"
+                f"{str(mode.get('prompt') or '').strip()}\n\n"
+                "——先判断本轮工作环境是否仍匹配当前模式；若不匹配，用 "
+                "mode.manage(action=use, mode_key=...) 切换到更合适的模式"
+                "（内置：chat/task/learning/fix，或自定义模式），切换后按新模式行动。"
+            )
+            system_prompt = _append_prompt_section(system_prompt, "当前工作模式", mode_body)
+
     # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。
     system_prompt = _strip_prompt_section(system_prompt, "动态 MCP 说明")
     system_prompt = _strip_prompt_section(system_prompt, "可用MCP工具")

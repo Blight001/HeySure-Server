@@ -45,10 +45,6 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     "mcp.describe_tool": ROLE_MEMBER,
     # Web search — external read-only lookup, available to every tier by default.
     "workspace.search": ROLE_MEMBER,
-    # Unified workspace file tool (read/write/edit/tree). Regular members are
-    # scoped to their own AI workspace by ``get_project_root``; managers and
-    # assistant admins resolve to the whole user workspace.
-    "workspace.manage": ROLE_MEMBER,
     # Shell command execution is allowed for every member inside the workspace
     # resolved for that AI. Regular members cannot choose an outside cwd.
     "workspace.run_command": ROLE_MEMBER,
@@ -257,7 +253,6 @@ def clamp_tools_json(user, tier: str, mcp_tools_json: Optional[str]) -> str:
         if tool.startswith("workspace.") and tool not in {
             "workspace.search",
             "workspace.run_command",
-            "workspace.manage",
         }:
             continue
         # Endpoint desktop/browser tools are governed exclusively by

@@ -46,6 +46,8 @@ _AUTO_RUNTIME_SECTION_TITLES: tuple[str, ...] = (
     "任务运行时工作目录(绝对路径)",
     "任务运行时MCP调用规则",
     "任务运行时MCP工具白名单",
+    # 工作模式段由运行时按 current_mode_key 注入，剥离以防落库人格里残留旧模式。
+    "当前工作模式",
 )
 _TASK_RUNTIME_SECTION_TITLES: tuple[str, ...] = (
     "任务运行时工作目录(绝对路径)",

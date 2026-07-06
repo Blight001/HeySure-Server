@@ -3,8 +3,6 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from fastapi import HTTPException
-
 from tools import workspace
 
 
@@ -16,35 +14,6 @@ class WorkspaceFileToolTests(unittest.TestCase):
         self.root_patch = patch("tools.workspace.get_project_root", return_value=self.root)
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
-
-    def test_edit_file_replaces_unique_block(self):
-        path = os.path.join(self.root, "task.md")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("keep\nremove this\nkeep2\n")
-
-        result = workspace._edit_file(1, {
-            "path": "task.md",
-            "edits": [{"op": "delete", "search": "remove this\n"}],
-        }, 34)
-
-        self.assertTrue(result["success"])
-        self.assertTrue(result["changed"])
-        with open(path, "r", encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "keep\nkeep2\n")
-
-    def test_edit_file_rejects_ambiguous_match_without_replace_all(self):
-        path = os.path.join(self.root, "task.md")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("same\nsame\n")
-
-        with self.assertRaises(HTTPException) as cm:
-            workspace._edit_file(1, {
-                "path": "task.md",
-                "edits": [{"op": "delete", "search": "same\n"}],
-            }, 34)
-
-        self.assertEqual(cm.exception.status_code, 409)
-        self.assertIn("matched 2 times", str(cm.exception.detail))
 
     def test_run_command_returns_structured_stderr(self):
         result = workspace._run_command(1, {

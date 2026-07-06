@@ -4,10 +4,10 @@ from typing import Any, Dict, Optional
 from sqlmodel import Field, SQLModel
 
 _DEFAULT_MCP_TOOLS = (
-    '["mcp.describe_tool","workspace.search","workspace.manage","workspace.run_command",'
+    '["mcp.describe_tool","workspace.search","workspace.run_command",'
     '"admin.manage","device_mcp.manage",'
     '"task.manage",'
-    '"prompt.manage","knowledge.manage",'
+    '"prompt.manage","knowledge.manage","mode.manage",'
     '"message.send_to_user","conversation.manage",'
     '"message.send_to_ai"]'
 )
@@ -72,6 +72,9 @@ class AssistantAIConfig(SQLModel, table=True):
     switch_key: str = Field(default="assistant_default")
     mcp_tools: str = Field(default=_DEFAULT_MCP_TOOLS)
     system_auto_control: str = Field(default=_DEFAULT_SYSTEM_AUTO_CONTROL)
+    # 当前工作模式（对应 AgentMode.mode_key）。空 = 无模式注入（默认，向后兼容）。
+    # 由 mode.manage(action=use) 设置，运行时据此注入 [当前工作模式] prompt 段。
+    current_mode_key: str = Field(default="")
 
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
@@ -111,6 +114,7 @@ class AssistantAIConfigCreate(SQLModel):
     switch_key: Optional[str] = ""
     mcp_tools: Optional[str] = ""
     system_auto_control: Optional[str] = ""
+    current_mode_key: Optional[str] = ""
 
 
 class AssistantAIConfigUpdate(SQLModel):
@@ -145,3 +149,4 @@ class AssistantAIConfigUpdate(SQLModel):
     switch_key: Optional[str] = None
     mcp_tools: Optional[str] = None
     system_auto_control: Optional[str] = None
+    current_mode_key: Optional[str] = None
