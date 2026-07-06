@@ -401,11 +401,12 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="mode.manage",
         description=(
-            "工作模式统一工具：AI 对话前先判断当前工作环境，再切换到对应模式，"
-            "该模式的前置 prompt 会被注入系统提示、覆盖上一模式。"
-            "用 action 选择 list 列出所有模式 / get 读取某模式 prompt / create 创建自定义模式 / "
+            "工作模式统一工具：AI 对话前先判断当前工作环境，再切换到对应模式。"
+            "默认的 initial 初始对话模式「不在工作房间」——只有基础对话工具，看不到设备 / 工作 MCP；"
+            "切到 task / learning / fix 等工作模式，系统才把设备 MCP 交回。切换只在工具结果里返回该模式说明，"
+            "不改写人格 / 系统提示。用 action 选择 list 列出所有模式 / get 读取某模式 prompt / create 创建自定义模式 / "
             "update 修改模式 / delete 删除自定义模式 / use 切换当前 AI 到某模式。"
-            "内置 4 种：chat 普通对话 / task 任务 / learning 学习 / fix 修复（可改 prompt，不可删）。"
+            "内置 4 种：initial 初始对话（默认，只聊天、无设备工具）/ task 任务 / learning 学习 / fix 修复（可改 prompt，不可删）。"
         ),
         input_schema=MODE_MANAGE_SCHEMA,
         handler=_mode_manage,

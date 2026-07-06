@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
 """工作模式（AgentMode）存储与解析层。
 
-模式 = 一段可注入的前置 prompt。AI 在对话前判断当前工作环境，通过
-``mode.manage`` 工具切换模式，运行时据 ``AssistantAIConfig.current_mode_key``
-把对应模式的 prompt 以 ``[当前工作模式]`` 段注入系统提示，覆盖上一模式。
+模式 = 一段模式说明 + 一个工具门禁。AI 对话前判断当前工作环境，用 ``mode.manage``
+切换模式：``use`` 只在**工具结果**里返回该模式说明（不改写人格 / 系统 prompt），
+而 ``AssistantAIConfig.current_mode_key`` 决定**这轮能拿到哪些 MCP 工具**。
 
-本模块是 REST / MCP 工具 / 运行时注入三方共用的唯一权威实现：
-- 4 个内置模式（普通对话 / 任务 / 学习 / 修复）按 user 幂等播种；
+默认的「初始对话模式」（``initial``）视为「不在工作房间」：只保留系统自带的基础
+对话工具（切换模式 / 工具自省 / 收发消息），收走全部设备 / 工作 MCP；只有切到
+task / learning / fix 等工作模式，系统才把设备 MCP 交回——像离开聊天、走进工作间
+拿起工具再干活。旧版独立的 ``chat`` 模式已并入 ``initial``。
+
+本模块是 REST / MCP 工具 / 运行时门禁三方共用的唯一权威实现：
+- 4 个内置模式（初始对话 / 任务 / 学习 / 修复）按 user 幂等播种；
 - 增删改查 + 切换（use）；
-- ``effective_mode_prompt`` 供 chat_runtime 组装系统提示时读取（只读、DB 为准）。
+- ``is_chat_only_mode`` / ``resolve_current_mode_key`` 供 chat_runtime 做工具门禁（只读、DB 为准）。
 """
 
 import re
@@ -23,20 +28,30 @@ from api.database import engine
 from api.models import AgentMode, AssistantAIConfig
 
 
+# 每个 AI 的初始/默认模式 key。任何 AI 都至少处于该模式（不存在「无模式」）。
+DEFAULT_MODE_KEY = "initial"
+
+
 # ---------------------------------------------------------------------------
-# 内置模式：4 个默认模式。可改 prompt，不可删除。
+# 内置模式：初始对话模式 + 3 个工作模式。可改 prompt，不可删除。
 # ---------------------------------------------------------------------------
 BUILTIN_MODES: List[Dict[str, str]] = [
     {
-        "mode_key": "chat",
-        "name": "普通对话模式",
-        "description": "日常交流、答疑、闲聊的默认模式，轻量、直接、少动工具。",
+        "mode_key": DEFAULT_MODE_KEY,
+        "name": "初始对话模式",
+        "description": "默认模式：普通聊天，不进工作间——只有基础对话工具，看不到设备/工作 MCP；要干活先切到 task/learning/fix。",
         "prompt": (
-            "你现在处于「普通对话模式」。\n"
-            "- 目标：与用户自然、简洁地交流，直接回答问题，不过度展开。\n"
-            "- 除非用户明确要求，不主动发起复杂的多步操作或长流程。\n"
-            "- 需要外部信息或执行动作时才调用工具，能一句话说清就不堆细节。\n"
-            "- 保持友好、口语化，先给结论再按需补充。"
+            "你现在处于「初始对话模式」（默认模式，等同普通聊天）。\n"
+            "- 这是「不在工作房间」的状态：只做普通交流、答疑、闲聊，回答简洁直接。\n"
+            "- 本模式下你**只有基础对话工具**（切换模式 mode.manage、查询工具说明 mcp.describe_tool、"
+            "收发消息 message.*）；**看不到、也无法调用任何设备 / 工作类 MCP**"
+            "（桌面、浏览器、安卓、文件、命令、任务、知识库、系统治理等）。\n"
+            "- 一旦需要真正干活，先判断属于哪类，再用 mode.manage(action=use, mode_key=...) 切换：\n"
+            "  · 有明确任务 / 目标要交付 → task 任务模式；\n"
+            "  · 讲解 / 教学 → learning 学习模式；\n"
+            "  · 排查 / 修复缺陷或故障 → fix 修复模式。\n"
+            "- 切到工作模式后，系统才会把对应的设备 / 工作 MCP 工具交给你——就像离开聊天、"
+            "走进工作间拿起工具再干活。若只是聊天、无需动手，保持本模式即可。"
         ),
     },
     {
@@ -82,6 +97,41 @@ BUILTIN_MODES: List[Dict[str, str]] = [
 
 _BUILTIN_KEYS = {m["mode_key"] for m in BUILTIN_MODES}
 
+# 「初始/对话」模式集合：默认，且视为「不在工作房间」——只留基础对话工具，收走设备/工作 MCP。
+# "chat" 是历史别名（旧版曾有独立 chat 模式，现并入 initial），一并按对话模式处理。
+CHAT_MODE_KEYS = {DEFAULT_MODE_KEY, "chat"}
+
+# 对话模式下仍保留的「系统自带」基础工具：切换模式 + 工具自省 + 收发消息。
+# 其余（设备端 desktop/browser/android、workspace、task、knowledge、admin… 全部工作类）在此模式收走。
+CHAT_MODE_TOOL_WHITELIST = {
+    "mode.manage",
+    "mcp.describe_tool",
+    "message.send_to_user",
+    "message.send_to_ai",
+}
+
+
+def resolve_current_mode_key(user_id: int, ai_config_id: Optional[int]) -> str:
+    """读取某 AI 的当前模式 key（只读；空 → 初始模式；旧 chat 归一为初始）。"""
+    if not ai_config_id:
+        return DEFAULT_MODE_KEY
+    with Session(engine) as session:
+        cfg = session.exec(
+            select(AssistantAIConfig).where(
+                AssistantAIConfig.user_id == user_id,
+                AssistantAIConfig.id == ai_config_id,
+            )
+        ).first()
+    key = str(getattr(cfg, "current_mode_key", "") or "").strip() if cfg else ""
+    if not key or key == "chat":
+        return DEFAULT_MODE_KEY
+    return key
+
+
+def is_chat_only_mode(user_id: int, ai_config_id: Optional[int]) -> bool:
+    """当前是否处于「初始 / 对话」模式（不在工作房间，应收走设备 / 工作 MCP）。只读。"""
+    return resolve_current_mode_key(user_id, ai_config_id) in CHAT_MODE_KEYS
+
 
 def _serialize(row: AgentMode) -> Dict[str, Any]:
     return {
@@ -108,14 +158,16 @@ def _slugify_key(name: str) -> str:
 # 播种 / 查询
 # ---------------------------------------------------------------------------
 def ensure_builtin_modes(user_id: int) -> None:
-    """幂等地为该 user 播种 4 个内置模式（仅补缺失，不覆盖用户已改的 prompt）。"""
+    """幂等地为该 user 播种 4 个内置模式（仅补缺失，不覆盖用户已改的 prompt）。
+
+    同时做一次性自愈：旧版独立的 ``chat`` 内置模式已并入 ``initial``，这里删除遗留的
+    ``chat`` 内置行，并把仍指向 ``chat`` 的 AI 归一到 ``initial``。
+    """
     with Session(engine) as session:
-        existing = {
-            r.mode_key
-            for r in session.exec(
-                select(AgentMode).where(AgentMode.user_id == user_id)
-            ).all()
-        }
+        rows = session.exec(
+            select(AgentMode).where(AgentMode.user_id == user_id)
+        ).all()
+        existing = {r.mode_key: r for r in rows}
         changed = False
         for idx, spec in enumerate(BUILTIN_MODES):
             if spec["mode_key"] in existing:
@@ -131,6 +183,20 @@ def ensure_builtin_modes(user_id: int) -> None:
                     sort_order=idx,
                 )
             )
+            changed = True
+        # 清理旧版 chat 内置模式（已合并进 initial），并把仍指向 chat 的 AI 归一到 initial。
+        legacy_chat = existing.get("chat")
+        if legacy_chat is not None and bool(legacy_chat.is_builtin):
+            session.delete(legacy_chat)
+            for cfg in session.exec(
+                select(AssistantAIConfig).where(
+                    AssistantAIConfig.user_id == user_id,
+                    AssistantAIConfig.current_mode_key == "chat",
+                )
+            ).all():
+                cfg.current_mode_key = DEFAULT_MODE_KEY
+                cfg.updated_at = time.time()
+                session.add(cfg)
             changed = True
         if changed:
             session.commit()
@@ -257,7 +323,7 @@ def delete_mode(user_id: int, mode_key: str) -> Dict[str, Any]:
         if not row:
             raise HTTPException(status_code=404, detail=f"mode not found: {key}")
         session.delete(row)
-        # 清理仍指向该模式的 AI，回退到无模式，避免注入时找不到模式。
+        # 清理仍指向该模式的 AI，回退到初始模式，避免注入时找不到模式。
         affected = session.exec(
             select(AssistantAIConfig).where(
                 AssistantAIConfig.user_id == user_id,
@@ -265,7 +331,7 @@ def delete_mode(user_id: int, mode_key: str) -> Dict[str, Any]:
             )
         ).all()
         for cfg in affected:
-            cfg.current_mode_key = ""
+            cfg.current_mode_key = DEFAULT_MODE_KEY
             cfg.updated_at = time.time()
             session.add(cfg)
         session.commit()
@@ -325,15 +391,29 @@ def effective_mode_prompt(user_id: int, ai_config_id: Optional[int]) -> Optional
         ).first()
         if not cfg:
             return None
-        key = str(getattr(cfg, "current_mode_key", "") or "").strip()
-        if not key:
-            return None
+        # 不存在「无模式」：空 / 旧 chat 均回退到初始模式。
+        key = str(getattr(cfg, "current_mode_key", "") or "").strip() or DEFAULT_MODE_KEY
+        if key == "chat":
+            key = DEFAULT_MODE_KEY
         mode = session.exec(
             select(AgentMode).where(
                 AgentMode.user_id == user_id,
                 AgentMode.mode_key == key,
             )
         ).first()
+    # 初始模式可能尚未播种（老用户首次访问前）：兜底用内置定义直接注入。
+    if not mode and key == DEFAULT_MODE_KEY:
+        spec = next((m for m in BUILTIN_MODES if m["mode_key"] == DEFAULT_MODE_KEY), None)
+        if spec:
+            return {
+                "mode_key": spec["mode_key"],
+                "name": spec["name"],
+                "description": spec.get("description", ""),
+                "prompt": spec["prompt"],
+                "is_builtin": True,
+                "sort_order": 0,
+                "updated_at": 0.0,
+            }
     if not mode or not str(mode.prompt or "").strip():
         return None
     return _serialize(mode)

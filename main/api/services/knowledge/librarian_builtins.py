@@ -522,8 +522,27 @@ def _intrinsic_personas_payload(user_id: int) -> Dict[str, Any]:
             .order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
         ).all()
 
+    # 可选模式清单（初始模式 + 4 场景模式 + 自定义），供前端为每个 AI 显示/切换其工作模式。
+    available_modes: List[Dict[str, str]] = []
+    mode_name_by_key: Dict[str, str] = {}
+    default_mode_key = "initial"
+    try:
+        from api.services.mcp import agent_mode_store
+
+        default_mode_key = agent_mode_store.DEFAULT_MODE_KEY
+        for m in agent_mode_store.list_modes(user_id):
+            key = str(m.get("mode_key") or "")
+            name = str(m.get("name") or "")
+            available_modes.append({"mode_key": key, "name": name})
+            mode_name_by_key[key] = name
+    except Exception:
+        available_modes = []
+        mode_name_by_key = {}
+
     agents: List[Dict[str, Any]] = []
     for cfg in rows:
+        # 不存在「无模式」：空值按初始模式显示。
+        mode_key = str(getattr(cfg, "current_mode_key", "") or "").strip() or default_mode_key
         agents.append({
             "id": cfg.id,
             "name": cfg.name,
@@ -536,12 +555,15 @@ def _intrinsic_personas_payload(user_id: int) -> Dict[str, Any]:
             "platform": cfg.platform,
             "generation": cfg.generation,
             "prompt": str(kb_store.effective_ai_prompt(cfg.user_id, cfg) or "").strip(),
+            "current_mode_key": mode_key,
+            "current_mode_name": mode_name_by_key.get(mode_key, ""),
             "updated_at": cfg.updated_at,
         })
 
     return {
-        "description": "当前用户下所有 AI 的固定人格 prompt 如下。",
+        "description": "当前用户下所有 AI 的固定人格 prompt 与工作模式如下。",
         "total": len(agents),
+        "available_modes": available_modes,
         "agents": agents,
     }
 
@@ -561,6 +583,8 @@ def _render_intrinsic_personas_body(payload: Dict[str, Any]) -> str:
         lines.append(f"- ID：{agent.get('id')}")
         lines.append(f"- 角色：{agent.get('role') or ''}")
         lines.append(f"- 模型：{agent.get('model') or ''}")
+        _mode_label = str(agent.get("current_mode_name") or agent.get("current_mode_key") or "未设置")
+        lines.append(f"- 工作模式：{_mode_label}")
         lines.append("")
         lines.append("### 人格 Prompt")
         lines.append("")

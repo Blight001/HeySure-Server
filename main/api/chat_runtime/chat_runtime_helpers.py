@@ -233,26 +233,26 @@ def build_runtime_system_prompt_and_tools(
             task_plan_flow_text,
         )
 
-    # 当前工作模式：按该 AI 的 current_mode_key 注入 [当前工作模式] 段（DB 为准，
-    # gateway 预览与 ai-runtime 两进程一致）。空 / 模式已删 → 不注入，向后兼容。
+    # 当前工作模式：不改写系统提示（切换模式只在工具结果里返回模式说明），但**决定工具门禁**。
+    # 默认「初始对话模式」视为「不在工作房间」：只保留系统自带的基础对话工具（切换模式 /
+    # 工具自省 / 收发消息），收走全部设备 / 工作 MCP；切到 task / learning / fix 等工作模式，
+    # 系统才把设备 MCP 交回。DB 为准（gateway 预览与 ai-runtime 两进程一致）。
     if ai_config_id is not None:
         try:
-            from api.services.mcp.agent_mode_store import effective_mode_prompt
-
-            mode = effective_mode_prompt(uid, ai_config_id)
-        except Exception:
-            mode = None
-        # 先剥离历史遗留的同名段，避免与切换/合并路径重复。
-        system_prompt = _strip_prompt_section(system_prompt, "当前工作模式")
-        if mode and str(mode.get("prompt") or "").strip():
-            mode_body = (
-                f"当前模式：{mode.get('name') or ''}（{mode.get('mode_key') or ''}）\n\n"
-                f"{str(mode.get('prompt') or '').strip()}\n\n"
-                "——先判断本轮工作环境是否仍匹配当前模式；若不匹配，用 "
-                "mode.manage(action=use, mode_key=...) 切换到更合适的模式"
-                "（内置：chat/task/learning/fix，或自定义模式），切换后按新模式行动。"
+            from api.services.mcp.agent_mode_store import (
+                is_chat_only_mode,
+                CHAT_MODE_TOOL_WHITELIST,
             )
-            system_prompt = _append_prompt_section(system_prompt, "当前工作模式", mode_body)
+
+            if is_chat_only_mode(uid, ai_config_id):
+                keep = set(CHAT_MODE_TOOL_WHITELIST) | set(MCP_INTROSPECTION_TOOLS)
+                effective_tool_allowlist = {
+                    tool for tool in effective_tool_allowlist if tool in keep
+                }
+        except Exception:
+            pass
+    # 这里仍剥离历史可能残留的 [当前工作模式] 段，确保系统提示保持干净、不被模式改写。
+    system_prompt = _strip_prompt_section(system_prompt, "当前工作模式")
 
     # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。
     system_prompt = _strip_prompt_section(system_prompt, "动态 MCP 说明")

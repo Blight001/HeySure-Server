@@ -118,14 +118,19 @@ def _mode_use(user_id: int, args: dict, ai_config_id: Optional[int] = None):
 
     result = store.set_current_mode(user_id, target_id, key)
     mode = result.get("mode") or {}
-    # 返回完整 prompt，让模型在本轮即可按新模式行动；同时它已持久化，后续轮由运行时注入。
+    # 只在工具结果里返回该模式的说明（description + prompt），由模型据此在对话中调整行为。
+    # 不改写人格 / 系统 prompt；current_mode_key 仅作当前模式的记录，供 UI 展示与查询。
     return {
         "success": True,
         "ai_config_id": result.get("ai_config_id"),
         "current_mode_key": result.get("current_mode_key"),
         "name": mode.get("name"),
+        "description": mode.get("description"),
         "prompt": mode.get("prompt"),
-        "note": "已切换工作模式。该模式 prompt 现已生效，请立即按其要求调整行为。",
+        "note": (
+            "已切换工作模式。以下 prompt 是该模式的说明，请在本次对话中据此调整行为；"
+            "它不会改写你的人格 / 系统提示，仅作为本轮起对话的行动指引。"
+        ),
     }
 
 
@@ -176,14 +181,14 @@ MODE_MANAGE_SCHEMA: Dict[str, Any] = {
                 "create 创建自定义模式（需 name+prompt）；"
                 "update 修改模式（需 mode_key，可改 name/description/prompt；内置模式也可改 prompt）；"
                 "delete 删除自定义模式（需 mode_key；内置模式不可删）；"
-                "use 把当前 AI 切换到某模式（需 mode_key），切换后该模式 prompt 立即生效。"
+                "use 把当前 AI 切换到某模式（需 mode_key），返回该模式说明供你据此调整行为（不改写系统提示）。"
             ),
         },
         "mode_key": {
             "type": "string",
             "description": (
                 "模式标识。get/update/delete/use 必填；create 可选（省略则按 name 自动生成）。"
-                "内置：chat=普通对话 / task=任务 / learning=学习 / fix=修复。"
+                "内置：initial=初始对话(默认，只聊天、无设备工具) / task=任务 / learning=学习 / fix=修复。"
             ),
         },
         "name": {"type": "string", "description": "create 必填 / update 可选：模式显示名。"},
