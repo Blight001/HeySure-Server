@@ -90,8 +90,8 @@ def ensure_presence_for_user(user_id) -> None:
         return
     _last_ensure_at[uid] = now
     try:
-        from api.devices.mcp_permissions import get_scope, set_scope
         from api.devices.presence import upsert_presence
+        from api.devices.mcp_permissions import reconcile_scope_with_capabilities
 
         device_id = device_id_for_user(uid)
         caps = capability_names()
@@ -104,11 +104,9 @@ def ensure_presence_for_user(user_id) -> None:
             online=True,
             tool_defs=tool_defs_map(),
         )
-        # 内置工坊的工具范围默认放开：绑定才是访问门槛，且 capabilities
-        # 已被限制在工坊命名空间内。仅在没有记录时写默认值，保留操作员
-        # 之后在前端做的收窄。
-        if get_scope(uid, device_id) is None:
-            set_scope(uid, device_id, caps, ai_config_id=None, device_type="workshop")
+        # Reconcile for workshop builtin (any device type policy): always sets
+        # full current caps so new MCPs auto-default checked/granted.
+        reconcile_scope_with_capabilities(uid, device_id, caps, ai_config_id=None, device_type="workshop")
         # 工具箱：只在新建 AI 时默认绑定（见 ai_config_routes / ai_service），
         # 之后完全尊重用户在作坊/AI配置面板的绑定/解绑操作，不再做全量自愈补绑。
         # 仅确保其 MCP scope 有默认记录（用户可在前台缩小范围）。

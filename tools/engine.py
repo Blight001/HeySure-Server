@@ -168,26 +168,23 @@ def enforce_toolbox_binding(tool_name: str, user_id: int, ai_config_id: Optional
 # 工具箱 MCP scope 默认与 defs（供 DeviceMcpScopeEditor 和默认行为使用）
 # ---------------------------------------------------------------------------
 def ensure_toolbox_scope_for_user(user_id) -> None:
-    """Ensure default full toolbox scope record exists for the user (idempotent best-effort).
+    """Ensure toolbox scope defaults to full current capabilities (idempotent).
 
-    Called during workshop presence ensure so that after binding a new AI, the
-    toolbox MCP permission editor has a baseline (user can narrow it).
+    Uses reconcile so that for toolbox (and on new MCP additions) the scope
+    always includes everything by default, consistent across all device types.
+    Called during workshop presence ensure.
     """
     try:
         uid = int(user_id)
     except (TypeError, ValueError):
         return
     try:
-        from api.devices.mcp_permissions import get_scope, set_scope
+        from api.devices.mcp_permissions import reconcile_scope_with_capabilities
+        tbid = toolbox_device_id_for_user(uid)
+        caps = toolbox_capability_names()
+        reconcile_scope_with_capabilities(uid, tbid, caps, ai_config_id=None, device_type="toolbox")
     except Exception:
-        return
-    tbid = toolbox_device_id_for_user(uid)
-    if get_scope(uid, tbid) is None:
-        try:
-            caps = set(toolbox_capability_names())
-            set_scope(uid, tbid, caps, ai_config_id=None, device_type="toolbox")
-        except Exception:
-            pass
+        pass
 
 
 def toolbox_tool_defs_map() -> Dict[str, Any]:
@@ -252,7 +249,7 @@ def toolbox_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int]
         tb_all = set()
 
     if scope is None:
-        # No scope saved yet: default to full set after bind (user narrows via 工具箱 MCP 权限)
+        # No scope saved yet: default to full (reconcile will populate on ensure/connect)
         return tb_all
 
     return tb_all & scope

@@ -48,10 +48,11 @@ def _find_connected_agent(device_id: str, user_id: int) -> Optional[dict]:
 
 def _scope_view(agent: dict, user_id: int) -> dict:
     """Capabilities + effective allow-list for a connected agent. Scope is keyed
-    per individual agent. Newly connected endpoint devices surface full
-    capabilities as allowed (so UI defaults to all checked). A missing
-    DeviceTypeMcpPermission row (never initialized) yields hasRecord=false.
-    Reconcile on register creates the row for persistence."""
+    per individual agent. Reconcile on (re)connect (for any device type) now
+    ensures the persisted scope row always contains the *full* live capabilities,
+    so UI + grants default to all checked (new MCPs auto-included on reconnect).
+    A missing row (very first before reconcile) yields hasRecord=false + full.
+    """
     device_type = device_type_of(agent)
     device_id = str(agent.get("id") or "")
     capabilities = sorted(agent_endpoint_tools(agent))
@@ -61,12 +62,8 @@ def _scope_view(agent: dict, user_id: int) -> dict:
     except (TypeError, ValueError):
         ai_config_id = None
     scope = get_scope(user_id, device_id) if device_id else None
-    # When no persisted scope row exists (first connect / before reconcile),
-    # surface the full live capabilities as "allowed". This makes the
-    # DeviceMcpScopeEditor (and other clients) default to all-checked for
-    # newly connected devices, matching the design intent and reconcile logic.
-    # Runtime dispatch (get_scope===None) still treats it as closed.
-    # hasRecord stays false so saves can distinguish "first time" vs explicit [].
+    # Reconcile ensures full for existing rows too (newly added MCPs appear).
+    # hasRecord=true after reconcile; UI falls back to caps only for truly new.
     if scope is None:
         allowed = capabilities
     else:
@@ -284,11 +281,11 @@ def get_agent_mcp_scope(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
-    """Endpoint MCP permission scope for one connected agent.
+    """Endpoint MCP permission scope for one connected agent (any type).
 
-    Returns the tools it advertises plus the currently-allowed subset. 404 when
-    the device is offline. For a newly connected (unbound) agent the scope row
-    is auto-created with every capability allowed."""
+    Returns the tools it advertises plus the currently-allowed subset (reconcile
+    on register ensures full live caps so new devices + new MCPs default checked).
+    404 when the device is offline."""
     user = get_current_user(authorization, session)
     agent = _find_connected_agent(device_id, user.id)
     if not agent:

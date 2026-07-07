@@ -555,7 +555,8 @@ def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
 
     1. Each agent's saved per-agent permission scope (``DeviceTypeMcpPermission``).
        No saved scope row (agent never connected) → closed for it.
-       On first connect a full scope is initialized automatically.
+       Reconcile on (re)connect now (re)sets full live capabilities for any type
+       (new MCPs auto-included by default on reconnect/register).
     2. The AI config's own ``mcp_tools`` allow-list: an endpoint tool ticked in
        the AI config is granted as soon as some online endpoint agent advertises
        it. This keeps the AI-config checkbox and the per-agent scope consistent,
@@ -580,7 +581,7 @@ def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
             live_caps |= caps
         # Each individual agent has its own MCP scope.
         # No saved row (never registered) → closed for that agent.
-        # Newly registered devices receive a full default scope on connect.
+        # Reconcile ensures full default (incl. new MCPs) on (re)connect for all types.
         scope = get_scope(user_id, device_id) if device_id else None
         if scope is None:
             continue

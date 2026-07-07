@@ -182,8 +182,9 @@ def register_agent_socket_events():
                     icon=agents[sid].get('icon') or '',
                 )
                 if owner_user_id is not None:
-                    # Best-effort first init (may see empty caps on very first register).
-                    # The post-push reconcile below will ensure full using actual tools.
+                    # Reconcile (re)sets to full current caps reported by the device
+                    # (for plugin devices this includes manage_card, save_cookies etc.).
+                    # New MCPs added later will be auto-included on reconnect/register.
                     reconcile_scope_with_capabilities(
                         owner_user_id,
                         device_id,
@@ -204,6 +205,7 @@ def register_agent_socket_events():
             from connector_runtime.dispatch.desktop_device_tools import (
                 device_type_of,
                 agent_endpoint_tool_defs,
+                agent_endpoint_tools,
             )
             from api.devices.live import push_device_dynamic_tools_to_sid
             from api.services.device_tools import device_workspace_tools as _dyn
@@ -224,25 +226,29 @@ def register_agent_socket_events():
                     logger.exception('Failed to seed dynamic MCP tools: %s', device_id)
                 await push_device_dynamic_tools_to_sid(owner_user_id, push_type, sid)
 
-                # Reconcile (or create) the per-device MCP scope using the *pushed*
-                # dynamic tools. The very first register often carries empty
-                # capabilities (dynamics not yet delivered). Using the payload
-                # here guarantees a full-allow row is created with the real
-                # tool surface for this device, so UI sees defaults checked.
+                # Reconcile using UNION of:
+                # - what this specific device just reported in its register (for
+                #   browser_automation plugin this includes intrinsic MCPs like
+                #   manage_card / save_cookies that are NOT in the dynamic catalog)
+                # - the dynamic workspace tools for the type
+                # This guarantees "全部勾选" (all checked) instead of only the
+                # dynamic "匹配" subset. Reconcile will set full scope to the union.
                 try:
                     from api.devices.mcp_permissions import reconcile_scope_with_capabilities
                     payload = _dyn.device_payload(owner_user_id, push_type)
                     pushed = [str(t.get('name') or '').strip() for t in (payload.get('tools') or []) if str(t.get('name') or '').strip()]
-                    if pushed:
+                    agent_caps = list(agent_endpoint_tools(agents[sid]) or [])
+                    full_caps = sorted(set(agent_caps) | set(pushed))
+                    if full_caps:
                         reconcile_scope_with_capabilities(
                             owner_user_id,
                             device_id,
-                            pushed,
+                            full_caps,
                             ai_config_id=claimed_ai,
                             device_type=push_type,
                         )
                 except Exception:
-                    logger.exception('Failed to reconcile MCP scope from pushed tools: %s', device_id)
+                    logger.exception('Failed to reconcile MCP scope (union with pushed): %s', device_id)
         except Exception:
             logger.exception('Failed to push dynamic MCP tools to device: %s', device_id)
         try:
