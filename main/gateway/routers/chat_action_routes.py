@@ -25,6 +25,7 @@ from .auth import get_current_user
 from ai_runtime.worker import notify_queue
 from api.core.settings import settings
 from api.services.model_presets import resolve_model_preset
+from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, _RUN_THREADS, router
 from api.services.chat.chat_persistence import _append_usage_snapshot, _rebuild_usage_snapshots, _save_message, _upsert_session
@@ -225,6 +226,52 @@ def start_chat_run(
     worker.start()
     _RUN_THREADS[run_id] = worker
     return {"run_id": run_id, "status": "queued", "user_message_id": user_msg.id}
+
+@router.post("/run/inject")
+def inject_chat_message(
+    req: dict,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Deliver a user message into an already-running chat run.
+
+    Instead of blocking until the whole run finishes, the message is persisted
+    as a pending user-inject and the running worker picks it up at its next step
+    boundary (after a deep-thinking turn or an MCP call). Returns
+    ``{"active": false}`` when there is no run to inject into, so the caller can
+    fall back to a normal send.
+    """
+    user = get_current_user(authorization, session)
+    ai_config_id = req.get("ai_config_id")
+    ai_kind = req.get("ai_kind", "assistant")
+    session_id = str(req.get("session_id") or "default")
+    session_name = str(req.get("session_name") or "未命名会话")
+    content = str(req.get("content") or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Message content is required")
+
+    active = chat_inject.find_live_active_run(
+        session,
+        user_id=user.id,
+        ai_config_id=ai_config_id,
+        ai_kind=ai_kind,
+        session_id=session_id,
+    )
+    if not active:
+        # Nothing in flight — let the caller send this as a normal new run.
+        return {"active": False}
+
+    user_msg = chat_inject.queue_pending_inject(
+        session,
+        user_id=user.id,
+        ai_config_id=ai_config_id,
+        ai_kind=ai_kind,
+        session_id=session_id,
+        session_name=session_name,
+        content=content,
+    )
+    return {"active": True, "run_id": active.run_id, "user_message_id": user_msg.id}
+
 
 @router.get("/run/status/{run_id}")
 async def get_chat_run(

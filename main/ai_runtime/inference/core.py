@@ -24,7 +24,7 @@ from api.runtime.http_client import ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
-from api.services.chat import conversation_compress
+from api.services.chat import chat_inject, conversation_compress
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
@@ -1333,6 +1333,20 @@ def _run_worker(
             finish_qq_stream(run_id, session_id=session_id)
         except Exception:
             pass
+        # Race backstop: a user-inject that landed after the loop's last drain
+        # but before this run committed "completed" would otherwise sit forever.
+        # resume_orphaned_injects self-guards (no live run + still pending) and
+        # spins up a continuation run to answer it.
+        try:
+            chat_inject.resume_orphaned_injects(
+                user_id=user_id,
+                ai_config_id=ai_config_id,
+                ai_kind=ai_kind,
+                session_id=session_id,
+                session_name=session_name,
+            )
+        except Exception:
+            logger.exception("resume orphaned user-injects failed")
         _stop_hb.set()
         _hb_thread.join(timeout=1.0)
 
@@ -1436,6 +1450,12 @@ def _run_worker_impl(
                 # the model context; the summary itself (conversation_summary)
                 # stays as a normal user message below.
                 if "compressed_away" in tags:
+                    continue
+                # A user message still waiting to be injected mid-run enters the
+                # conversation only through the step-boundary drain below, never
+                # via history — otherwise a run that rebuilt its context while the
+                # message was pending would double it (history + drain).
+                if chat_inject.PENDING_INJECT_TAG in tags:
                     continue
                 if m.role in ("user", "assistant"):
                     # Deliberately do NOT replay prior assistant turns' reasoning
@@ -1803,6 +1823,20 @@ def _run_worker_impl(
                             pending_ai_reply_message_id = str(_inbound.message_id or "").strip()
                         else:
                             pending_ai_reply_message_id = ""
+
+                # 用户中途插入：运行期间用户发来的消息不再等到整轮结束，
+                # 而是在每个步骤边界（一次深度思考或一次 MCP 调用之后）直接
+                # 注入到 convo，让 AI 在下一次推理前就看到它。消息已由
+                # /run/inject 落库，这里只追加到上下文，绝不重复保存。
+                try:
+                    _user_injects = chat_inject.pop_pending_injects(
+                        user_id, ai_config_id, ai_kind, session_id
+                    )
+                except Exception:
+                    _user_injects = []
+                    logger.exception("pending user-inject poll failed")
+                for _inject_text in _user_injects:
+                    convo.append({"role": "user", "content": _inject_text})
 
                 _append_missing_tool_responses(
                     convo,
@@ -2284,6 +2318,21 @@ def _run_worker_impl(
                             _nudge_text = phase_context.render_continue_phase_notice()
                         flow_nudges += 1
                         convo.append({"role": "user", "content": _nudge_text})
+                        _set_run_live_phase(run_id, "generating")
+                        continue
+                    # 收尾前最后一次排空：用户可能正是在 AI 输出这段最终回答时
+                    # 插入了新消息。此时不要结束本轮，直接把消息接上继续处理，
+                    # 兑现"一个深度思考/一次工具调用后就插入"的即时性。
+                    try:
+                        _final_injects = chat_inject.pop_pending_injects(
+                            user_id, ai_config_id, ai_kind, session_id
+                        )
+                    except Exception:
+                        _final_injects = []
+                        logger.exception("final pending user-inject drain failed")
+                    if _final_injects:
+                        for _inject_text in _final_injects:
+                            convo.append({"role": "user", "content": _inject_text})
                         _set_run_live_phase(run_id, "generating")
                         continue
                     if pending_ai_reply_message_id and assistant_text.strip() and ai_config_id is not None:
