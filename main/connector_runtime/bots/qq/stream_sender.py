@@ -30,13 +30,12 @@ Robustness contract — streaming must never lose or duplicate a message:
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from typing import List, Optional, Set
 
 from sqlmodel import Session, select
 
-from api.chat_runtime.mcp_parser import MCP_CALL_BLOCK_RE
+from api.chat_runtime.mcp_parser import strip_tool_call_blocks
 from api.chat_runtime.run_state import pop_run_stream, register_run_stream
 from api.database import engine
 from api.models import AssistantAIConfig, BotSessionRoute
@@ -73,10 +72,7 @@ def _visible(text: str) -> str:
     body = str(text or "")
     if not body:
         return ""
-    body = MCP_CALL_BLOCK_RE.sub("", body)
-    body = re.sub(r"<mcp[-_]call\b[\s\S]*$", "", body, flags=re.IGNORECASE)
-    body = re.sub(r"\n{3,}", "\n\n", body)
-    return body.strip()
+    return strip_tool_call_blocks(body)
 
 
 def is_stream_active(session_id: str) -> bool:

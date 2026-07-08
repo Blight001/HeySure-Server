@@ -736,7 +736,15 @@ def _extract_mcp_error(exc: Exception) -> str:
             if response_text:
                 return response_text
     text = str(exc or "").strip()
-    return text or exc.__class__.__name__
+    if text:
+        return text
+    # asyncio / concurrent.futures TimeoutError stringify to '' — surfacing just
+    # the class name ("TimeoutError") tells the model nothing. Give a hint that
+    # this is a wait-for-result timeout, not a tool-reported failure.
+    name = exc.__class__.__name__
+    if name in {"TimeoutError", "CancelledError"}:
+        return f"{name}: 工具调用等待结果超时（端侧任务可能仍在执行或耗时过长）"
+    return name
 
 def _build_mcp_display_result(tool: str, data: dict, ok: bool = True, error_message: str = "") -> str:
     result = data.get("result", data)

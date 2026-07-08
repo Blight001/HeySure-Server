@@ -6,7 +6,7 @@
 运行时在对话初始会确保模式说明作为上下文消息进入模型（模拟初始 mode.use 结果），
 后续仅通过工具结果传递。current_mode_key 主要用于工具门禁（initial 模式收走设备 MCP）。
 本工具属于「工具箱」设备（服务端固定工具、非图书馆绑定），因此所有绑定工具箱的
-AI 都可调用它来管理与切换自己的模式。默认内置 4 个模式：普通对话 / 任务 / 学习 / 修复。
+AI 都可调用它来管理与切换自己的模式。默认内置 3 个模式：普通对话 / 任务 / 学习。
 """
 
 from typing import Any, Dict, Optional
@@ -263,7 +263,7 @@ MODE_MANAGE_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "description": (
                 "模式标识。get/update/delete/use 必填；create 可选（省略则按 name 自动生成）。"
-                "内置：initial=初始对话(默认，只聊天、无设备工具) / task=任务 / learning=学习 / fix=修复。"
+                "内置：initial=初始对话(默认，只聊天、无设备工具) / task=任务 / learning=学习。"
             ),
         },
         "name": {"type": "string", "description": "create 必填 / update 可选：模式显示名。"},
@@ -273,7 +273,7 @@ MODE_MANAGE_SCHEMA: Dict[str, Any] = {
             "description": (
                 "create/update 可选：模式类型——是否允许调用设备端（桌面/浏览器/安卓）MCP。"
                 "false 的模式下设备端工具会被收走且用户无法在对话中勾选附带；"
-                "create 省略默认 true。内置 initial 为 false，task/learning/fix 为 true。"
+                "create 省略默认 true。内置 initial 为 false，task/learning 为 true。"
             ),
         },
         "prompt": {

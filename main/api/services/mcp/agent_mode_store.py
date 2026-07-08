@@ -8,11 +8,11 @@
 
 默认的「初始对话模式」（``initial``）视为「不在工作房间」：只保留系统自带的基础
 对话工具（切换模式 / 工具自省 / 收发消息），收走全部设备 / 工作 MCP；只有切到
-task / learning / fix 等工作模式，系统才把设备 MCP 交回——像离开聊天、走进工作间
-拿起工具再干活。旧版独立的 ``chat`` 模式已并入 ``initial``。
+task / learning 等工作模式，系统才把设备 MCP 交回——像离开聊天、走进工作间
+拿起工具再干活。旧版独立的 ``chat`` 模式已并入 ``initial``；``fix`` 修复模式已移除。
 
 本模块是 REST / MCP 工具 / 运行时门禁三方共用的唯一权威实现：
-- 4 个内置模式（初始对话 / 任务 / 学习 / 修复）按 user 幂等播种；
+- 3 个内置模式（初始对话 / 任务 / 学习）按 user 幂等播种；
 - 增删改查 + 切换（use）；
 - ``is_chat_only_mode`` / ``resolve_current_mode_key`` 供 chat_runtime 做工具门禁（只读、DB 为准）。
 """
@@ -82,8 +82,8 @@ BUILTIN_MODES: List[Dict[str, Any]] = [
         "mode_key": DEFAULT_MODE_KEY,
         "name": "初始对话模式",
         "allow_device_mcp": False,
-        "description": "默认模式：普通聊天，不进工作间——只有基础对话工具，看不到设备/工作 MCP；要干活先切到 task/learning/fix。",
-        "prompt": "你现在处于「初始对话模式」（默认模式，等同普通聊天）。\n- 这是「不在工作房间」的状态：只做普通交流、答疑、闲聊，回答简洁直接。\n- 本模式下你**只有基础对话工具**（切换模式 mode.manage、查询工具说明 mcp.describe_tool、收发消息 message.*）；**看不到、也无法调用任何设备 / 工作类 MCP**（桌面、浏览器、安卓、文件、命令、任务、知识库、系统治理等）。\n- 一旦需要真正干活，先判断属于哪类，再用 mode.manage(action=use, mode_key=...) 切换：\n  · 有明确任务 / 目标要交付 → task 任务模式；\n  · 讲解 / 教学 → learning 学习模式；\n  · 排查 / 修复缺陷或故障 → fix 修复模式。\n- 切到工作模式后，系统才会把对应的设备 / 工作 MCP 工具交给你——就像离开聊天、走进工作间拿起工具再干活。若只是聊天、无需动手，保持本模式即可。",
+        "description": "默认模式：普通聊天，不进工作间——只有基础对话工具，看不到设备/工作 MCP；要干活先切到 task/learning。",
+        "prompt": "你现在处于「初始对话模式」（默认模式，等同普通聊天）。\n- 这是「不在工作房间」的状态：只做普通交流、答疑、闲聊，回答简洁直接。\n- 本模式下你**只有基础对话工具**（切换模式 mode.manage、查询工具说明 mcp.describe_tool、收发消息 message.*）；**看不到、也无法调用任何设备 / 工作类 MCP**（桌面、浏览器、安卓、文件、命令、任务、知识库、系统治理等）。\n- 一旦需要真正干活，先判断属于哪类，再用 mode.manage(action=use, mode_key=...) 切换：\n  · 有明确任务 / 目标要交付 → task 任务模式；\n  · 讲解 / 教学 → learning 学习模式。\n- 切到工作模式后，系统才会把对应的设备 / 工作 MCP 工具交给你——就像离开聊天、走进工作间拿起工具再干活。若只是聊天、无需动手，保持本模式即可。",
     },
     {
         "mode_key": "task",
@@ -99,13 +99,6 @@ BUILTIN_MODES: List[Dict[str, Any]] = [
         "description": "用户想理解某个概念/技术时进入，强调讲解、拆解与循序渐进。",
         "prompt": "你现在处于「学习模式」。\n- 目标：帮助用户真正理解，而不是替他做完。\n- 由浅入深、循序渐进地讲解，用类比和具体例子降低理解门槛。\n- 拆解概念之间的关系，指出常见误区，并在关键处停下确认用户是否跟上。\n- 适度提问、给小练习，引导用户主动思考，而非直接抛答案。\n- 术语首次出现时先解释再使用。",
     },
-    {
-        "mode_key": "fix",
-        "name": "修复模式",
-        "allow_device_mcp": True,
-        "description": "排查与修复缺陷/故障时进入，强调定位根因、最小改动、验证回归。",
-        "prompt": "你现在处于「修复模式」。\n- 目标：定位并修复问题的根因，而非只压掉表面症状。\n- 先复现或收集证据（报错、日志、复现步骤），形成对根因的假设再动手。\n- 改动最小化、可回滚，避免顺手大改无关代码。\n- 修复后必须验证：说明如何确认问题已解决、是否引入回归。\n- 说清「原因 → 修改点 → 验证方式」，不确定处如实标注。",
-    },
 ]
 
 # 在模块加载时尝试用 doc/prompt 内容覆盖 prompt（如果存在），使默认值对应文档
@@ -120,6 +113,10 @@ _BUILTIN_KEYS = {m["mode_key"] for m in BUILTIN_MODES}
 # 「初始/对话」模式集合：默认，且视为「不在工作房间」——只留基础对话工具，收走设备/工作 MCP。
 # "chat" 是历史别名（旧版曾有独立 chat 模式，现并入 initial），一并按对话模式处理。
 CHAT_MODE_KEYS = {DEFAULT_MODE_KEY, "chat"}
+
+# 已下线的旧内置模式：``ensure_builtin_modes`` 会清理其内置行，并把仍指向它们的 AI
+# 归一到初始模式。chat=旧独立对话模式（已并入 initial）；fix=修复模式（作用不大已移除）。
+_LEGACY_REMOVED_BUILTIN_KEYS = {"chat", "fix"}
 
 # 对话模式下仍保留的「系统自带」基础工具：切换模式 + 工具自省 + 收发消息。
 # 其余（设备端 desktop/browser/android、workspace、task、knowledge、admin… 全部工作类）在此模式收走。
@@ -245,8 +242,8 @@ def ensure_builtin_modes(user_id: int, ai_config_id: Optional[int] = None) -> No
                 _scope_filter(select(AgentMode), user_id, None)
             ).all()
             for tpl in template_rows:
-                if tpl.mode_key == "chat" and bool(tpl.is_builtin):
-                    continue  # 旧版 chat 模式不再复制
+                if tpl.mode_key in _LEGACY_REMOVED_BUILTIN_KEYS and bool(tpl.is_builtin):
+                    continue  # 已下线的旧内置模式（chat / fix）不再复制
                 copied = AgentMode(
                     user_id=user_id,
                     ai_config_id=int(ai_config_id),
@@ -288,14 +285,18 @@ def ensure_builtin_modes(user_id: int, ai_config_id: Optional[int] = None) -> No
                     )
                 )
                 changed = True
-        # 清理旧版 chat 内置模式（已合并进 initial），并把仍指向 chat 的 AI 归一到 initial。
-        legacy_chat = existing.get("chat")
-        if legacy_chat is not None and bool(legacy_chat.is_builtin):
-            session.delete(legacy_chat)
+        # 清理已下线的旧内置模式（chat 已并入 initial；fix 修复模式已移除），并把仍指向
+        # 它们的 AI 归一到初始模式，避免注入 / 切换时找不到模式。只删内置行，用户自建的
+        # 同名自定义模式（is_builtin=False）保持不动。
+        for legacy_key in _LEGACY_REMOVED_BUILTIN_KEYS:
+            legacy_row = existing.get(legacy_key)
+            if legacy_row is None or not bool(legacy_row.is_builtin):
+                continue
+            session.delete(legacy_row)
             for cfg in session.exec(
                 select(AssistantAIConfig).where(
                     AssistantAIConfig.user_id == user_id,
-                    AssistantAIConfig.current_mode_key == "chat",
+                    AssistantAIConfig.current_mode_key == legacy_key,
                 )
             ).all():
                 cfg.current_mode_key = DEFAULT_MODE_KEY

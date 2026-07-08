@@ -273,7 +273,7 @@ def build_runtime_system_prompt_and_tools(
     # 初始对话时，推理会把当前模式的说明作为一条上下文消息注入（等效初始 mode.use 结果），
     # 保证模型从第一轮就看到模式 prompt。默认「初始对话模式」视为「不在工作房间」：
     # 只保留系统自带的基础对话工具（切换模式 / 工具自省 / 收发消息），收走全部设备 / 工作 MCP；
-    # 切到 task / learning / fix 等工作模式，系统才把设备 MCP 交回。DB 为准（gateway 预览与 ai-runtime 两进程一致）。
+    # 切到 task / learning 等工作模式，系统才把设备 MCP 交回。DB 为准（gateway 预览与 ai-runtime 两进程一致）。
     if ai_config_id is not None:
         try:
             from api.services.mcp.agent_mode_store import (

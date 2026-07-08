@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from sqlmodel import select
 
-from api.chat_runtime.mcp_parser import MCP_CALL_BLOCK_RE
+from api.chat_runtime.mcp_parser import strip_tool_call_blocks
 from .base import channel_for_session_id
 from .messaging import Recipient, dispatcher
 from .registry import iter_bots
@@ -38,10 +38,7 @@ def _visible_content(message: "ChatMessage") -> str:
     content = str(message.content or "")
     if not content:
         return ""
-    content = MCP_CALL_BLOCK_RE.sub("", content)
-    content = re.sub(r"<mcp[-_]call\b[\s\S]*$", "", content, flags=re.IGNORECASE)
-    content = re.sub(r"\n{3,}", "\n\n", content)
-    return content.strip()
+    return strip_tool_call_blocks(content)
 
 
 def _is_ai_error_notice(message: "ChatMessage") -> bool:

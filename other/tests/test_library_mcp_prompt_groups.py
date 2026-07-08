@@ -1,7 +1,11 @@
 import json
 
 from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
-from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS, clamp_tools_json
+from mcp_runtime.mcp.permissions import (
+    LIBRARY_BOUND_TOOLS,
+    clamp_tools_json,
+    effective_allowed_for_tier,
+)
 
 
 class _User:
@@ -30,6 +34,23 @@ def test_clamp_tools_json_keeps_library_bound_tools_despite_role_policy():
         clamp_tools_json(_User(), "digital_member_member", requested)
     )
     assert set(clamped) == set(LIBRARY_BOUND_TOOLS)
+
+
+def test_mode_manage_allowed_despite_restrictive_role_policy():
+    """基础对话控制工具 mode.manage 不受角色策略白名单收敛：即使管理员保存的
+    per-role 策略里没有它，运行时天花板也必须放行——否则用户无法在对话「+」面板
+    切换模式（前端走同一条 /api/mcp/call 的角色天花板校验）。"""
+    from mcp_runtime.mcp import registry
+
+    names = {
+        str(t.get("name") or "").strip()
+        for t in registry.list_tools()
+        if str(t.get("name") or "").strip()
+    }
+    assert "mode.manage" in names  # 前提：确是已注册工具
+    allowed = effective_allowed_for_tier(_User(), "digital_member_member", names)
+    assert "mode.manage" in allowed
+    assert "mcp.describe_tool" in allowed
 
 
 def test_build_prompt_tool_groups_includes_governance_tools(monkeypatch):

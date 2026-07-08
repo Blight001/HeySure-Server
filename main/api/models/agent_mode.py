@@ -37,7 +37,7 @@ class AgentMode(SQLModel, table=True):
     prompt: str = Field(default="")
     # 模式类型：是否允许调用设备端（桌面 / 浏览器 / 安卓）MCP。
     # False = 对话/纯服务端模式：运行时收走设备端 MCP，前端对话里设备工具组置灰不可勾选。
-    # 内置 initial 为 False，task / learning / fix 与自定义模式默认 True。
+    # 内置 initial 为 False，task / learning 与自定义模式默认 True。
     allow_device_mcp: bool = Field(default=True)
     is_builtin: bool = Field(default=False)
     sort_order: int = Field(default=100)

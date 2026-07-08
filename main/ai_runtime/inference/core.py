@@ -463,6 +463,40 @@ async def _dispatch_endpoint_via_runtime(
             await _asyncio.sleep(poll_interval)
 
 
+# Endpoint tools that intrinsically run for minutes (browser/desktop
+# automation "run" waits on page loads, retries, and even email verification
+# codes — the browser card's wait_verification_code step alone defaults to
+# 300s). The 120s default poll deadline guarantees a premature TimeoutError
+# for these, so give them a much larger default window. A live device that
+# accepted the task keeps working; a disconnected one fails fast upstream
+# ("Agent not connected"), so the longer window only applies to real work.
+_LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT = 900
+_ENDPOINT_DISPATCH_TIMEOUT_CAP = 1800
+
+
+def _endpoint_dispatch_timeout(tool: str, arguments: dict) -> int:
+    """Resolve the result-wait timeout (seconds) for an endpoint-agent tool.
+
+    Priority: an explicit ``args.timeout_seconds`` (the model can extend a
+    known-slow call) > a per-tool long-run default > the global 120s default.
+    Always clamped to a sane ceiling so a hung device can't wedge the run
+    indefinitely.
+    """
+    args = arguments if isinstance(arguments, dict) else {}
+    raw = args.get("timeout_seconds")
+    if raw is not None:
+        try:
+            return max(5, min(int(raw), _ENDPOINT_DISPATCH_TIMEOUT_CAP))
+        except (TypeError, ValueError):
+            pass
+    action = str(args.get("action") or "").strip().lower()
+    # manage_card run/execute is the long browser-automation path; legacy alias
+    # run_card behaves the same. Desktop long tasks can extend via timeout_seconds.
+    if (tool == "manage_card" and action in {"run", "execute"}) or tool == "run_card":
+        return _LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT
+    return 120
+
+
 async def _call_mcp_or_endpoint_tool(
     tool: str,
     user_id: int,
@@ -486,12 +520,14 @@ async def _call_mcp_or_endpoint_tool(
         # device_dispatch_internal). In the monolith api_gateway_url is empty and
         # we dispatch in-process below.
         agent_host_url = settings.api_gateway_url
+        dispatch_timeout = _endpoint_dispatch_timeout(tool, arguments)
         if agent_host_url:
             return {
                 "tool": tool,
                 "destructive": True,
                 "result": await _dispatch_endpoint_via_runtime(
-                    agent_host_url, tool, user_id, arguments, ai_config_id
+                    agent_host_url, tool, user_id, arguments, ai_config_id,
+                    timeout_seconds=dispatch_timeout,
                 ),
             }
         return {
@@ -502,6 +538,7 @@ async def _call_mcp_or_endpoint_tool(
                 ai_config_id=ai_config_id,
                 tool=tool,
                 args=arguments,
+                timeout_seconds=dispatch_timeout,
             ),
         }
     # Web search is a direct outbound API call. Keep it in-process so an
@@ -2355,7 +2392,16 @@ def _run_worker_impl(
                         else:
                             _set_run_live_phase(run_id, "waiting_mcp", split_tool)
                             try:
-                                item_result = run_async(_call_mcp_or_endpoint_tool(split_tool, user_id, arguments, ai_config_id))
+                                # Same bridge-timeout widening as the single-tool path below:
+                                # endpoint-agent tools may run for minutes; let their inner
+                                # result-wait deadline govern instead of the 120s bridge cap.
+                                _split_bridge_timeout = None
+                                if is_endpoint_agent_tool(split_tool):
+                                    _split_bridge_timeout = _endpoint_dispatch_timeout(split_tool, arguments) + 30
+                                item_result = run_async(
+                                    _call_mcp_or_endpoint_tool(split_tool, user_id, arguments, ai_config_id),
+                                    timeout=_split_bridge_timeout,
+                                )
                                 endpoint_failed, endpoint_error = _tool_result_failed(item_result)
                                 if endpoint_failed:
                                     item_failed = True
@@ -2528,7 +2574,20 @@ def _run_worker_impl(
                 tool_failed = False
                 tool_error = ""
                 try:
-                    tool_result = run_async(_call_mcp_or_endpoint_tool(tool, user_id, arguments, ai_config_id))
+                    # The async bridge caps every tool call at _DEFAULT_TIMEOUT (120s)
+                    # and, when it fires, raises a bare concurrent.futures.TimeoutError
+                    # that surfaces to the model as just "TimeoutError". Endpoint-agent
+                    # tools (browser/desktop "run") legitimately run for minutes, so give
+                    # the bridge a window past their own result-wait deadline — the inner
+                    # deadline then wins and returns a structured, readable result (and the
+                    # device has time to finish and send back the full execution trace).
+                    _bridge_timeout = None
+                    if is_endpoint_agent_tool(tool):
+                        _bridge_timeout = _endpoint_dispatch_timeout(tool, arguments) + 30
+                    tool_result = run_async(
+                        _call_mcp_or_endpoint_tool(tool, user_id, arguments, ai_config_id),
+                        timeout=_bridge_timeout,
+                    )
                     endpoint_failed, endpoint_error = _tool_result_failed(tool_result)
                     if endpoint_failed:
                         tool_failed = True
