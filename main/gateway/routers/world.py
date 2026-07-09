@@ -108,10 +108,24 @@ async def world_snapshot(
             if not device_id or device_id in online_ids:
                 continue
             device_type = str(row.device_type or "").strip()
+            try:
+                from api.devices.presence import device_remark_value, effective_device_icon
+
+                icon = effective_device_icon(row)
+                remark = device_remark_value(getattr(row, "remark", ""))
+                icon_override = str(getattr(row, "icon_override", "") or "").strip()
+            except Exception:
+                icon = str(getattr(row, "icon", "") or "").strip()
+                remark = ""
+                icon_override = ""
             agents.append({
                 "id": device_id,
-                "name": device_id,
-                "platform": device_type,
+                "name": str(row.name or "").strip() or device_id,
+                "platform": str(row.platform or "").strip() or device_type,
+                "deviceType": device_type,
+                "icon": icon,
+                "iconOverride": icon_override,
+                "remark": remark,
                 "isWindowsDesktop": device_type == "desktop",
                 "isBrowserExtension": device_type == "browser",
                 "isAndroid": device_type == "android",

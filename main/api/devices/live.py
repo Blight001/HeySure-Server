@@ -30,6 +30,14 @@ def connected_agent_rows_for_user(user_id: int):
         if _positive_int(agent.get("userId") or agent.get("user_id")) == uid
     ]
     try:
+        from api.devices.presence import apply_display_overrides, display_overrides_for_user
+
+        live_ids = {str(row.get("id") or "").strip() for row in rows}
+        overrides = display_overrides_for_user(uid, live_ids)
+        rows = [apply_display_overrides(row, overrides) for row in rows]
+    except Exception:
+        logger.exception("failed to apply device display overrides user=%s", uid)
+    try:
         from tools import engine as toolbox_engine
         from library import engine as workshop_engine
 

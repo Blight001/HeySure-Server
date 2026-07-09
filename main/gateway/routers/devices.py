@@ -122,6 +122,11 @@ class DeviceBindRequest(BaseModel):
     aiConfigId: Optional[int] = None
 
 
+class DeviceDisplayRequest(BaseModel):
+    remark: str = ""
+    icon: str = ""
+
+
 @router.post("/bind")
 async def bind_agent_ai(
     payload: DeviceBindRequest,
@@ -176,6 +181,74 @@ async def bind_agent_ai(
 
     await emit_agent_list_for_user(user.id)
     return {"ok": True, "deviceId": device_id, "aiConfigId": stored}
+
+
+@router.put("/{device_id}/display")
+async def update_device_display(
+    device_id: str,
+    payload: DeviceDisplayRequest,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Persist operator-authored display settings for one endpoint device.
+
+    These settings are separate from the values reported in ``device:register``
+    so reconnects keep the user's remark/icon choice.
+    """
+    user = get_current_user(authorization, session)
+    aid = (device_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="deviceId required")
+    try:
+        from library import engine as workshop_engine
+        from tools import engine as toolbox_engine
+
+        if workshop_engine.is_builtin_workshop_device_id(aid) or aid == toolbox_engine.toolbox_device_id_for_user(user.id):
+            raise HTTPException(status_code=400, detail="系统内置作坊不支持自定义显示")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    agent = _find_connected_agent(aid, user.id)
+    row = session.exec(
+        select(DevicePresence).where(
+            DevicePresence.user_id == user.id,
+            DevicePresence.device_id == aid,
+        ).order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
+    ).first()
+    if not row:
+        if not agent:
+            raise HTTPException(status_code=404, detail="设备记录不存在")
+        row = DevicePresence(
+            user_id=user.id,
+            device_id=aid,
+            device_type=device_type_of(agent) or "custom",
+            name=str(agent.get("name") or "").strip(),
+            platform=str(agent.get("platform") or "").strip(),
+            icon=str(agent.get("icon") or "").strip(),
+            online=True,
+        )
+        session.add(row)
+    device_type = str(row.device_type or device_type_of(agent) or "").strip()
+    if device_type in ("workshop", "toolbox"):
+        raise HTTPException(status_code=400, detail="系统内置作坊不支持自定义显示")
+
+    from api.devices.presence import device_remark_value, effective_device_icon, normalize_device_icon
+
+    row.remark = device_remark_value(payload.remark)
+    row.icon_override = normalize_device_icon(payload.icon)
+    row.updated_at = time.time()
+    session.add(row)
+    session.commit()
+    await emit_agent_list_for_user(user.id)
+    return {
+        "ok": True,
+        "deviceId": aid,
+        "remark": row.remark,
+        "icon": effective_device_icon(row),
+        "iconOverride": row.icon_override,
+    }
 
 
 @router.delete("/{device_id}")

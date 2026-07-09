@@ -53,6 +53,16 @@ def normalize_device_icon(value) -> str:
     return ""
 
 
+def device_remark_value(value) -> str:
+    """Normalize the operator-authored display remark."""
+    return str(value or "").strip()[:64]
+
+
+def effective_device_icon(row: DevicePresence) -> str:
+    """User override wins; otherwise keep the device-reported icon."""
+    return str(getattr(row, "icon_override", "") or getattr(row, "icon", "") or "").strip()
+
+
 def _int(value) -> Optional[int]:
     try:
         if value in (None, "", 0, "0"):
@@ -110,6 +120,52 @@ def _load_presence_rows(session: Session, device_id: str):
         .where(DevicePresence.device_id == device_id)
         .order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
     ).all()
+
+
+def display_overrides_for_user(user_id, device_ids: Optional[Set[str]] = None) -> Dict[str, dict]:
+    """User-owned UI customizations keyed by ``device_id``.
+
+    Returned values already contain the effective icon, so callers can simply
+    merge them into live socket rows before emitting ``device:list``.
+    """
+    uid = _int(user_id)
+    if uid is None:
+        return {}
+    wanted = {str(x).strip() for x in (device_ids or set()) if str(x).strip()}
+    out: Dict[str, dict] = {}
+    with Session(engine) as session:
+        rows = session.exec(
+            select(DevicePresence)
+            .where(DevicePresence.user_id == uid)
+            .order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
+        ).all()
+        for row in rows:
+            device_id = str(row.device_id or "").strip()
+            if not device_id or device_id in out:
+                continue
+            if wanted and device_id not in wanted:
+                continue
+            out[device_id] = {
+                "remark": device_remark_value(getattr(row, "remark", "")),
+                "icon": effective_device_icon(row),
+                "iconOverride": str(getattr(row, "icon_override", "") or "").strip(),
+            }
+    return out
+
+
+def apply_display_overrides(row: dict, overrides: Dict[str, dict]) -> dict:
+    device_id = str(row.get("id") or row.get("deviceId") or "").strip()
+    if not device_id:
+        return row
+    display = overrides.get(device_id)
+    if not display:
+        return row
+    out = dict(row)
+    out["remark"] = display.get("remark") or ""
+    if display.get("icon"):
+        out["icon"] = display.get("icon")
+    out["iconOverride"] = display.get("iconOverride") or ""
+    return out
 
 
 def upsert_presence(
@@ -407,7 +463,9 @@ def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict
                 "platform": str(row.platform or "").strip(),
                 "aiConfigId": row.ai_config_id,
                 "deviceType": device_type,
-                "icon": str(getattr(row, "icon", "") or "").strip(),
+                "icon": effective_device_icon(row),
+                "iconOverride": str(getattr(row, "icon_override", "") or "").strip(),
+                "remark": device_remark_value(getattr(row, "remark", "")),
                 "isWindowsDesktop": device_type == "desktop",
                 "isBrowserExtension": device_type == "browser",
                 "isAndroid": device_type == "android",

@@ -37,6 +37,11 @@ class DevicePresence(SQLModel, table=True):
     # ``/device_png/N.webp`` or an absolute http(s) URL. Empty = the web falls
     # back to its built-in per-type rendering.
     icon: str = Field(default="")
+    # Operator-authored display customization from the Workshop panel. The
+    # device may keep reporting its own name/icon on reconnect; these fields
+    # remain user-owned and override only the UI projection.
+    remark: str = Field(default="")
+    icon_override: str = Field(default="")
     # JSON array of the agent's (type-filtered) endpoint tool names.
     capabilities_json: str = Field(default="[]")
     # JSON object mapping each reported tool name to its self-described
