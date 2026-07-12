@@ -6,8 +6,6 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AssistantAIConfig, User
-from api.services.access.governance import assert_can_manage_or_legacy
-from mcp_runtime.mcp.permissions import ROLE_ASSISTANT_ADMIN, ROLE_MANAGER
 
 
 SYSTEM_PROMPT_FIELDS = {
@@ -253,11 +251,6 @@ def _prompt_write_ai(user_id: int, args: dict, ai_config_id: Optional[int] = Non
         raise HTTPException(status_code=400, detail="target_ai_config_id is required")
     with Session(engine) as session:
         cfg = _get_owned_ai_config(session, user_id, int(target_id))
-        if ai_config_id is not None and int(ai_config_id) != int(cfg.id or 0):
-            caller = _get_owned_ai_config(session, user_id, int(ai_config_id))
-            denial = assert_can_manage_or_legacy(session, user_id, caller, cfg)
-            if denial:
-                raise HTTPException(status_code=403, detail=denial)
         # 行编辑基于文件真相源（缺失时为空人格）。
         from api.services.knowledge import kb_store
 
@@ -351,9 +344,9 @@ def _prompt_write_system(user_id: int, args: dict, ai_config_id: Optional[int] =
 _PROMPT_ACTIONS = {
     "list_targets": (_prompt_list_targets, None),
     "read_ai": (_prompt_read_ai, None),
-    "write_ai": (_prompt_write_ai, ROLE_MANAGER),
-    "read_system": (_prompt_read_system, ROLE_MANAGER),
-    "write_system": (_prompt_write_system, ROLE_ASSISTANT_ADMIN),
+    "write_ai": (_prompt_write_ai, None),
+    "read_system": (_prompt_read_system, None),
+    "write_system": (_prompt_write_system, None),
 }
 
 _PROMPT_ACTION_ALIASES = {
@@ -368,13 +361,9 @@ def _prompt_manage(user_id: int, args: dict, ai_config_id: Optional[int] = None)
     """Unified prompt tool. Dispatch by ``action`` to the concrete handler.
 
     Folds ``prompt.{list_targets,read_ai,write_ai,read_system,write_system}``
-    behind one ``action`` parameter. Per-action minimum role is re-enforced here:
-    reading an AI's own prompt is open to every tier, while AI-prompt writes are
-    manager+, system-prompt reads are manager+, and system-prompt writes are
-    assistant_admin+.
+    behind one ``action`` parameter. Library binding is enforced by the central
+    registry; every action is available to a bound AI regardless of role.
     """
-    from mcp_runtime.mcp.permissions import enforce_min_role
-
     raw = str((args or {}).get("action") or "").strip().lower()
     action = _PROMPT_ACTION_ALIASES.get(raw, raw)
     if not action:
@@ -385,9 +374,7 @@ def _prompt_manage(user_id: int, args: dict, ai_config_id: Optional[int] = None)
             status_code=400,
             detail=f"unsupported action: {action}. 可用: {', '.join(sorted(_PROMPT_ACTIONS))}",
         )
-    handler, min_role = spec
-    if min_role:
-        enforce_min_role(user_id, ai_config_id, min_role)
+    handler, _min_role = spec
     return handler(user_id, args or {}, ai_config_id)
 
 
@@ -401,9 +388,9 @@ PROMPT_MANAGE_SCHEMA: Dict[str, Any] = {
                 "操作类型："
                 "list_targets 列出可改写的 AI 人格 prompt 目标与系统 prompt 键；"
                 "read_ai 读取某 AI 配置的基础人格 prompt（省略 target_ai_config_id 读当前 AI）；"
-                "write_ai 按行编辑某 AI 配置的人格 prompt（需管理者+）；"
-                "read_system 读取全局/系统 prompt 模板（需管理者+）；"
-                "write_system 按行编辑全局/系统 prompt 模板（需辅助管理员+）。"
+                "write_ai 按行编辑某 AI 配置的人格 prompt；"
+                "read_system 读取全局/系统 prompt 模板；"
+                "write_system 按行编辑全局/系统 prompt 模板。"
             ),
         },
         "target_ai_config_id": {"type": "integer", "description": "read_ai/write_ai：目标 AI 配置 id；省略则使用当前 AI。"},

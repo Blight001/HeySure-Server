@@ -33,7 +33,7 @@ def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_
     """组装数字社会成员名单（ID / 名字 / 角色），注入系统 prompt。
 
     message.send+to+ai 需要对方的 ai_config_id，但普通成员没有任何工具
-    可以查询同伴的 ID（admin.manage 门槛是辅助管理员+图书馆绑定），
+    可以查询同伴的 ID（admin.manage 门槛是图书馆绑定），
     导致 AI 之间无法互相通信。名单只从 DB 读取，保证 gateway 预览与
     ai-runtime 两进程组装结果一致。
     """

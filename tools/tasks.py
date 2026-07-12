@@ -12,7 +12,6 @@ from api.database import engine
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatRun, ChatSession
 from api.services.chat.chat_media import delete_message_media
 from connector_runtime.dispatch.device_dispatch import get_run_session_context
-from api.services.access.governance import assert_can_manage_or_legacy
 from api.services.tasks import task_plan as plan_service
 from api.services.tasks.task_schedule import (
     AT_KEYS as _SCHEDULE_AT_KEYS,
@@ -33,7 +32,6 @@ from api.services.tasks.task_schedule import (
 from api.services.tasks.task_system import extract_task_payload
 from api.common.value_utils import safe_json_obj, to_bool
 from mcp_runtime.mcp.core import get_project_root
-from mcp_runtime.mcp.permissions import ROLE_MANAGER
 
 _FINISHED_STATUSES = {"completed", "cancelled", "stopped", "error"}
 _ACTIVE_STATUSES = {"queued", "running", "paused"}
@@ -449,8 +447,6 @@ def _resolve_task_runtime_owner(
         raise HTTPException(status_code=404, detail="AI config not found")
 
     caller_role = str(caller_cfg.ai_role or "").strip()
-    caller_member_role = str(caller_cfg.digital_member_role or "").strip().lower()
-
     raw_target = args.get("target_ai_config_id")
     if raw_target is None:
         raw_target = args.get("target_config_id")
@@ -473,14 +469,9 @@ def _resolve_task_runtime_owner(
         return target_cfg
 
     if caller_role == "digital_member":
-        # A manager member may fan out subtasks to other members (orchestrator mode),
-        # but only to members it is authorized to manage (governance tree).
-        if caller_member_role == "manager" and raw_target is not None:
-            target_cfg = _resolve_target(raw_target)
-            denial = assert_can_manage_or_legacy(session, user_id, caller_cfg, target_cfg)
-            if denial:
-                raise HTTPException(status_code=403, detail=denial)
-            return target_cfg
+        # 图书馆绑定是唯一权限门槛；普通成员也可把任务投递给账号内任意数字成员。
+        if raw_target is not None:
+            return _resolve_target(raw_target)
         return caller_cfg
 
     if caller_role != "assistant_admin":
@@ -839,12 +830,9 @@ def _task_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
     Folds ``task.{create,list,update,delete}`` behind one ``action`` parameter.
     The phased todo flow (todo.manage create/edit/delete)
     is separate because the task runtime drives the plan boundary.
-    Per-action minimum role is re-enforced here so members keep read-only access
-    (``list``) while orchestration (``create``/``update``/``delete``) stays
-    manager+.
+    Library binding is the only authorization boundary; bound members may use
+    every action regardless of role.
     """
-    from mcp_runtime.mcp.permissions import ROLE_MANAGER, enforce_min_role
-
     raw = str((args or {}).get("action") or "").strip().lower()
     action = _TASK_ACTION_ALIASES.get(raw, raw)
     if not action:
@@ -855,18 +843,16 @@ def _task_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             status_code=400,
             detail=f"unsupported action: {action}. 可用: {', '.join(sorted(_TASK_ACTIONS))}",
         )
-    handler, min_role = spec
-    if min_role:
-        enforce_min_role(user_id, ai_config_id, min_role)
+    handler, _min_role = spec
     return handler(user_id, args or {}, ai_config_id)
 
 
 # Action → (handler, minimum role). ``None`` role means available to every tier.
 _TASK_ACTIONS = {
     "list": (_task_list, None),
-    "create": (_task_create, ROLE_MANAGER),
-    "update": (_task_update, ROLE_MANAGER),
-    "delete": (_task_delete, ROLE_MANAGER),
+    "create": (_task_create, None),
+    "update": (_task_update, None),
+    "delete": (_task_delete, None),
 }
 
 _TASK_ACTION_ALIASES = {
@@ -885,9 +871,9 @@ TASK_MANAGE_SCHEMA: Dict[str, Any] = {
             "description": (
                 "操作类型："
                 "list 列出任务（默认进行中；current_only/include_history/history_only/status 可调整范围）；"
-                "create 创建任务（需管理者+，支持 immediate/scheduled/recurring）；"
-                "update 接管更新任务标题/说明/优先级/状态/调度（需管理者+）；"
-                "delete 彻底删除任务并清理其会话（需管理者+）。"
+                "create 创建任务（支持 immediate/scheduled/recurring）；"
+                "update 接管更新任务标题/说明/优先级/状态/调度；"
+                "delete 彻底删除任务并清理其会话。"
                 "注意：长动作分阶段执行统一用 todo.manage；先 knowledge.search 检索经验，再 action=create 建计划，阶段结束用 action=edit 更新，最后阶段更新后系统自动收尾。"
             ),
         },
@@ -930,7 +916,7 @@ TASK_MANAGE_SCHEMA: Dict[str, Any] = {
         "schedule_end_at": {"type": ["number", "string"], "description": "循环截止时间，Unix 秒或带时区 ISO-8601。"},
         "schedule_run_immediately": {"type": "boolean", "description": "recurring 是否首轮立即执行。"},
         "template_id": {"type": "string", "description": "create：可选模板 id。"},
-        "target_ai_config_id": {"type": "integer", "description": "assistant_admin/主管代理投递的目标数字成员 AI 配置 id。"},
+        "target_ai_config_id": {"type": "integer", "description": "可选，投递任务的目标数字成员 AI 配置 id。"},
     },
     "required": ["action"],
 }

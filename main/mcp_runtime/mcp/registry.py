@@ -158,7 +158,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
             "任务管理统一工具（任务=定时/无人值守、在独立会话中运行的后台工作）："
             "用 action 选择 list 列出 / create 创建 / update 接管更新 / delete 删除。"
             "本工具属于图书馆 MCP，调用 AI 必须已绑定图书馆。"
-            "create/update/delete 需管理者及以上。"
+            "绑定后所有身份均可执行全部操作。"
             "复杂长动作用 todo.manage 创建和推进计划。"
         ),
         input_schema=TASK_MANAGE_SCHEMA,
@@ -232,7 +232,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         description=(
             "知识库统一工具：用 action 操作图书馆里的传承思想与内置知识类目——"
             "list_thoughts/get_thought/create_thought/edit_thought/delete_thought、install_skill_package、"
-            "read_*/update_* 各内置类目。需要该 AI 已绑定图书馆；写操作按角色受限。"
+            "read_*/update_* 各内置类目。需要该 AI 已绑定图书馆；绑定后所有身份均可读写。"
         ),
         input_schema=KNOWLEDGE_MANAGE_SCHEMA,
         handler=_knowledge_manage,
@@ -314,8 +314,8 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         name="prompt.manage",
         description=(
             "Prompt 统一工具：用 action 选择 list_targets 列目标 / read_ai 读 AI 人格 prompt / "
-            "write_ai 改 AI 人格 prompt（需管理者+）/ read_system 读系统 prompt（需管理者+）/ "
-            "write_system 改系统 prompt（需辅助管理员+）。prompt 正文存放在 KnowledgeBase 的 md 文件里。"
+            "write_ai 改 AI 人格 prompt / read_system 读系统 prompt / write_system 改系统 prompt。"
+            "需要该 AI 已绑定图书馆，绑定后不区分身份。prompt 正文存放在 KnowledgeBase 的 md 文件里。"
         ),
         input_schema=PROMPT_MANAGE_SCHEMA,
         handler=_prompt_manage,

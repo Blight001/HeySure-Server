@@ -1,8 +1,8 @@
 """``knowledge.manage`` — unified knowledge-base (library) tool.
 
 Dispatches ``action`` to built-in knowledge handlers (传承思想 / 内置技能 /
-内置人格 / 系统 prompt). Library binding is enforced at registry call time;
-per-action minimum roles are re-checked here (same pattern as ``prompt.manage``).
+内置人格 / 系统 prompt). Library binding is enforced at registry call time
+and is the only authorization boundary for these actions.
 """
 
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -11,12 +11,6 @@ from fastapi import HTTPException
 
 from library import handlers as knowledge_handlers
 
-from mcp_runtime.mcp.permissions import (
-    ROLE_ASSISTANT_ADMIN,
-    ROLE_MANAGER,
-    enforce_min_role,
-)
-
 KnowledgeHandler = Callable[[int, Dict[str, Any], Optional[int]], Any]
 
 # action → (handler, minimum role). ``None`` role = member floor.
@@ -24,17 +18,17 @@ _KNOWLEDGE_ACTIONS: Dict[str, Tuple[KnowledgeHandler, Optional[str]]] = {
     "record_experience": (knowledge_handlers.record_experience, None),
     "list_thoughts": (knowledge_handlers.list_inheritance_thoughts, None),
     "get_thought": (knowledge_handlers.get_inheritance_thought, None),
-    "create_thought": (knowledge_handlers.create_inheritance_thought, ROLE_MANAGER),
-    "edit_thought": (knowledge_handlers.edit_inheritance_thought, ROLE_MANAGER),
-    "delete_thought": (knowledge_handlers.delete_inheritance_thought, ROLE_MANAGER),
-    "install_skill_package": (knowledge_handlers.install_skill_package, ROLE_MANAGER),
+    "create_thought": (knowledge_handlers.create_inheritance_thought, None),
+    "edit_thought": (knowledge_handlers.edit_inheritance_thought, None),
+    "delete_thought": (knowledge_handlers.delete_inheritance_thought, None),
+    "install_skill_package": (knowledge_handlers.install_skill_package, None),
     "read_inheritance_skills": (knowledge_handlers.read_inheritance_skills, None),
     "read_skills": (knowledge_handlers.read_intrinsic_skills, None),
-    "update_skills": (knowledge_handlers.update_intrinsic_skills, ROLE_ASSISTANT_ADMIN),
+    "update_skills": (knowledge_handlers.update_intrinsic_skills, None),
     "read_personas": (knowledge_handlers.read_intrinsic_personas, None),
-    "update_persona": (knowledge_handlers.update_intrinsic_persona, ROLE_MANAGER),
-    "read_system_prompts": (knowledge_handlers.read_system_prompts, ROLE_MANAGER),
-    "update_system_prompts": (knowledge_handlers.update_system_prompts, ROLE_ASSISTANT_ADMIN),
+    "update_persona": (knowledge_handlers.update_intrinsic_persona, None),
+    "read_system_prompts": (knowledge_handlers.read_system_prompts, None),
+    "update_system_prompts": (knowledge_handlers.update_system_prompts, None),
 }
 
 _KNOWLEDGE_ACTION_ALIASES = {
@@ -60,9 +54,7 @@ def _knowledge_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional
             detail=f"unsupported action: {action}. 可用: {', '.join(sorted(_KNOWLEDGE_ACTIONS))}",
         )
 
-    handler, min_role = spec
-    if min_role:
-        enforce_min_role(user_id, ai_config_id, min_role)
+    handler, _min_role = spec
 
     sub_args: Dict[str, Any] = {}
     nested = (args or {}).get("params")
@@ -86,11 +78,11 @@ KNOWLEDGE_MANAGE_SCHEMA: Dict[str, Any] = {
                 "操作类型（知识库 / 图书馆）：\n"
                 "- record_experience 把一段可复用经验/教训直接沉淀进 topics 程序性记忆（status 直接 active，无需用户审批；写入后即可被 knowledge.search 与派任务前简报命中）；\n"
                 "- list_thoughts 列出传承思想；get_thought 读取某条传承思想正文；\n"
-                "- create_thought 新建传承思想；edit_thought 按行编辑；delete_thought 删除（需管理者+）；\n"
-                "- install_skill_package 安装 Skill 包（需管理者+）；\n"
+                "- create_thought 新建传承思想；edit_thought 按行编辑；delete_thought 删除；\n"
+                "- install_skill_package 安装 Skill 包；\n"
                 "- read_inheritance_skills 读取传承技能总览；read_skills 读取服务端固定 MCP；read_personas 读取固有人格；read_system_prompts 读取固有思想；\n"
-                "- update_skills 改写服务端 MCP 说明（需辅助管理员+）；update_system_prompts 改写系统提示词（需辅助管理员+）；update_persona 改写 AI 人格（需管理者+）。\n"
-                "需要该 AI 已绑定图书馆。各 action 的具体参数可放在 params 对象或直接平铺在顶层。"
+                "- update_skills 改写服务端 MCP 说明；update_system_prompts 改写系统提示词；update_persona 改写 AI 人格。\n"
+                "需要该 AI 已绑定图书馆；绑定后不区分 AI 身份。各 action 的具体参数可放在 params 对象或直接平铺在顶层。"
             ),
         },
         "params": {

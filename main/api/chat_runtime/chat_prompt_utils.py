@@ -239,7 +239,7 @@ def _render_mcp_tool_item(tool_info: Dict[str, Any]) -> str:
     if name == "task.manage":
         format_hint = (
             "\n"
-            "  action: `list`/`create`/`update`/`delete`；create/update/delete 需管理者及以上。\n"
+            "  action: `list`/`create`/`update`/`delete`；绑定图书馆后所有身份均可执行。\n"
             "  mode: `immediate` 立即执行；`scheduled` 一次性定时；`recurring` 循环运行。\n"
             "  时间格式: mode=scheduled 的 `schedule_at` 仅支持 Unix 秒或带时区 ISO-8601（必须包含 `+08:00` 或 `Z`）；"
             "mode=recurring 不传 `schedule_at`，仅使用 `schedule_duration_minutes`（分钟间隔）。"

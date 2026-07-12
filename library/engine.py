@@ -168,7 +168,7 @@ def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Opt
     """执行一次工坊工具调用（policy 钩子 → 服务端 handler）。
 
     服务端复核（不信任调用上下文以外的任何声明）：
-    工具白名单 → AI 归属 → 工坊绑定 → 角色最低权限。
+    工具白名单 → AI 归属 → 工坊绑定。
     拒绝以 ``HTTPException`` 抛出，由调度层转为工具失败结果。
     """
     tool = str(tool or "").strip()
@@ -179,7 +179,7 @@ def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Opt
     from sqlmodel import Session, select
 
     from api.database import engine as db_engine
-    from api.models import AssistantAIConfig, User
+    from api.models import AssistantAIConfig
     from api.devices.workshop_bindings import workshop_device_ids_for_config
 
     if not ai_config_id:
@@ -193,7 +193,6 @@ def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Opt
         ).first()
         if not cfg:
             raise HTTPException(status_code=404, detail="AI config not found")
-        user = session.get(User, int(user_id))
 
     # 绑定是工坊工具的唯一门槛。
     if not workshop_device_ids_for_config(user_id, cfg.id):
@@ -201,14 +200,6 @@ def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Opt
             status_code=403,
             detail=f"AI config {cfg.id} 未绑定图书馆，无法调用 {tool}（在 AI 配置弹窗或世界中绑定）",
         )
-
-    # 角色最低权限复核。
-    from mcp_runtime.mcp.permissions import ROLE_RANK, config_role_tier, tool_min_role
-
-    tier = config_role_tier(cfg)
-    if ROLE_RANK.get(tier, 0) < ROLE_RANK.get(tool_min_role(tool), 0):
-        raise HTTPException(status_code=403, detail=f"角色 {tier} 无权调用 {tool}")
-    _ = user  # cfg 归属已校验；user 仅为未来策略扩展预留
 
     import importlib
 

@@ -11,7 +11,7 @@
 - `tools.py` 另注册对知识库内置类目的读取/修改 MCP：传承技能（只读，展示工坊在线 MCP）、
   固有技能（读取 / 修改 MCP 工具描述与参数）、固有人格（读取 / 修改 AI 人格 Prompt）、
   固有思路（读取 / 修改所有 AI 统一使用的系统提示词）。这些写入复用 `librarian_service` 的保存逻辑，文件为真相源。
-- `engine.execute_tool` 继续执行工具白名单、AI 归属、工坊绑定与角色权限复核。
+- `engine.execute_tool` 继续执行工具白名单、AI 归属与工坊绑定复核；绑定是唯一权限门槛。
 
 后续添加工具时，在 `tools.py` 声明 schema，并在 `engine.py` 添加明确的
 handler 映射。绑定、权限范围和前端展示链路可直接复用。

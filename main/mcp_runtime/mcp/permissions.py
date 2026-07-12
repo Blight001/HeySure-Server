@@ -48,20 +48,14 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # Shell command execution is allowed for every member inside the workspace
     # resolved for that AI. Regular members cannot choose an outside cwd.
     "workspace.run+command": ROLE_MEMBER,
-    # Unified task management tool (create/list/update/delete). Member floor so
-    # everyone can list; create/update/delete are gated to manager+ inside the
-    # handler. The self-execution operators below stay separate because the
-    # task-runtime flow drives them by name.
+    # Library tools use library binding as their only authorization boundary.
+    # Every bound AI may use every action, regardless of its role tier.
     "task.manage": ROLE_MEMBER,
     # 统一计划管理：create/get/edit/delete 全部走 todo.manage；edit 完成当前阶段，
     # 最后阶段更新后由系统自动收尾。
     "todo.manage": ROLE_MEMBER,
-    # Unified prompt tool. Member floor so everyone can read its own prompt; the
-    # write/system actions are gated inside the handler (write_ai=manager+,
-    # read_system=manager+, write_system=assistant_admin+).
+    # Prompt/knowledge actions are all open once the AI is library-bound.
     "prompt.manage": ROLE_MEMBER,
-    # Unified knowledge-base tool. Member floor; per-action gates live in the
-    # handler (create/edit/delete/install=manager+, update_skills/system=assistant_admin+).
     "knowledge.manage": ROLE_MEMBER,
     # Read-only semantic recall for the knowledge base.
     "knowledge.search": ROLE_MEMBER,
@@ -70,16 +64,14 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # Unified conversation tool (list/detail/create/delete/rename/clear/compress/
     # switch/new) — every tier can manage its own scoped sessions.
     "conversation.manage": ROLE_MEMBER,
-    # Admin / governance — assistant_admin only.
-    "admin.manage": ROLE_ASSISTANT_ADMIN,
-    # Self-iterate device MCP tools — writes code that runs on devices with
-    # native access, so it sits at the assistant_admin tier.
-    "device+mcp.manage": ROLE_ASSISTANT_ADMIN,
+    "admin.manage": ROLE_MEMBER,
+    "device+mcp.manage": ROLE_MEMBER,
 }
 
 
-# 图书馆（绑定制）工具：在角色门槛之外，**还要求调用 AI 已绑定知识工坊（图书馆）**。
-# 这些是治理/管理类能力（任务管理、prompt 管理、管理员操作、设备管理、知识库管理）。其余
+# 图书馆（绑定制）工具：调用 AI 必须已绑定知识工坊（图书馆），绑定是唯一权限门槛，
+# 不再按数字成员、管理者或辅助管理员区分权限。这些是治理/管理类能力（任务管理、
+# prompt 管理、管理员操作、设备管理、知识库管理）。其余
 # 服务端固定工具属于「工具箱」，每个 AI 默认即可用、无需绑定。``knowledge.manage``
 # 的门面早已在 workshop 引擎内校验绑定，这里一并登记以表达完整的图书馆工具集，
 # 中央分发处的绑定校验对它是幂等的；知识库具体操作经 knowledge.manage action 分发。
@@ -113,43 +105,6 @@ ALWAYS_ALLOWED_BASIC_TOOLS: Set[str] = {"mcp.describe+tool", "mode.manage"}
 
 def tool_min_role(tool_name: str) -> str:
     return MCP_TOOL_MIN_ROLE.get(tool_name, DEFAULT_MIN_ROLE)
-
-
-def enforce_min_role(user_id: int, ai_config_id: Optional[int], min_role: str) -> None:
-    """Raise 403 if the calling AI config's role tier is below ``min_role``.
-
-    Unified ``*.manage`` tools fold several legacy tools (with different minimum
-    role tiers) behind one tool name, so the per-tool allow-list can no longer
-    express the finer per-action gating. Handlers call this to keep the original
-    granularity (e.g. ``task.manage`` allows ``list`` for everyone but reserves
-    ``create``/``update``/``delete`` for managers). A missing ``ai_config_id``
-    means an admin/core direct call and bypasses the check; an unknown config is
-    treated as the lowest tier so writes stay blocked.
-    """
-    if not ai_config_id:
-        return
-    from fastapi import HTTPException
-    from sqlmodel import Session, select
-
-    from api.database import engine
-    from api.models import AssistantAIConfig
-
-    with Session(engine) as session:
-        cfg = session.exec(
-            select(AssistantAIConfig).where(
-                AssistantAIConfig.user_id == user_id,
-                AssistantAIConfig.id == ai_config_id,
-            )
-        ).first()
-    tier = config_role_tier(cfg) if cfg else ROLE_MEMBER
-    if ROLE_RANK.get(tier, 0) < ROLE_RANK.get(min_role, 0):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"角色「{ROLE_LABELS_ZH.get(tier, tier)}」无权执行该操作"
-                f"（需「{ROLE_LABELS_ZH.get(min_role, min_role)}」及以上）"
-            ),
-        )
 
 
 def all_registry_tool_names() -> Set[str]:
@@ -228,7 +183,7 @@ def effective_allowed_for_tier(user, tier: str, all_tool_names: Iterable[str]) -
     if tier in policy:
         allowed = {tool for tool in policy[tier] if tool in ceiling}
         # 图书馆治理类工具、自省工具与基础模式控制工具不受「按档位的工具箱白名单」
-        # 约束：图书馆工具由绑定门槛 + enforce_min_role 管控；基础对话控制工具
+        # 约束：图书馆工具仅由绑定门槛管控；基础对话控制工具
         # （mcp.describe+tool / mode.manage）是系统底座，始终放行，避免运行时天花板把
         # 它们误挡掉——与 clamp_tools_json 的同类豁免保持一致。
         allowed |= (LIBRARY_BOUND_TOOLS | ALWAYS_ALLOWED_BASIC_TOOLS) & ceiling
@@ -271,7 +226,7 @@ def clamp_tools_json(user, tier: str, mcp_tools_json: Optional[str]) -> str:
         if is_endpoint_tool_config_name(tool):
             continue
         # 图书馆治理类工具在作坊 UI 按 AI 显式勾选；保留写入 mcp_tools，运行时仍由
-        # 绑定门槛 + enforce_min_role 约束，避免角色策略白名单把 prompt 目录里的
+        # 绑定门槛约束，避免角色策略白名单把 prompt 目录里的
         # manage 工具误剥掉。
         if tool in LIBRARY_BOUND_TOOLS:
             if tool not in seen:

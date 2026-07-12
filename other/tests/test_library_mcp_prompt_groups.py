@@ -4,9 +4,11 @@ from api.chat_runtime.chat_prompt_utils import _filter_tools_for_current_binding
 from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
 from mcp_runtime.mcp.permissions import (
     LIBRARY_BOUND_TOOLS,
+    ROLE_MEMBER,
     clamp_tools_json,
     effective_allowed_for_tier,
     requires_library_binding,
+    tool_min_role,
 )
 from tools.engine import is_toolbox_gated_tool, toolbox_capability_names
 
@@ -44,6 +46,22 @@ def test_task_manage_belongs_to_library_instead_of_toolbox():
     assert requires_library_binding("task.manage") is True
     assert is_toolbox_gated_tool("task.manage") is False
     assert "task.manage" not in toolbox_capability_names()
+
+
+def test_library_binding_replaces_all_role_gates():
+    """Every library MCP and every folded action has the member floor.
+
+    Runtime binding checks are covered separately; this locks down the policy
+    that a bound AI's identity never turns a library read/write into a 403.
+    """
+    from tools.knowledge import _KNOWLEDGE_ACTIONS
+    from tools.prompts import _PROMPT_ACTIONS
+    from tools.tasks import _TASK_ACTIONS
+
+    assert all(tool_min_role(name) == ROLE_MEMBER for name in LIBRARY_BOUND_TOOLS)
+    assert all(min_role is None for _handler, min_role in _PROMPT_ACTIONS.values())
+    assert all(min_role is None for _handler, min_role in _KNOWLEDGE_ACTIONS.values())
+    assert all(min_role is None for _handler, min_role in _TASK_ACTIONS.values())
 
 
 def test_unbound_ai_loses_task_manage_but_keeps_todo_tool(monkeypatch):

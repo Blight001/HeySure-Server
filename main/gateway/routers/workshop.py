@@ -6,7 +6,7 @@
 绑定新成员会替换旧绑定（存 ``WorkshopAiBinding``）。
 
 工具执行不走 REST：调度层（device_dispatch 的 workshop 分支）直接进程内
-调用 ``library.engine.execute_tool``，其中完成白名单/归属/绑定/角色复核。
+调用 ``library.engine.execute_tool``，其中完成白名单/归属/绑定复核。
 """
 
 from typing import Dict, Optional
@@ -127,8 +127,8 @@ def update_workshop_binding(
     from tools import engine as toolbox_engine
 
     is_toolbox = device_id == toolbox_engine.toolbox_device_id_for_user(user.id)
-    # 工具箱多绑、可绑任意 AI；图书馆 1:1。图书馆现含治理工具(admin/device 需辅助管理员)
-    # 与知识工具，故数字成员与辅助管理员均可绑定(绑定 + 角色双门槛仍逐项生效)。
+    # 工具箱多绑、可绑任意 AI；图书馆 1:1。图书馆绑定是其中所有 MCP 的唯一
+    # 权限门槛，数字成员与辅助管理员绑定后均可读写。
     if (
         not is_toolbox
         and bool(payload.bound)

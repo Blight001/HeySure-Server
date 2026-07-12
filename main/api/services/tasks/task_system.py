@@ -33,8 +33,7 @@ TASK_FLOW_PROMPT_KEYS = (
 
 TASK_RUNTIME_REQUIRED_TOOLS = {
     # ``task.list`` was folded into the unified ``task.manage`` tool; the runtime
-    # only needs read access (action=list), which task.manage permits for every
-    # tier while gating create/update/delete to manager+.
+    # needs it for action=list; every action is open to a library-bound AI.
     "task.manage",
     "message.send+to+ai",
     # Planned task flow: create/get/edit/delete all use one MCP. Editing the
