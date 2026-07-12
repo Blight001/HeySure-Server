@@ -5,7 +5,7 @@ Dispatches ``action`` to built-in knowledge handlers (传承思想 / 内置技�
 and is the only authorization boundary for these actions.
 """
 
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException
 
@@ -13,22 +13,21 @@ from library import handlers as knowledge_handlers
 
 KnowledgeHandler = Callable[[int, Dict[str, Any], Optional[int]], Any]
 
-# action → (handler, minimum role). ``None`` role = member floor.
-_KNOWLEDGE_ACTIONS: Dict[str, Tuple[KnowledgeHandler, Optional[str]]] = {
-    "record_experience": (knowledge_handlers.record_experience, None),
-    "list_thoughts": (knowledge_handlers.list_inheritance_thoughts, None),
-    "get_thought": (knowledge_handlers.get_inheritance_thought, None),
-    "create_thought": (knowledge_handlers.create_inheritance_thought, None),
-    "edit_thought": (knowledge_handlers.edit_inheritance_thought, None),
-    "delete_thought": (knowledge_handlers.delete_inheritance_thought, None),
-    "install_skill_package": (knowledge_handlers.install_skill_package, None),
-    "read_inheritance_skills": (knowledge_handlers.read_inheritance_skills, None),
-    "read_skills": (knowledge_handlers.read_intrinsic_skills, None),
-    "update_skills": (knowledge_handlers.update_intrinsic_skills, None),
-    "read_personas": (knowledge_handlers.read_intrinsic_personas, None),
-    "update_persona": (knowledge_handlers.update_intrinsic_persona, None),
-    "read_system_prompts": (knowledge_handlers.read_system_prompts, None),
-    "update_system_prompts": (knowledge_handlers.update_system_prompts, None),
+_KNOWLEDGE_ACTIONS: Dict[str, KnowledgeHandler] = {
+    "record_experience": knowledge_handlers.record_experience,
+    "list_thoughts": knowledge_handlers.list_inheritance_thoughts,
+    "get_thought": knowledge_handlers.get_inheritance_thought,
+    "create_thought": knowledge_handlers.create_inheritance_thought,
+    "edit_thought": knowledge_handlers.edit_inheritance_thought,
+    "delete_thought": knowledge_handlers.delete_inheritance_thought,
+    "install_skill_package": knowledge_handlers.install_skill_package,
+    "read_inheritance_skills": knowledge_handlers.read_inheritance_skills,
+    "read_skills": knowledge_handlers.read_intrinsic_skills,
+    "update_skills": knowledge_handlers.update_intrinsic_skills,
+    "read_personas": knowledge_handlers.read_intrinsic_personas,
+    "update_persona": knowledge_handlers.update_intrinsic_persona,
+    "read_system_prompts": knowledge_handlers.read_system_prompts,
+    "update_system_prompts": knowledge_handlers.update_system_prompts,
 }
 
 _KNOWLEDGE_ACTION_ALIASES = {
@@ -54,8 +53,6 @@ def _knowledge_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional
             detail=f"unsupported action: {action}. 可用: {', '.join(sorted(_KNOWLEDGE_ACTIONS))}",
         )
 
-    handler, _min_role = spec
-
     sub_args: Dict[str, Any] = {}
     nested = (args or {}).get("params")
     if isinstance(nested, dict):
@@ -65,7 +62,7 @@ def _knowledge_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional
             continue
         sub_args[key] = value
 
-    return handler(int(user_id), sub_args, ai_config_id)
+    return spec(int(user_id), sub_args, ai_config_id)
 
 
 KNOWLEDGE_MANAGE_SCHEMA: Dict[str, Any] = {

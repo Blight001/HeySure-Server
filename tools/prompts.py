@@ -340,13 +340,12 @@ def _prompt_write_system(user_id: int, args: dict, ai_config_id: Optional[int] =
         }
 
 
-# Action → (handler, minimum role). ``None`` role means available to every tier.
 _PROMPT_ACTIONS = {
-    "list_targets": (_prompt_list_targets, None),
-    "read_ai": (_prompt_read_ai, None),
-    "write_ai": (_prompt_write_ai, None),
-    "read_system": (_prompt_read_system, None),
-    "write_system": (_prompt_write_system, None),
+    "list_targets": _prompt_list_targets,
+    "read_ai": _prompt_read_ai,
+    "write_ai": _prompt_write_ai,
+    "read_system": _prompt_read_system,
+    "write_system": _prompt_write_system,
 }
 
 _PROMPT_ACTION_ALIASES = {
@@ -374,8 +373,7 @@ def _prompt_manage(user_id: int, args: dict, ai_config_id: Optional[int] = None)
             status_code=400,
             detail=f"unsupported action: {action}. 可用: {', '.join(sorted(_PROMPT_ACTIONS))}",
         )
-    handler, _min_role = spec
-    return handler(user_id, args or {}, ai_config_id)
+    return spec(user_id, args or {}, ai_config_id)
 
 
 PROMPT_MANAGE_SCHEMA: Dict[str, Any] = {

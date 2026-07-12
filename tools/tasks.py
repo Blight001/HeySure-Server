@@ -843,16 +843,14 @@ def _task_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             status_code=400,
             detail=f"unsupported action: {action}. 可用: {', '.join(sorted(_TASK_ACTIONS))}",
         )
-    handler, _min_role = spec
-    return handler(user_id, args or {}, ai_config_id)
+    return spec(user_id, args or {}, ai_config_id)
 
 
-# Action → (handler, minimum role). ``None`` role means available to every tier.
 _TASK_ACTIONS = {
-    "list": (_task_list, None),
-    "create": (_task_create, None),
-    "update": (_task_update, None),
-    "delete": (_task_delete, None),
+    "list": _task_list,
+    "create": _task_create,
+    "update": _task_update,
+    "delete": _task_delete,
 }
 
 _TASK_ACTION_ALIASES = {

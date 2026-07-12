@@ -59,9 +59,9 @@ def test_library_binding_replaces_all_role_gates():
     from tools.tasks import _TASK_ACTIONS
 
     assert all(tool_min_role(name) == ROLE_MEMBER for name in LIBRARY_BOUND_TOOLS)
-    assert all(min_role is None for _handler, min_role in _PROMPT_ACTIONS.values())
-    assert all(min_role is None for _handler, min_role in _KNOWLEDGE_ACTIONS.values())
-    assert all(min_role is None for _handler, min_role in _TASK_ACTIONS.values())
+    assert all(callable(handler) for handler in _PROMPT_ACTIONS.values())
+    assert all(callable(handler) for handler in _KNOWLEDGE_ACTIONS.values())
+    assert all(callable(handler) for handler in _TASK_ACTIONS.values())
 
 
 def test_unbound_ai_loses_task_manage_but_keeps_todo_tool(monkeypatch):
