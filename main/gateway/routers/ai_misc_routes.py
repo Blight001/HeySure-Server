@@ -8,7 +8,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Depends, Header
-from sqlmodel import Session, select
+from sqlmodel import Session, or_, select
 
 from connector_runtime.bots import iter_bots
 from api.core.config import CONNECTOR_RUNTIME_URL
@@ -17,15 +17,19 @@ from api.runtime.internal_http import InternalClient
 from api.models import (
     DeviceAiBinding,
     DeviceTypeMcpPermission,
+    AIMessage,
     AITaskJob,
     AIRuntimeStatus,
     AssistantAIConfig,
+    BotSessionRoute,
+    BotUserCursor,
     ChatMessage,
     ChatRun,
     ChatSession,
     DevicePresence,
     ChatSessionCreate,
     TokenUsageSnapshot,
+    WorkshopAiBinding,
 )
 from api.services.access.access_guards import get_ai_config_or_404
 from api.sio import agents
@@ -164,6 +168,55 @@ async def delete_ai_config(
         row.updated_at = time.time()
         session.add(row)
 
+    # Remaining tables with a NOT NULL FK to assistantaiconfig — leftover rows
+    # would make the DELETE below fail with a ForeignKeyViolation.
+    workshop_rows = session.exec(
+        select(WorkshopAiBinding).where(
+            WorkshopAiBinding.user_id == user.id,
+            WorkshopAiBinding.ai_config_id == config_id,
+        )
+    ).all()
+    task_job_rows = session.exec(
+        select(AITaskJob).where(
+            AITaskJob.user_id == user.id,
+            AITaskJob.ai_config_id == config_id,
+        )
+    ).all()
+    bot_route_rows = session.exec(
+        select(BotSessionRoute).where(
+            BotSessionRoute.user_id == user.id,
+            BotSessionRoute.ai_config_id == config_id,
+        )
+    ).all()
+    bot_cursor_rows = session.exec(
+        select(BotUserCursor).where(
+            BotUserCursor.user_id == user.id,
+            BotUserCursor.ai_config_id == config_id,
+        )
+    ).all()
+    ai_message_rows = session.exec(
+        select(AIMessage).where(
+            AIMessage.user_id == user.id,
+            or_(
+                AIMessage.from_ai_config_id == config_id,
+                AIMessage.to_ai_config_id == config_id,
+            ),
+        )
+    ).all()
+    for row in (
+        *workshop_rows,
+        *task_job_rows,
+        *bot_route_rows,
+        *bot_cursor_rows,
+        *ai_message_rows,
+    ):
+        session.delete(row)
+
+    # Flush child-row deletions before deleting the config itself: the table
+    # dependency graph around assistantaiconfig contains cycles, so SQLAlchemy
+    # won't reliably order the DELETEs within a single flush and Postgres then
+    # rejects the parent delete with a ForeignKeyViolation.
+    session.flush()
     session.delete(cfg)
     session.commit()
 

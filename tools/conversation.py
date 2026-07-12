@@ -307,6 +307,10 @@ def _edit_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
         delete_message_media(session, messages)
         for message in messages:
             session.delete(message)
+        # A clear conversation is also a fresh MCP discovery scope. Keeping the
+        # old describe cache here would expose tools learned from content the
+        # user explicitly removed.
+        session_row.described_tools_json = ""
         session_row.updated_at = time.time()
         session.add(session_row)
         session.commit()
@@ -331,7 +335,7 @@ def _compress_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Opt
     """
     from api.services.chat import conversation_compress
     from api.services.knowledge import kb_store
-    from api.services.model_presets import resolve_model_preset
+    from api.services.model_presets import is_cli_base_url, resolve_model_preset
 
     scope = _conversation_base_scope(args, ai_config_id)
     session_id = str(args.get("session_id") or scope.get("session_id") or "").strip()
@@ -355,6 +359,8 @@ def _compress_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Opt
         api_key, base_url, model = resolve_model_preset(user, cfg)
         if not (api_key and base_url and model):
             raise HTTPException(status_code=400, detail="模型未配置，无法压缩对话")
+        if is_cli_base_url(base_url):
+            raise HTTPException(status_code=400, detail="CLI 模型不支持对话压缩，请选择 API 类型的模型预设")
         system_prompt = (
             kb_store.effective_ai_prompt(user_id, cfg)
             if cfg

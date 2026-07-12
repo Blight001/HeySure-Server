@@ -160,6 +160,7 @@ def test_describe_tool_includes_knowledge_manage(monkeypatch):
 
     assert result["name"] == "knowledge.manage"
     assert "action" in (result.get("inputSchema") or {}).get("properties", {})
+    assert len(result.get("schemaVersion") or "") == 16
 
 
 def test_describe_tool_unknown_single_tool_is_not_permission_error():

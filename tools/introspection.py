@@ -1,4 +1,6 @@
-from typing import Any, Dict, Optional
+import hashlib
+import json
+from typing import Any, Dict, Iterable, Optional
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -6,10 +8,27 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import AssistantAIConfig
 from api.devices.presence import online_tool_defs_for_user
-from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
-
-
 _TOOL_NAME_STOP_CHARS = (":", "：", "!", "！")
+MCP_INTROSPECTION_TOOLS = {"mcp.describe_tool"}
+
+
+def _with_schema_version(payload: Dict[str, Any]) -> Dict[str, Any]:
+    version_source = {
+        "name": payload.get("name"),
+        "description": payload.get("description"),
+        "inputSchema": payload.get("inputSchema"),
+        "destructive": payload.get("destructive"),
+        "implementation": payload.get("implementation"),
+    }
+    encoded = json.dumps(
+        version_source,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    payload["schemaVersion"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+    return payload
 
 
 def _tool_namespace(name: str) -> str:
@@ -169,7 +188,7 @@ def _describe_one_tool(name: str, endpoint_defs: Dict[str, Any], user_id: int = 
                 },
                 "note": "Call get to read the stored definition before editing via upsert (requires library binding).",
             }
-        return result
+        return _with_schema_version(result)
     tool = registry.get(name)
     description = str(tool.description or "").strip()
     input_schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
@@ -182,12 +201,31 @@ def _describe_one_tool(name: str, endpoint_defs: Dict[str, Any], user_id: int = 
             input_schema = intrinsic_input_schema(int(user_id), tool.name, input_schema)
         except Exception:
             pass
-    return {
+    return _with_schema_version({
         "name": tool.name,
         "description": description,
         "inputSchema": input_schema,
         "destructive": tool.destructive,
-    }
+    })
+
+
+def current_tool_schema_versions(user_id: int, names: Iterable[str]) -> Dict[str, str]:
+    """Resolve current effective versions using the same source as describe_tool."""
+    endpoint_defs = online_tool_defs_for_user(user_id)
+    endpoint_defs.update(
+        {name: spec for name, spec in _workshop_tool_defs().items() if name not in endpoint_defs}
+    )
+    available = _describable_tool_names(endpoint_defs)
+    versions: Dict[str, str] = {}
+    for raw_name in names:
+        name = str(raw_name or "").strip()
+        if not name or name not in available:
+            continue
+        try:
+            versions[name] = str(_describe_one_tool(name, endpoint_defs, user_id).get("schemaVersion") or "")
+        except Exception:
+            continue
+    return versions
 
 
 def _mcp_describe_tool(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int] = None):

@@ -24,7 +24,7 @@ from api.database import engine
 from api.runtime.http_client import ai_http_post
 from api.models import AssistantAIConfig, ChatMessage, ChatSession, User
 from api.runtime.internal_http import internal_headers
-from api.services.model_presets import normalize_model_presets, resolve_model_preset
+from api.services.model_presets import is_cli_base_url, normalize_model_presets, resolve_model_preset
 from .admin import require_admin_user
 
 router = APIRouter()
@@ -315,6 +315,20 @@ class ModelsTestRequest(BaseModel):
 
 
 def _probe_model(name: str, model: str, base_url: str, api_key: str, prompt: str) -> Dict[str, Any]:
+    if is_cli_base_url(base_url):
+        # CLI preset: no HTTP endpoint to probe; check the command exists instead.
+        import os
+        import shutil
+
+        from api.services.model_presets import cli_command_from_base_url
+
+        command = cli_command_from_base_url(base_url)
+        exe = (command.split() or [""])[0].strip('"')
+        if exe and (shutil.which(exe) or os.path.isfile(exe)):
+            return {"name": name, "model": model, "base_url": base_url, "ok": True,
+                    "detail": f"CLI 模型：命令 {exe} 存在（跳过 HTTP 连通性测试）"}
+        return {"name": name, "model": model, "base_url": base_url, "ok": False,
+                "detail": f"CLI 命令未找到：{exe or '（未填写）'}"}
     if not (api_key and base_url and model):
         return {"name": name, "model": model, "ok": False, "detail": "配置不完整（缺少 API Key / Base URL / 模型名）"}
     started = time.perf_counter()

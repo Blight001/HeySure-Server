@@ -1,7 +1,7 @@
 import time
 from typing import Optional
 
-from sqlalchemy import Column, ForeignKey, Integer, LargeBinary
+from sqlalchemy import Column, ForeignKey, Integer, LargeBinary, Text
 from sqlmodel import Field, SQLModel
 
 
@@ -84,6 +84,13 @@ class ChatSession(SQLModel, table=True):
     # originated conversations (qq/feishu) reply through their own routes and do
     # not depend on this flag.
     forward_to_bot: bool = Field(default=False)
+    # JSON map: tool name -> {schema_version, described_at}. This is deliberately
+    # session-scoped so a clarification reply can continue with tools whose
+    # schemas were already loaded in an earlier inference run.
+    described_tools_json: str = Field(
+        default="",
+        sa_column=Column(Text, nullable=False, server_default=""),
+    )
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
 

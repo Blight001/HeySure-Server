@@ -37,6 +37,12 @@ class User(SQLModel, table=True):
     # 已迁出数据库，真相源为 KnowledgeBase/system/*.md（见 api.services.knowledge.kb_store）。
     # 这些数值/配置项不是提示词，保留在库。
     mcp_max_steps: int = Field(default=48)
+    # Model-context policy for MCP records from earlier runs in the same chat.
+    # The original ChatMessage rows stay untouched; only the replayed tool-result
+    # body is shortened to this limit.
+    mcp_history_compaction_enabled: bool = Field(default=True)
+    mcp_history_result_max_chars: int = Field(default=100)
+    conversation_auto_compress_enabled: bool = Field(default=True)
     # Per-role MCP allow-list configured by the admin. JSON object mapping a role
     # tier (assistant_admin / digital_member_manager / digital_member_member) to a
     # list of allowed tool names. Empty string means "use the per-role default".
@@ -87,6 +93,9 @@ class UserRead(SQLModel):
     mcp_dynamic_rule: str
     mcp_format_error_hint: str
     mcp_max_steps: int
+    mcp_history_compaction_enabled: bool = True
+    mcp_history_result_max_chars: int = 100
+    conversation_auto_compress_enabled: bool = True
     role_mcp_permissions: str
     tavily_api_key: str
     model_presets: str
@@ -121,6 +130,9 @@ class UserUpdate(SQLModel):
     mcp_dynamic_rule: Optional[str] = None
     mcp_format_error_hint: Optional[str] = None
     mcp_max_steps: Optional[int] = None
+    mcp_history_compaction_enabled: Optional[bool] = None
+    mcp_history_result_max_chars: Optional[int] = None
+    conversation_auto_compress_enabled: Optional[bool] = None
     role_mcp_permissions: Optional[str] = None
     tavily_api_key: Optional[str] = None
     model_presets: Optional[str] = None

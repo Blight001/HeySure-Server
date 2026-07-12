@@ -24,7 +24,7 @@ from api.runtime.http_client import ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
-from api.services.chat import chat_inject, conversation_compress
+from api.services.chat import chat_inject, conversation_compress, mcp_session_context
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
@@ -66,6 +66,7 @@ from api.chat_runtime.chat_prompt_utils import (
 )
 from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
+from api.chat_runtime.chat_stream_cli import stream_turn_cli
 from api.chat_runtime.chat_runtime_helpers import (
     _create_loop_scheduled_job,
     _is_task_finished_status,
@@ -1442,6 +1443,11 @@ def _run_worker_impl(
                 msg_stmt = msg_stmt.where(ChatMessage.ai_config_id == ai_config_id)
             history = bg.exec(msg_stmt).all()
             convo = [{"role": "system", "content": system_prompt}]
+            compact_mcp_history = bool(getattr(user, "mcp_history_compaction_enabled", True))
+            mcp_history_result_max_chars = max(
+                20,
+                min(10000, int(getattr(user, "mcp_history_result_max_chars", 100) or 100)),
+            )
             for m in history:
                 tags = str(getattr(m, "tags", "") or "")
                 if "system_notice_ai_error" in tags or "system_notice_ai_context_repaired" in tags:
@@ -1483,6 +1489,25 @@ def _run_worker_impl(
                         # 作为 user 消息回放，让模型在对话开始就看到「模式初始设置」的数据。
                         # 这与真实 mode.manage(use) 返回的工具结果进入上下文的机制一致。
                         convo.append({"role": "user", "content": m.content})
+                    elif "mcp_tool_call" in tags:
+                        # Preserve the native call + full arguments across runs.
+                        # Only the historical result body is shortened; the
+                        # persisted UI bubble remains complete and untouched.
+                        compact_pair = mcp_session_context.compact_mcp_history_messages(
+                            getattr(m, "id", None),
+                            m.content or "",
+                            mcp_history_result_max_chars if compact_mcp_history else 0,
+                        )
+                        if compact_pair:
+                            # The preceding persisted assistant row is the turn
+                            # that issued this call. Reattach tool_calls to that
+                            # row instead of creating two consecutive assistant
+                            # messages (invalid for some providers).
+                            if convo and convo[-1].get("role") == "assistant" and not convo[-1].get("tool_calls"):
+                                convo[-1]["tool_calls"] = compact_pair[0]["tool_calls"]
+                                convo.append(compact_pair[1])
+                            else:
+                                convo.extend(compact_pair)
 
             # 鲁棒的「模式初始设置」保证：
             # 如果到目前为止 convo 中还没有出现任何 mode.manage 结果（新会话、老会话、或被过滤），
@@ -1525,7 +1550,30 @@ def _run_worker_impl(
             # allowlist as the execution boundary, but initially show only MCP
             # self-inspection tools to the model.
             mcp_active = bool(cfg and cfg.mcp_enabled and effective_tool_allowlist)
-            exposed_tool_allowlist = set(MCP_INTROSPECTION_TOOLS) & set(effective_tool_allowlist)
+            restored_described_tools: set[str] = set()
+            if ai_config_id is not None:
+                try:
+                    cached_versions = mcp_session_context.described_tool_versions(
+                        bg,
+                        user_id=user_id,
+                        ai_config_id=ai_config_id,
+                        ai_kind=ai_kind,
+                        session_id=session_id,
+                    )
+                    if cached_versions:
+                        from tools.introspection import current_tool_schema_versions
+
+                        current_versions = current_tool_schema_versions(user_id, cached_versions.keys())
+                        restored_described_tools = {
+                            name for name, version in cached_versions.items()
+                            if current_versions.get(name) == version and name in effective_tool_allowlist
+                        }
+                except Exception:
+                    logger.exception("restore described MCP tools failed")
+            exposed_tool_allowlist = (
+                (set(MCP_INTROSPECTION_TOOLS) | restored_described_tools)
+                & set(effective_tool_allowlist)
+            )
             if is_task_runtime:
                 # Pre-expose the task / planned-flow tools so a task runtime can
                 # plan, advance phases and finish without a describe_tool detour.
@@ -1884,7 +1932,18 @@ def _run_worker_impl(
                     "33",
                 )
                 try:
-                    if provider == "anthropic":
+                    if provider == "cli":
+                        # Local agent CLI (e.g. grok). Native tools don't
+                        # apply; MCP flows through the <mcp-call> text
+                        # protocol embedded in the system prompt.
+                        sr = stream_turn_cli(
+                            run_id=run_id,
+                            base_url=base_url,
+                            model=model,
+                            convo=convo,
+                            native_tool_name_map=native_tool_name_map,
+                        )
+                    elif provider == "anthropic":
                         sr = stream_turn_anthropic(
                             run_id=run_id,
                             base_url=base_url,
@@ -2206,6 +2265,7 @@ def _run_worker_impl(
                 if (
                     cfg
                     and cfg.ai_role == "digital_member"
+                    and bool(getattr(user, "conversation_auto_compress_enabled", True))
                     and not task_is_finished
                     and not compression_failed
                     and payload_tool not in ("plan.phase_complete", "plan.finish")
@@ -2691,20 +2751,35 @@ def _run_worker_impl(
 
                 if (not tool_failed) and tool == "mcp.describe_tool":
                     described_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
+                    described_items: list[dict] = []
                     described_names: list[str] = []
                     if isinstance(described_payload, dict):
                         batch = described_payload.get("tools")
                         if isinstance(batch, list):
+                            described_items = [item for item in batch if isinstance(item, dict)]
                             described_names = [
                                 str((item or {}).get("name") or "").strip()
                                 for item in batch
                                 if isinstance(item, dict)
                             ]
                         else:
+                            described_items = [described_payload]
                             described_names = [str(described_payload.get("name") or "").strip()]
                     for described_tool in described_names:
                         if described_tool and described_tool in effective_tool_allowlist:
                             exposed_tool_allowlist.add(described_tool)
+                    try:
+                        mcp_session_context.remember_described_tools(
+                            bg,
+                            user_id=user_id,
+                            ai_config_id=ai_config_id,
+                            ai_kind=ai_kind,
+                            session_id=session_id,
+                            session_name=session_name,
+                            described=described_items,
+                        )
+                    except Exception:
+                        logger.exception("persist described MCP tools failed")
 
                 if (
                     (not tool_failed)

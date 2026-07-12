@@ -121,6 +121,12 @@ def compress_session(
     Returns a new ``convo`` list on success, or ``None`` when compression is not
     worth doing or fails (so the caller can avoid retry-looping forever).
     """
+    from api.services.model_presets import is_cli_base_url
+
+    if is_cli_base_url(base_url):
+        # CLI-backed presets have no HTTP endpoint to run the summary request
+        # against; skip quietly so callers fall back to the uncompressed convo.
+        return None
 
     # Load persisted user/assistant messages for this session, excluding ones
     # already folded into a previous summary. Mirrors the runtime history filter.

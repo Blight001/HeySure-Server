@@ -52,6 +52,8 @@ class StreamResult:
 
 def _detect_provider(base_url: str) -> str:
     url = str(base_url or "").lower().strip()
+    if url.startswith("cli://"):
+        return "cli"
     if "api.anthropic.com" in url:
         return "anthropic"
     return "openai_compat"
