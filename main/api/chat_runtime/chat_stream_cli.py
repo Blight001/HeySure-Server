@@ -17,15 +17,19 @@ serialized into the prompt file on every turn (system prompt included, so the
 command line stays short regardless of prompt size).
 """
 
+import base64
 import json
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 from api.core.config import DATA_DIR
@@ -42,16 +46,19 @@ from .chat_stream import StreamResult
 
 CLI_TIMEOUT_SECONDS = 600
 CLI_RUNTIME_DIR = os.path.join(DATA_DIR, "cli_runtime")
+CLI_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
-# grok refuses to build a session with zero built-in tools, so keep only the
-# harmless todo tool; web search and subagents are disabled explicitly. The
-# platform's own MCP tools flow through the <mcp-call> text protocol instead.
+# grok refuses to build a session with zero built-in tools. Keep the harmless
+# todo tool plus read_file: CLI image inputs are materialized as short-lived
+# files in CLI_RUNTIME_DIR, and multimodal Grok models inspect their pixels via
+# read_file. Web search and subagents remain disabled; the platform's own MCP
+# tools flow through the <mcp-call> text protocol instead.
 CLI_FIXED_ARGS = [
     "--output-format",
     "streaming-json",
     "--verbatim",
     "--tools",
-    "todo_write",
+    "todo_write,read_file",
     "--disable-web-search",
     "--no-subagents",
 ]
@@ -66,8 +73,132 @@ CLI_SYSTEM_WRAPPER = (
 
 _ROLE_LABELS = {"user": "User", "assistant": "Assistant", "tool": "Tool Result"}
 
+_DATA_IMAGE_RE = re.compile(
+    r"^data:(image/(?:png|jpeg|jpg|webp|gif));base64,(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
 
-def _content_to_text(content: Any) -> str:
+
+def _image_source_from_block(block: Dict[str, Any]) -> str:
+    """Return a data URL, HTTP URL, or local path from a common image block."""
+    btype = str(block.get("type") or "").lower()
+    if btype == "image_url":
+        value = block.get("image_url")
+        if isinstance(value, dict):
+            return str(value.get("url") or "").strip()
+        return str(value or "").strip()
+    if btype != "image":
+        return ""
+
+    source = block.get("source")
+    if isinstance(source, dict):
+        source_type = str(source.get("type") or "").lower()
+        data = str(source.get("data") or "").strip()
+        media_type = str(source.get("media_type") or source.get("mime_type") or "image/png")
+        if source_type == "base64" and data:
+            return f"data:{media_type};base64,{data}"
+        return str(source.get("url") or source.get("path") or "").strip()
+
+    value = block.get("data") or block.get("url") or block.get("path")
+    if value and block.get("mimeType") and not str(value).startswith(("data:", "http://", "https://")):
+        return f"data:{block.get('mimeType')};base64,{value}"
+    return str(value or "").strip()
+
+
+def _image_suffix(media_type: str, source: str = "") -> str:
+    normalized = str(media_type or "").split(";", 1)[0].strip().lower()
+    suffix = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }.get(normalized)
+    if suffix:
+        return suffix
+    path_suffix = os.path.splitext(urllib.parse.urlparse(source).path)[1].lower()
+    return path_suffix if path_suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"} else ".png"
+
+
+def _write_cli_image(
+    data: bytes,
+    suffix: str,
+    temporary_paths: Optional[List[str]] = None,
+) -> str:
+    if not data or len(data) > CLI_IMAGE_MAX_BYTES:
+        return ""
+    image_file = tempfile.NamedTemporaryFile(
+        mode="wb",
+        suffix=suffix,
+        prefix="image_",
+        dir=CLI_RUNTIME_DIR,
+        delete=False,
+    )
+    try:
+        image_file.write(data)
+    finally:
+        image_file.close()
+    image_path = os.path.abspath(image_file.name)
+    if temporary_paths is not None:
+        temporary_paths.append(image_path)
+    return image_path
+
+
+def _materialize_cli_image(
+    block: Dict[str, Any],
+    temporary_paths: Optional[List[str]] = None,
+) -> str:
+    """Materialize an OpenAI/Anthropic/ACP image block for Grok read_file."""
+    source = _image_source_from_block(block)
+    if not source:
+        return ""
+
+    if os.path.isfile(source):
+        return os.path.abspath(source)
+    if source.lower().startswith("file://"):
+        local_path = urllib.request.url2pathname(urllib.parse.urlparse(source).path)
+        if os.name == "nt" and local_path.startswith("/") and len(local_path) > 2 and local_path[2] == ":":
+            local_path = local_path[1:]
+        if os.path.isfile(local_path):
+            return os.path.abspath(local_path)
+
+    match = _DATA_IMAGE_RE.match(source)
+    if match:
+        encoded = re.sub(r"\s+", "", match.group(2))
+        if len(encoded) > ((CLI_IMAGE_MAX_BYTES * 4) // 3) + 8:
+            return ""
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except Exception:
+            return ""
+        return _write_cli_image(
+            data,
+            _image_suffix(match.group(1)),
+            temporary_paths=temporary_paths,
+        )
+
+    if source.startswith(("http://", "https://")):
+        try:
+            request = urllib.request.Request(source, headers={"User-Agent": "HeySure-AI/2.0"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                media_type = str(response.headers.get_content_type() or "").lower()
+                if not media_type.startswith("image/"):
+                    return ""
+                declared_size = int(response.headers.get("Content-Length") or 0)
+                if declared_size > CLI_IMAGE_MAX_BYTES:
+                    return ""
+                data = response.read(CLI_IMAGE_MAX_BYTES + 1)
+            return _write_cli_image(
+                data,
+                _image_suffix(media_type, source),
+                temporary_paths=temporary_paths,
+            )
+        except Exception:
+            return ""
+    return ""
+
+
+def _content_to_text(content: Any, image_paths: Optional[List[str]] = None) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -81,14 +212,22 @@ def _content_to_text(content: Any) -> str:
                 if text:
                     parts.append(text)
             elif btype in ("image_url", "image"):
-                parts.append("[图片：CLI 模型不支持图片输入，已省略]")
+                image_path = _materialize_cli_image(block, temporary_paths=image_paths)
+                if image_path:
+                    parts.append(
+                        "[图片附件]\n"
+                        f"图片绝对路径：{image_path}\n"
+                        "必须使用 read_file 查看这张图片的像素内容，再基于实际画面继续。"
+                    )
+                else:
+                    parts.append("[图片附件读取失败：CLI 适配层未能解析或下载该图片。]")
         return "\n".join(parts)
     if content is None:
         return ""
     return str(content)
 
 
-def _serialize_convo(convo: List[Dict]) -> str:
+def _serialize_convo(convo: List[Dict], image_paths: Optional[List[str]] = None) -> str:
     """Flatten an OpenAI-format convo into a role-labelled transcript with the
     merged system prompt embedded up front."""
     system_parts: List[str] = []
@@ -97,7 +236,7 @@ def _serialize_convo(convo: List[Dict]) -> str:
         if not isinstance(msg, dict):
             continue
         role = str(msg.get("role") or "").strip().lower()
-        text = _content_to_text(msg.get("content"))
+        text = _content_to_text(msg.get("content"), image_paths=image_paths)
         if role == "system":
             if text:
                 system_parts.append(text)
@@ -161,6 +300,14 @@ def _kill_quietly(proc: subprocess.Popen) -> None:
         pass
 
 
+def _unlink_paths_quietly(paths: List[str]) -> None:
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def stream_turn_cli(
     run_id: str,
     base_url: str,
@@ -178,7 +325,8 @@ def stream_turn_cli(
     argv = _resolve_cli_argv(base_url)
 
     os.makedirs(CLI_RUNTIME_DIR, exist_ok=True)
-    prompt_text = _serialize_convo(convo)
+    temporary_images: List[str] = []
+    prompt_text = _serialize_convo(convo, image_paths=temporary_images)
     prompt_file = tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
@@ -223,7 +371,7 @@ def stream_turn_cli(
             creationflags=creationflags,
         )
     except OSError as exc:
-        os.unlink(prompt_file.name)
+        _unlink_paths_quietly([prompt_file.name, *temporary_images])
         raise RuntimeError(f"CLI 启动失败：{exc}") from exc
 
     stdout_queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
@@ -299,6 +447,7 @@ def stream_turn_cli(
             os.unlink(prompt_file.name)
         except OSError:
             pass
+        _unlink_paths_quietly(temporary_images)
 
     _set_run_live_text(run_id, sr.assistant_text)
 

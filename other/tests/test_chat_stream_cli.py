@@ -1,4 +1,6 @@
+import base64
 import os
+import re
 import sys
 import tempfile
 import textwrap
@@ -80,6 +82,42 @@ class StreamTurnCliTests(unittest.TestCase):
         self.assertIn("User: 第一问", sr.assistant_text)
         self.assertIn("Assistant: 第一答", sr.assistant_text)
         self.assertIn("User: 第二问", sr.assistant_text)
+
+    def test_image_block_is_materialized_for_cli_vision_and_cleaned(self) -> None:
+        cmd = _write_fake_cli(self.tmpdir, """
+            path = args[args.index("--prompt-file") + 1]
+            content = open(path, encoding="utf-8").read()
+            print(json.dumps({"type": "text", "data": content}))
+            print(json.dumps({"type": "end", "stopReason": "EndTurn"}))
+        """)
+        image_data = b"not-a-real-png-but-valid-transport-bytes"
+        data_url = "data:image/png;base64," + base64.b64encode(image_data).decode("ascii")
+        convo = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "请查看截图"},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }]
+
+        sr = self._run(cmd, convo=convo)
+
+        self.assertIn("请查看截图", sr.assistant_text)
+        self.assertIn("[图片附件]", sr.assistant_text)
+        self.assertIn("必须使用 read_file", sr.assistant_text)
+        self.assertNotIn("CLI 模型不支持图片输入", sr.assistant_text)
+        match = re.search(r"图片绝对路径：(.+)", sr.assistant_text)
+        self.assertIsNotNone(match)
+        self.assertFalse(os.path.exists(match.group(1).strip()))
+
+    def test_cli_enables_read_file_for_materialized_images(self) -> None:
+        cmd = _write_fake_cli(self.tmpdir, """
+            tools = args[args.index("--tools") + 1]
+            print(json.dumps({"type": "text", "data": tools}))
+            print(json.dumps({"type": "end", "stopReason": "EndTurn"}))
+        """)
+        sr = self._run(cmd)
+        self.assertIn("read_file", sr.assistant_text.split(","))
 
     def test_mcp_text_protocol_truncates_and_kills(self) -> None:
         cmd = _write_fake_cli(self.tmpdir, """
