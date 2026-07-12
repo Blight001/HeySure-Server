@@ -379,7 +379,9 @@ def _safe_timestamp(value: Any) -> Optional[float]:
 def _format_ts_local(ts: Optional[float]) -> str:
     if ts is None:
         return ""
-    return datetime.fromtimestamp(float(ts)).isoformat(sep=" ", timespec="seconds")
+    from api.services.tasks.task_schedule import schedule_timezone
+
+    return datetime.fromtimestamp(float(ts), schedule_timezone()).isoformat(sep=" ", timespec="seconds")
 
 def _build_task_schedule_meta(task_payload: Dict[str, Any]) -> Dict[str, Any]:
     """精简的调度说明：只暴露 AI 真正需要的字段。

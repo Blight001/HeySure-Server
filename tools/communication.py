@@ -172,16 +172,58 @@ def _reply_result(
     }
 
 
+def _resolve_target_ai_id_by_name(user_id: int, name: str) -> int:
+    """按名字查目标 AI 的 ai_config_id；找不到/重名时报带候选列表的错误。"""
+    from sqlmodel import select
+
+    from api.models import AssistantAIConfig
+
+    wanted = str(name or "").strip()
+    with Session(engine) as session:
+        rows = session.exec(
+            select(AssistantAIConfig).where(
+                AssistantAIConfig.user_id == user_id,
+                AssistantAIConfig.ai_role.in_(["digital_member", "assistant_admin"]),
+            ).order_by(AssistantAIConfig.id.asc())
+        ).all()
+    alive = [row for row in rows if str(row.lifecycle_status or "") != "dead"]
+    matches = [row for row in alive if str(row.name or "").strip() == wanted]
+    if not matches:
+        matches = [row for row in alive if str(row.name or "").strip().lower() == wanted.lower()]
+    if len(matches) == 1:
+        return int(matches[0].id)
+    roster = "；".join(f"ID {int(row.id)}={str(row.name or '').strip()}" for row in alive[:50]) or "（无可用成员）"
+    if not matches:
+        raise HTTPException(
+            status_code=400,
+            detail=f"找不到名为「{wanted}」的 AI。当前成员：{roster}",
+        )
+    raise HTTPException(
+        status_code=400,
+        detail=f"名字「{wanted}」匹配到多个 AI，请改用 to_ai_config_id 指定。当前成员：{roster}",
+    )
+
+
 async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     if ai_config_id is None:
         raise HTTPException(status_code=400, detail="message.send_to_ai must be called by an AI runtime")
     to_raw = args.get("to_ai_config_id") or args.get("target_ai_config_id") or args.get("target")
-    if to_raw is None:
-        raise HTTPException(status_code=400, detail="to_ai_config_id is required")
-    try:
-        to_id = int(to_raw)
-    except Exception:
-        raise HTTPException(status_code=400, detail="to_ai_config_id must be an integer")
+    to_name = str(args.get("to_ai_name") or args.get("target_ai_name") or args.get("to_name") or "").strip()
+    if to_raw is None and not to_name:
+        raise HTTPException(status_code=400, detail="to_ai_config_id (或 to_ai_name) is required")
+    to_id: Optional[int] = None
+    if to_raw is not None:
+        try:
+            to_id = int(to_raw)
+        except Exception:
+            # 容错：模型把名字塞进了 to_ai_config_id，按名字解析
+            candidate = str(to_raw or "").strip()
+            if candidate:
+                to_id = _resolve_target_ai_id_by_name(user_id, candidate)
+            else:
+                raise HTTPException(status_code=400, detail="to_ai_config_id must be an integer")
+    if to_id is None:
+        to_id = _resolve_target_ai_id_by_name(user_id, to_name)
     if to_id == int(ai_config_id):
         raise HTTPException(status_code=400, detail="cannot send message to self")
     content = str(args.get("content") or args.get("text") or args.get("message") or "").strip()

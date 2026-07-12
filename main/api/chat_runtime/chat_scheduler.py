@@ -73,7 +73,9 @@ def _start_task_run(
         if duration > 0:
             payload_lines.append(f"- 定时时长: {duration} 分钟")
         if schedule_at > 0:
-            payload_lines.append(f"- 定时日期: {datetime.fromtimestamp(schedule_at).isoformat(sep=' ', timespec='minutes')}")
+            from api.services.tasks.task_schedule import format_schedule_ts
+
+            payload_lines.append(f"- 定时日期: {format_schedule_ts(schedule_at)}")
     token_override = payload.get("override_token_limit") if isinstance(payload, dict) else {}
     if isinstance(token_override, dict) and token_override.get("enabled"):
         payload_lines.append(f"- Token范围覆盖: {int(token_override.get('value') or 0)}")

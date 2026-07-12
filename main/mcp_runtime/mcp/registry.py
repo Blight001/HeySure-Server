@@ -338,7 +338,9 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="message.send_to_ai",
         description=(
-            "给同一数字社会中的另一个 AI 发消息。消息会作为强制系统提示送达；"
+            "给同一数字社会中的另一个 AI 发消息。目标用 to_ai_config_id（成员 ID）"
+            "或 to_ai_name（成员名字）指定，成员名单见系统提示的 [数字社会成员名单] 段。"
+            "消息会作为强制系统提示送达；"
             "若目标 AI 正在运行，会中断它当前的运行，并以这条消息打头开启新一轮。"
             "必须指定 message_type，请按语义谨慎选择：\n"
             "- inquiry  ：询问。你在向对方提问、要状态或要结果，通常期望对方答复。\n"
@@ -350,7 +352,14 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         input_schema={
             "type": "object",
             "properties": {
-                "to_ai_config_id": {"type": "integer", "description": "目标 AI 的 ai_config_id。"},
+                "to_ai_config_id": {
+                    "type": "integer",
+                    "description": "目标 AI 的 ai_config_id（与 to_ai_name 二选一，见系统提示 [数字社会成员名单]）。",
+                },
+                "to_ai_name": {
+                    "type": "string",
+                    "description": "目标 AI 的名字（与 to_ai_config_id 二选一）；服务端按名字精确匹配解析。",
+                },
                 "content": {"type": "string", "description": "消息正文。"},
                 "message_type": {
                     "type": "string",
@@ -380,7 +389,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
                     "description": "可选，当前对话/会话 id；省略时运行时会自动补上。",
                 },
             },
-            "required": ["to_ai_config_id", "content", "message_type"],
+            "required": ["content", "message_type"],
         },
         handler=_ai_send_message,
         destructive=True,

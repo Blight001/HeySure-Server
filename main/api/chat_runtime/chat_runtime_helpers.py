@@ -29,6 +29,48 @@ from .chat_prompt_utils import (
 )
 
 
+def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_id: int) -> str:
+    """组装数字社会成员名单（ID / 名字 / 角色），注入系统 prompt。
+
+    message.send_to_ai 需要对方的 ai_config_id，但普通成员没有任何工具
+    可以查询同伴的 ID（admin.manage 门槛是辅助管理员+图书馆绑定），
+    导致 AI 之间无法互相通信。名单只从 DB 读取，保证 gateway 预览与
+    ai-runtime 两进程组装结果一致。
+    """
+    from mcp_runtime.mcp.permissions import ROLE_LABELS_ZH, config_role_tier
+
+    rows = session.exec(
+        select(AssistantAIConfig).where(
+            AssistantAIConfig.user_id == user_id,
+            AssistantAIConfig.ai_role.in_(["digital_member", "assistant_admin"]),
+        ).order_by(AssistantAIConfig.id.asc())
+    ).all()
+    lines = []
+    self_name = ""
+    for cfg in rows:
+        if str(cfg.lifecycle_status or "") == "dead":
+            continue
+        cfg_id = int(cfg.id or 0)
+        if cfg_id == int(self_ai_config_id):
+            self_name = str(cfg.name or "").strip()
+            continue
+        tier = config_role_tier(cfg)
+        label = ROLE_LABELS_ZH.get(tier, tier)
+        if bool(getattr(cfg, "is_librarian", False)):
+            label += "，图书管理员"
+        lines.append(f"- ID {cfg_id}：{cfg.name}（{label}）")
+    if not lines:
+        return ""
+    header = f"你的 ai_config_id 是 {self_ai_config_id}"
+    if self_name:
+        header += f"（{self_name}）"
+    header += (
+        "。数字社会中的其他成员如下；用 message.send_to_ai 与他们沟通时，"
+        "to_ai_config_id 填对方的 ID（也可用 to_ai_name 填对方名字）："
+    )
+    return header + "\n" + "\n".join(lines[:100])
+
+
 def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id: Optional[int]):
     # KnowledgeBase 文件为真相源：建目录 + 首次把现有内容导出成文件（幂等）。
     # 运行时直接读文件（见下方 effective_* 调用），不再回写数据库。
@@ -256,6 +298,16 @@ def build_runtime_system_prompt_and_tools(
 
     if merged_system_prompt:
         system_prompt = merged_system_prompt
+    # 数字社会成员名单：让每个 AI 知道同伴的 ai_config_id / 名字，否则
+    # message.send_to_ai 无从填 to_ai_config_id（成员查询工具是辅助管理员门槛）。
+    if ai_config_id is not None:
+        try:
+            roster_text = _digital_society_roster_text(session, uid, int(ai_config_id))
+        except Exception:
+            roster_text = ""
+        system_prompt = _strip_prompt_section(system_prompt, "数字社会成员名单")
+        if roster_text:
+            system_prompt = _append_prompt_section(system_prompt, "数字社会成员名单", roster_text)
     if is_task_runtime:
         # Remove legacy task-runtime prompt sections; task constraints are enforced server-side.
         system_prompt = _strip_task_runtime_sections(system_prompt)
