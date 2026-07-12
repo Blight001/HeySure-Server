@@ -47,6 +47,8 @@ def _agent_display_name(agent: Dict[str, Any]) -> str:
         return "安卓端"
     if device_type == "workshop":
         return "图书馆"
+    if device_type == "custom":
+        return "自建设备"
     return "桌面端"
 
 
@@ -58,12 +60,21 @@ _PRESENCE_TYPE_FLAG = {
 }
 
 
-def _presence_agent_dict(device_id: str, device_type: str, caps) -> Dict[str, Any]:
+def _presence_agent_dict(
+    device_id: str, device_type: str, caps, name: str = ""
+) -> Dict[str, Any]:
     """Synthesize the agent-like record the group builder expects from a DB
     presence row, so ``device_type_of`` / ``agent_endpoint_tools`` keep working
     without the in-memory socket registry."""
     agent: Dict[str, Any] = {
         "id": device_id,
+        # 设备注册时上报的名称（不是用户备注）：分组标签直接用它，模型看到的
+        # 就是设备叫什么（如「AI账号管理总台 MCP」），而不是泛化的类型名。
+        "name": str(name or "").strip(),
+        # ``device_type_of`` resolves the declared ``deviceType`` first; carrying
+        # it verbatim is what keeps types without a boolean flag ("custom" 自建
+        # 设备) classifiable, otherwise their group renders with zero tools.
+        "deviceType": str(device_type or "").strip(),
         "platform": device_type,
         "capabilities": sorted({str(c).strip() for c in (caps or []) if str(c).strip()}),
     }
@@ -80,8 +91,16 @@ def _agents_for_prompt_groups(user_id: int, ai_config_id: Optional[int]) -> List
     made the ai-runtime-built prompt drop every device group (it owns no sockets)
     while the gateway-built /system-prompt-preview still showed them. See the
     INVARIANT note in chat_runtime_helpers.build_runtime_system_prompt_and_tools."""
-    from api.devices.presence import online_devices_for_config, online_tool_catalog_for_user
+    from api.devices.presence import (
+        online_device_display_names,
+        online_devices_for_config,
+        online_tool_catalog_for_user,
+    )
 
+    try:
+        display_names = online_device_display_names(user_id)
+    except Exception:
+        display_names = {}
     agents: List[Dict[str, Any]] = []
     seen: Set[str] = set()
     if ai_config_id is not None:
@@ -90,7 +109,11 @@ def _agents_for_prompt_groups(user_id: int, ai_config_id: Optional[int]) -> List
             if not did or did in seen:
                 continue
             seen.add(did)
-            agents.append(_presence_agent_dict(did, str(device_type or "").strip(), caps))
+            agents.append(
+                _presence_agent_dict(
+                    did, str(device_type or "").strip(), caps, name=display_names.get(did, "")
+                )
+            )
         return agents
     for entry in online_tool_catalog_for_user(user_id):
         did = str(entry.get("device_id") or "").strip()
@@ -98,7 +121,14 @@ def _agents_for_prompt_groups(user_id: int, ai_config_id: Optional[int]) -> List
             continue
         seen.add(did)
         caps = [str(t.get("name") or "").strip() for t in (entry.get("tools") or [])]
-        agents.append(_presence_agent_dict(did, str(entry.get("device_type") or "").strip(), caps))
+        agents.append(
+            _presence_agent_dict(
+                did,
+                str(entry.get("device_type") or "").strip(),
+                caps,
+                name=display_names.get(did, ""),
+            )
+        )
     return agents
 
 

@@ -430,6 +430,32 @@ def online_tool_catalog_for_user(user_id) -> List[Dict[str, object]]:
     return out
 
 
+def online_device_display_names(user_id) -> Dict[str, str]:
+    """``{device_id: register_name}`` for one user's online endpoint agents.
+
+    Deliberately the device-reported register name, NOT the operator remark:
+    the remark is a user-facing UI annotation (e.g. "本地测试"), while the name
+    is what the device calls itself — the prompt tool-group label must tell the
+    model what the device *is*. Devices that never reported a name → ""."""
+    uid = _int(user_id)
+    if uid is None:
+        return {}
+    out: Dict[str, str] = {}
+    with Session(engine) as session:
+        rows = session.exec(
+            select(DevicePresence).where(
+                DevicePresence.user_id == uid,
+                DevicePresence.online == True,  # noqa: E712
+            ).order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
+        ).all()
+        for row in rows:
+            device_id = str(row.device_id or "").strip()
+            if not device_id or device_id in out:
+                continue
+            out[device_id] = str(row.name or "").strip()
+    return out
+
+
 def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict]:
     """Endpoint-agent rows the Workshop panel should still list while offline.
 

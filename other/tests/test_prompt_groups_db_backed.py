@@ -11,6 +11,12 @@ showed them):
           process) instead of the DB presence snapshot, so the ai-runtime worker
           (no sockets) rendered an empty "端侧设备 MCP" group.
 
+  Bug C — ``mcp_prompt_groups._presence_agent_dict`` dropped the presence row's
+          ``device_type`` for types without a boolean flag ("custom" 自建设备):
+          ``device_type_of`` returned None, ``agent_endpoint_tools`` returned an
+          empty set, and a bound + online custom device rendered a device group
+          with zero tools — so the model never saw its tool names at all.
+
 Both are process-independence violations of the INVARIANT documented on
 ``chat_runtime_helpers.build_runtime_system_prompt_and_tools``. These tests lock
 the fixes: device groups must be derived purely from DB-backed sources, with no
@@ -67,6 +73,9 @@ def test_device_groups_are_built_from_db_presence(monkeypatch):
         "api.devices.presence.online_devices_for_config",
         lambda user_id, ai_config_id: [(device_id, "browser", set(browser_caps))],
     )
+    monkeypatch.setattr(
+        "api.devices.presence.online_device_display_names", lambda user_id: {}
+    )
     # Per-agent scope opens exactly these tools.
     monkeypatch.setattr(g, "get_scope", lambda user_id, did: set(browser_caps) if did == device_id else None)
     monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
@@ -90,12 +99,55 @@ def test_device_groups_are_built_from_db_presence(monkeypatch):
     assert not any(x.get("groupKey") == "device:none" for x in groups)
 
 
+def test_custom_device_group_keeps_its_tools(monkeypatch):
+    """Bug C: a bound + online custom (自建) device must render a device group
+    carrying its scoped tools. Custom has no boolean presence flag, so the
+    synthesized agent dict must carry ``deviceType`` for ``device_type_of``."""
+    device_id = "backserve-regression-1"
+    custom_caps = {"account.list", "account.create", "key.list"}
+
+    monkeypatch.setattr(
+        "api.devices.presence.online_devices_for_config",
+        lambda user_id, ai_config_id: [(device_id, "custom", set(custom_caps))],
+    )
+    # The device registered with a display name: the group label must carry it
+    # (a generic "自建设备 MCP" label misleads the model about what it drives).
+    monkeypatch.setattr(
+        "api.devices.presence.online_device_display_names",
+        lambda user_id: {device_id: "AI账号管理总台"},
+    )
+    monkeypatch.setattr(g, "get_scope", lambda user_id, did: set(custom_caps) if did == device_id else None)
+    monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
+    # In production these names classify as desktop-class endpoint tools via the
+    # presence snapshot (custom devices land in the desktop bucket).
+    monkeypatch.setattr(g, "is_endpoint_agent_tool", lambda name: name in custom_caps)
+    monkeypatch.setattr("api.devices.workshop_bindings.config_bound_to_library", lambda u, c: False)
+
+    groups = g.build_prompt_tool_groups(
+        user_id=1,
+        ai_config_id=7,
+        prompt_tools=[{"name": n, "mcpSource": "desktop", "description": n} for n in custom_caps],
+        allowed_tools=set(custom_caps),
+    )
+
+    device_groups = [grp for grp in groups if grp.get("groupKind") == "device"]
+    assert len(device_groups) == 1, groups
+    grp = device_groups[0]
+    assert grp.get("deviceId") == device_id
+    assert grp.get("deviceType") == "custom"
+    assert grp.get("groupLabel") == "AI账号管理总台 MCP"
+    assert {t["name"] for t in grp["tools"]} == custom_caps
+
+
 def test_empty_device_fallback_when_no_presence(monkeypatch):
     """No online device in presence → a single empty '端侧设备 MCP' group, and
     crucially no crash / no dependency on the socket registry."""
     monkeypatch.setattr(
         "api.devices.presence.online_devices_for_config",
         lambda user_id, ai_config_id: [],
+    )
+    monkeypatch.setattr(
+        "api.devices.presence.online_device_display_names", lambda user_id: {}
     )
     monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
     monkeypatch.setattr("api.devices.workshop_bindings.config_bound_to_library", lambda u, c: False)
