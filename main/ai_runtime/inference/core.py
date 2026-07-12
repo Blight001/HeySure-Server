@@ -68,10 +68,10 @@ from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
 from api.chat_runtime.chat_stream_cli import stream_turn_cli
 from api.chat_runtime.chat_runtime_helpers import (
-    _create_loop_scheduled_job,
     _is_task_finished_status,
     _load_task_job_by_session,
     _load_task_payload_by_session,
+    _renew_loop_scheduled_job,
     _parse_allowed_tools,
     _resolve_ai_runtime,
     _run_set_status,
@@ -1742,10 +1742,6 @@ def _run_worker_impl(
                     "completed", "cancelled", "stopped", "error",
                 }:
                     try:
-                        task_job.status = "completed"
-                        task_job.finished_at = now_ts
-                        task_job.updated_at = now_ts
-                        bg.add(task_job)
                         try:
                             notify_task_completion(
                                 user_id=user_id,
@@ -1754,7 +1750,14 @@ def _run_worker_impl(
                             )
                         except Exception:
                             logger.exception("auto plan finalize: completion notify failed")
-                        _next_loop_job = _create_loop_scheduled_job(bg, task_job, now_ts)
+                        # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
+                        # 未续期（非循环 / 循环已结束）才真正标记完成。
+                        _next_loop_job = _renew_loop_scheduled_job(bg, task_job, now_ts)
+                        if _next_loop_job is None:
+                            task_job.status = "completed"
+                            task_job.finished_at = now_ts
+                            task_job.updated_at = now_ts
+                            bg.add(task_job)
                     except Exception:
                         logger.exception("auto plan finalize: task job completion failed")
                 _notice_lines = [
@@ -1766,7 +1769,7 @@ def _run_worker_impl(
                         f"- 完整流程已写入{'成功' if _outcome == 'success' else '失败'}日志: {_log_path}"
                     )
                 if _next_loop_job is not None:
-                    _notice_lines.append(f"- 循环任务已创建: {_next_loop_job.job_id}")
+                    _notice_lines.append(f"- 循环任务已续期: {_next_loop_job.job_id} 回到待执行状态，等待下一轮定时触发")
                 try:
                     _save_message(
                         bg,
@@ -2426,10 +2429,6 @@ def _run_worker_impl(
                                 active_plan = plan_service.get_active_plan(bg, user_id, int(ai_config_id), session_id)
                             if active_plan is None:
                                 finished_at = time.time()
-                                task_job.status = "completed"
-                                task_job.finished_at = finished_at
-                                task_job.updated_at = finished_at
-                                bg.add(task_job)
                                 try:
                                     notify_task_completion(
                                         user_id=user_id,
@@ -2438,10 +2437,18 @@ def _run_worker_impl(
                                     )
                                 except Exception:
                                     logger.exception("auto simple task completion notify failed")
+                                # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
+                                # 未续期（非循环 / 循环已结束）才真正标记完成。
+                                _renewed_loop_job = None
                                 try:
-                                    _create_loop_scheduled_job(bg, task_job, time.time())
+                                    _renewed_loop_job = _renew_loop_scheduled_job(bg, task_job, finished_at)
                                 except Exception:
                                     logger.exception("auto simple task loop schedule failed")
+                                if _renewed_loop_job is None:
+                                    task_job.status = "completed"
+                                    task_job.finished_at = finished_at
+                                    task_job.updated_at = finished_at
+                                    bg.add(task_job)
                                 try:
                                     bg.commit()
                                 except Exception:
@@ -2969,11 +2976,8 @@ def _run_worker_impl(
                         )
                     except Exception:
                         logger.exception("plan.finish compaction tagging failed")
+                    next_loop_job = None
                     if completed_job is not None:
-                        completed_job.status = "completed"
-                        completed_job.finished_at = now_ts
-                        completed_job.updated_at = now_ts
-                        bg.add(completed_job)
                         try:
                             notify_task_completion(
                                 user_id=user_id,
@@ -2982,7 +2986,14 @@ def _run_worker_impl(
                             )
                         except Exception:
                             logger.exception("plan.finish completion notify failed")
-                    next_loop_job = _create_loop_scheduled_job(bg, completed_job, time.time())
+                        # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
+                        # 未续期（非循环 / 循环已结束）才真正标记完成。
+                        next_loop_job = _renew_loop_scheduled_job(bg, completed_job, now_ts)
+                        if next_loop_job is None:
+                            completed_job.status = "completed"
+                            completed_job.finished_at = now_ts
+                            completed_job.updated_at = now_ts
+                            bg.add(completed_job)
                     finish_notice_lines = [
                         "[系统提示]",
                         f"任务已通过 `plan.finish` 收尾，结果：{'成功' if finish_outcome == 'success' else '失败'}。",
@@ -2992,9 +3003,12 @@ def _run_worker_impl(
                             f"- 完整流程已写入{'成功' if finish_outcome == 'success' else '失败'}日志: {finish_log_path}"
                         )
                     if next_loop_job is not None:
-                        finish_notice_lines.append(f"- 循环任务已创建: {next_loop_job.job_id}")
+                        finish_notice_lines.append(f"- 循环任务已续期: {next_loop_job.job_id} 回到待执行状态，等待下一轮定时触发")
                     finish_notice_lines.append("")
-                    finish_notice_lines.append("本任务对话已自动锁定，不再继续后续操作。")
+                    if next_loop_job is not None:
+                        finish_notice_lines.append("本轮任务对话已收尾，下一轮到点后将继续执行。")
+                    else:
+                        finish_notice_lines.append("本任务对话已自动锁定，不再继续后续操作。")
                     _save_message(
                         bg,
                         user_id,

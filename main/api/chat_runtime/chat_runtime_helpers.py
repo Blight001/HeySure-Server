@@ -6,10 +6,10 @@ IS_ROUTER_ENTRY = False
 
 import json
 import time
-import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
+from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
 from api.database import engine
@@ -388,22 +388,26 @@ def _load_task_job_by_session(
 def _is_task_finished_status(status: str) -> bool:
     return str(status or "").strip() in {"completed", "cancelled", "stopped", "error"}
 
-def _create_loop_scheduled_job(
+def _renew_loop_scheduled_job(
     session: Session,
-    source_job: Optional[AITaskJob],
+    job: Optional[AITaskJob],
     now: float,
 ) -> Optional[AITaskJob]:
-    """循环任务完成后创建下一轮实例；循环已结束（轮数跑满/超截止时间）返回 None。
+    """循环任务一轮完成后原地续期同一个 job（回到 queued 等待下一轮）。
+
+    循环未结束时返回续期后的 job；非循环任务或循环已结束（轮数跑满/超
+    截止时间）返回 None，由调用方按普通完成流程置 completed。
 
     下一轮触发时刻由 task_schedule.build_next_loop_schedule 按循环方式
-    （interval / daily / weekly）统一计算。
+    （interval / daily / weekly）统一计算。同一个 job 贯穿所有轮次，
+    轮次之间保持 queued，可正常编辑/暂停/停止，不会变成已完成任务。
     """
-    if not source_job:
+    if not job:
         return None
-    if str(source_job.trigger_type or "").strip().lower() != "schedule":
+    if str(job.trigger_type or "").strip().lower() != "schedule":
         return None
     try:
-        payload = json.loads(source_job.task_payload) if source_job.task_payload else {}
+        payload = json.loads(job.task_payload) if job.task_payload else {}
     except Exception:
         payload = {}
     if not isinstance(payload, dict):
@@ -415,23 +419,21 @@ def _create_loop_scheduled_job(
     if next_schedule is None:
         return None
     payload["schedule"] = next_schedule
-    next_job = AITaskJob(
-        job_id=f"job_{uuid.uuid4().hex[:12]}",
-        user_id=source_job.user_id,
-        ai_config_id=source_job.ai_config_id,
-        created_by_ai_config_id=source_job.created_by_ai_config_id,
-        created_by_session_id=source_job.created_by_session_id,
-        ai_kind=source_job.ai_kind or "core",
-        template_id=source_job.template_id,
-        title=source_job.title,
-        instruction=source_job.instruction,
-        task_payload=json.dumps(payload, ensure_ascii=False),
-        priority=max(1, min(10, int(source_job.priority or 5))),
-        status="queued",
-        trigger_type="schedule",
-    )
-    session.add(next_job)
-    return next_job
+    job.task_payload = json.dumps(payload, ensure_ascii=False)
+    job.status = "queued"
+    job.finished_at = None
+    job.started_at = None
+    job.last_supervised_at = None
+    job.supervision_count = 0
+    # 完成回执的幂等位随轮次重置，下一轮结束时才能再次通知。
+    # notify_task_completion 在独立 Session 里已把该字段写成本轮时间，
+    # 而当前 Session 的快照仍是 None，直接赋 None 不会被视为变更，
+    # 必须强制标脏才能真正写回 NULL。
+    job.completion_notified_at = None
+    flag_modified(job, "completion_notified_at")
+    job.updated_at = now
+    session.add(job)
+    return job
 
 def _run_set_status(run_id: str, status: str, error_message: Optional[str] = None, finished: bool = False):
     with Session(engine) as bg:

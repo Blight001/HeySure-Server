@@ -5,7 +5,7 @@
 
 - REST:  gateway/routers/ai_task_routes.py（task-trigger / PATCH task-jobs）
 - MCP:   mcp_runtime/mcp/tools/tasks.py（task.create 等）
-- 续期:  api/chat_runtime/chat_runtime_helpers._create_loop_scheduled_job
+- 续期:  api/chat_runtime/chat_runtime_helpers._renew_loop_scheduled_job
 - 调度:  api/chat_runtime/chat_scheduler._is_job_time_ready
 
 task_payload["schedule"] 的规范结构::
