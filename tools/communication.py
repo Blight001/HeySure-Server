@@ -1,6 +1,6 @@
 """通信类 MCP 工具：
-- message.send_to_user → 向用户发送消息（按 AI 配置选择对应机器人插件）
-- message.send_to_ai   → 向另一个 AI 发送消息。所有"回信"都走它本身：带
+- message.send+to+user → 向用户发送消息（按 AI 配置选择对应机器人插件）
+- message.send+to+ai   → 向另一个 AI 发送消息。所有"回信"都走它本身：带
                        message_type="reply" 与 reply_to_message_id。
                        系统按 (target_session_id, status) 严格匹配。
 """
@@ -68,7 +68,7 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     media_type = str(args.get("media_type") or ("image" if (args.get("image_url") or args.get("image_path")) else "") or ("video" if (args.get("video_url") or args.get("video_path")) else "")).strip()
     file_name = str(args.get("file_name") or args.get("filename") or "").strip()
     if not text and not media_url and not media_path:
-        raise HTTPException(status_code=400, detail="text or media_url/media_path is required for message.send_to_user")
+        raise HTTPException(status_code=400, detail="text or media_url/media_path is required for message.send+to+user")
     channel = str(args.get("channel") or "").strip().lower()
 
     # The whole arg bag is handed to the dispatcher as the raw addressing
@@ -206,7 +206,7 @@ def _resolve_target_ai_id_by_name(user_id: int, name: str) -> int:
 
 async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     if ai_config_id is None:
-        raise HTTPException(status_code=400, detail="message.send_to_ai must be called by an AI runtime")
+        raise HTTPException(status_code=400, detail="message.send+to+ai must be called by an AI runtime")
     to_raw = args.get("to_ai_config_id") or args.get("target_ai_config_id") or args.get("target")
     to_name = str(args.get("to_ai_name") or args.get("target_ai_name") or args.get("to_name") or "").strip()
     if to_raw is None and not to_name:

@@ -611,7 +611,7 @@ async def get_tree(
     authorization: str = Header(None)
 ):
     user = get_current_user(authorization, session)
-    result = await registry.call("workspace.run_command", user.id, {"command": "dir /s /b"})
+    result = await registry.call("workspace.run+command", user.id, {"command": "dir /s /b"})
     return {
         "root": ".",
         "tree": result["result"].get("output", ""),
@@ -669,11 +669,11 @@ async def execute_action(
         
     try:
         if action in {"edit", "create", "delete"}:
-            raise HTTPException(status_code=410, detail="File edit/create/delete actions have been removed. Use workspace.run_command instead.")
+            raise HTTPException(status_code=410, detail="File edit/create/delete actions have been removed. Use workspace.run+command instead.")
 
         if action == "run":
             result = await registry.call(
-                "workspace.run_command",
+                "workspace.run+command",
                 user.id,
                 {
                     "command": req.get("command"),

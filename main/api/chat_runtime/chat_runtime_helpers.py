@@ -32,7 +32,7 @@ from .chat_prompt_utils import (
 def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_id: int) -> str:
     """组装数字社会成员名单（ID / 名字 / 角色），注入系统 prompt。
 
-    message.send_to_ai 需要对方的 ai_config_id，但普通成员没有任何工具
+    message.send+to+ai 需要对方的 ai_config_id，但普通成员没有任何工具
     可以查询同伴的 ID（admin.manage 门槛是辅助管理员+图书馆绑定），
     导致 AI 之间无法互相通信。名单只从 DB 读取，保证 gateway 预览与
     ai-runtime 两进程组装结果一致。
@@ -65,7 +65,7 @@ def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_
     if self_name:
         header += f"（{self_name}）"
     header += (
-        "。数字社会中的其他成员如下；用 message.send_to_ai 与他们沟通时，"
+        "。数字社会中的其他成员如下；用 message.send+to+ai 与他们沟通时，"
         "to_ai_config_id 填对方的 ID（也可用 to_ai_name 填对方名字）："
     )
     return header + "\n" + "\n".join(lines[:100])
@@ -121,7 +121,7 @@ def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id
 # Web 前端勾选工坊/工具组后，会把该组 MCP 工具目录以这个段标题追加进当轮用户
 # 消息（model_content），随消息动态携带。系统提示不再注入 [动态 MCP 说明]
 # 目录（见 build_runtime_system_prompt_and_tools 内的说明）；模型侧的工具发现
-# 依赖该段 + mcp.describe_tool（tool / tools / query）。
+# 依赖该段 + mcp.describe+tool（tool / tools / query）。
 CLIENT_MCP_CATALOG_MARKER = "[本轮可用 MCP 工具]"
 
 def build_runtime_system_prompt_and_tools(
@@ -205,7 +205,7 @@ def build_runtime_system_prompt_and_tools(
     if ai_config_id is not None:
         # System-injected AI-to-AI messages must remain answerable even when a
         # task or config narrows the general MCP tool allowlist.
-        effective_tool_allowlist.add("message.send_to_ai")
+        effective_tool_allowlist.add("message.send+to+ai")
     try:
         effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
     except Exception:
@@ -233,7 +233,7 @@ def build_runtime_system_prompt_and_tools(
                 effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, uid))
                 effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, uid))
                 if ai_config_id is not None:
-                    effective_tool_allowlist.add("message.send_to_ai")
+                    effective_tool_allowlist.add("message.send+to+ai")
             try:
                 effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
             except Exception:
@@ -299,7 +299,7 @@ def build_runtime_system_prompt_and_tools(
     if merged_system_prompt:
         system_prompt = merged_system_prompt
     # 数字社会成员名单：让每个 AI 知道同伴的 ai_config_id / 名字，否则
-    # message.send_to_ai 无从填 to_ai_config_id（成员查询工具是辅助管理员门槛）。
+    # message.send+to+ai 无从填 to_ai_config_id（成员查询工具是辅助管理员门槛）。
     if ai_config_id is not None:
         try:
             roster_text = _digital_society_roster_text(session, uid, int(ai_config_id))

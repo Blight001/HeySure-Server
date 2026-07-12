@@ -3,7 +3,7 @@ from ai_runtime.inference.core import _tool_result_failed
 
 def test_tool_result_failed_preserves_structured_failure_detail():
     failed, detail = _tool_result_failed({
-        "tool": "workspace.run_command",
+        "tool": "workspace.run+command",
         "result": {
             "success": False,
             "failure_type": "nonzero_exit",

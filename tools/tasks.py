@@ -837,7 +837,7 @@ def _task_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
     """Unified task management tool. Dispatch by ``action``.
 
     Folds ``task.{create,list,update,delete}`` behind one ``action`` parameter.
-    The plan.* phased flow (plan.create / plan.phase_complete / plan.finish)
+    The plan.* phased flow (plan.create / plan.phase+complete / plan.finish)
     is separate because the task runtime drives the plan boundary.
     Per-action minimum role is re-enforced here so members keep read-only access
     (``list``) while orchestration (``create``/``update``/``delete``) stays
@@ -888,7 +888,7 @@ TASK_MANAGE_SCHEMA: Dict[str, Any] = {
                 "create 创建任务（需管理者+，支持 immediate/scheduled/recurring）；"
                 "update 接管更新任务标题/说明/优先级/状态/调度（需管理者+）；"
                 "delete 彻底删除任务并清理其会话（需管理者+）。"
-                "注意：对长动作分阶段执行用 plan 域 plan.create / plan.phase_complete（多阶段操作任务建议先 knowledge.search 或 librarian.consult 检索经验后再 plan.create），整个分阶段计划任务收尾用 plan.finish。"
+                "注意：对长动作分阶段执行用 plan 域 plan.create / plan.phase+complete（多阶段操作任务建议先 knowledge.search 或 librarian.consult 检索经验后再 plan.create），整个分阶段计划任务收尾用 plan.finish。"
             ),
         },
         # ---- list ----

@@ -50,7 +50,7 @@ def test_mode_manage_allowed_despite_restrictive_role_policy():
     assert "mode.manage" in names  # 前提：确是已注册工具
     allowed = effective_allowed_for_tier(_User(), "digital_member_member", names)
     assert "mode.manage" in allowed
-    assert "mcp.describe_tool" in allowed
+    assert "mcp.describe+tool" in allowed
 
 
 def test_build_prompt_tool_groups_includes_governance_tools(monkeypatch):

@@ -1,7 +1,7 @@
 """Immutable version snapshots of device dynamic MCP tools, for rollback.
 
 Every change to a ``DeviceDynamicTool`` (whether made from the web console or by
-an AI via ``device_mcp.manage``) appends one snapshot here. Operators and AIs
+an AI via ``device+mcp.manage``) appends one snapshot here. Operators and AIs
 can list the history and restore any prior snapshot, so a tool that gets edited
 into a broken state can always be rolled back.
 """

@@ -1,6 +1,6 @@
 """Outbound messaging: one typed pipeline for every "bot sends a message" path.
 
-Before this module, three callers (``message.send_to_user``, the saved-message
+Before this module, three callers (``message.send+to+user``, the saved-message
 notifier, the web-chat forward) each built a loose ``target: Dict[str, Any]``
 bag, re-resolved the channel, and re-applied the default-receiver fallback;
 each adapter then re-unpacked the bag into a per-bot service call. Changing how

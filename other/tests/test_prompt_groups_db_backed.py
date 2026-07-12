@@ -57,7 +57,7 @@ def test_is_toolbox_gated_only_matches_server_registry_tools():
         assert is_toolbox_gated_tool(endpoint_tool) is False, endpoint_tool
 
     # Introspection stays exempt so discovery works before any binding.
-    assert is_toolbox_gated_tool("mcp.describe_tool") is False
+    assert is_toolbox_gated_tool("mcp.describe+tool") is False
 
 
 def test_device_groups_are_built_from_db_presence(monkeypatch):

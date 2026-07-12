@@ -61,7 +61,7 @@ class TaskPlan(SQLModel, table=True):
     """A multi-phase execution plan an AI commits to before acting.
 
     The plan flow is: trigger -> plan.create (commit a full plan) ->
-    execute phase by phase (plan.phase_complete compacts the finished phase out
+    execute phase by phase (plan.phase+complete compacts the finished phase out
     of the live context) -> plan.finish (summarize the whole run into a success
     or failure log). One active plan per (user, ai_config, session).
     """
@@ -87,7 +87,7 @@ class TaskPhase(SQLModel, table=True):
 
     Each phase carries its own goal and a done-signal that marks completion, and
     a JSON list of sub-actions (each with its own goal + done-signal). Phases are
-    executed in ``seq`` order; ``plan.phase_complete`` advances ``TaskPlan`` to
+    executed in ``seq`` order; ``plan.phase+complete`` advances ``TaskPlan`` to
     the next one and records this phase's summary.
     """
     id: Optional[int] = Field(default=None, primary_key=True)

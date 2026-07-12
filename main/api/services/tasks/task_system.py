@@ -36,12 +36,12 @@ TASK_RUNTIME_REQUIRED_TOOLS = {
     # only needs read access (action=list), which task.manage permits for every
     # tier while gating create/update/delete to manager+.
     "task.manage",
-    "message.send_to_ai",
+    "message.send+to+ai",
     # Planned task flow: a task runtime can always plan and close out its own
     # plan even when the operational tool allowlist is narrowed.
     # Small/non-plan tasks no longer require an explicit completion MCP call.
     "plan.create",
-    "plan.phase_complete",
+    "plan.phase+complete",
     "plan.finish",
 }
 
@@ -61,7 +61,7 @@ def with_workspace_read_by_name_compat(tools: set[str]) -> set[str]:
         if str(item).strip()
         and (
             not str(item).strip().startswith("workspace.")
-            or str(item).strip() in {"workspace.search", "workspace.run_command"}
+            or str(item).strip() in {"workspace.search", "workspace.run+command"}
         )
     }
 

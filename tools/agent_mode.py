@@ -161,7 +161,7 @@ def _mode_use(user_id: int, args: dict, ai_config_id: Optional[int] = None):
             payload["device_mcp_catalog"] = catalog
             payload["note"] += (
                 "本模式允许调用设备端 MCP：device_mcp_catalog 列出了当前可用的设备端工具"
-                "（名称: 简介），调用前先用 mcp.describe_tool 获取参数 schema。"
+                "（名称: 简介），调用前先用 mcp.describe+tool 获取参数 schema。"
             )
         else:
             payload["note"] += (

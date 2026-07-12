@@ -42,12 +42,12 @@ DEFAULT_MIN_ROLE = ROLE_MEMBER
 # raised so they can only be granted to the appropriate tiers.
 MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # MCP self-inspection — available to every tier and forced into runtime allow-lists.
-    "mcp.describe_tool": ROLE_MEMBER,
+    "mcp.describe+tool": ROLE_MEMBER,
     # Web search — external read-only lookup, available to every tier by default.
     "workspace.search": ROLE_MEMBER,
     # Shell command execution is allowed for every member inside the workspace
     # resolved for that AI. Regular members cannot choose an outside cwd.
-    "workspace.run_command": ROLE_MEMBER,
+    "workspace.run+command": ROLE_MEMBER,
     # Unified task management tool (create/list/update/delete). Member floor so
     # everyone can list; create/update/delete are gated to manager+ inside the
     # handler. The self-execution operators below stay separate because the
@@ -57,7 +57,7 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # 是 plan 的子操作；每个成员都能为自己的长动作制定并推进计划。
     # 注意：创建计划后必须用 plan.finish 收尾，小任务可不走计划流程。
     "plan.create": ROLE_MEMBER,
-    "plan.phase_complete": ROLE_MEMBER,
+    "plan.phase+complete": ROLE_MEMBER,
     "plan.finish": ROLE_MEMBER,
     # Unified prompt tool. Member floor so everyone can read its own prompt; the
     # write/system actions are gated inside the handler (write_ai=manager+,
@@ -69,7 +69,7 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # Read-only semantic recall for the knowledge base.
     "knowledge.search": ROLE_MEMBER,
     # Send message — outbound to the human user; every tier by default.
-    "message.send_to_user": ROLE_MEMBER,
+    "message.send+to+user": ROLE_MEMBER,
     # Unified conversation tool (list/detail/create/delete/rename/clear/compress/
     # switch/new) — every tier can manage its own scoped sessions.
     "conversation.manage": ROLE_MEMBER,
@@ -77,7 +77,7 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     "admin.manage": ROLE_ASSISTANT_ADMIN,
     # Self-iterate device MCP tools — writes code that runs on devices with
     # native access, so it sits at the assistant_admin tier.
-    "device_mcp.manage": ROLE_ASSISTANT_ADMIN,
+    "device+mcp.manage": ROLE_ASSISTANT_ADMIN,
 }
 
 
@@ -89,7 +89,7 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
 LIBRARY_BOUND_TOOLS: Set[str] = {
     "prompt.manage",
     "admin.manage",
-    "device_mcp.manage",
+    "device+mcp.manage",
     "knowledge.manage",
 }
 
@@ -99,13 +99,13 @@ def requires_library_binding(tool_name: str) -> bool:
     return str(tool_name or "").strip() in LIBRARY_BOUND_TOOLS
 
 
-# 基础对话控制工具：与 ``mcp.describe_tool`` 同类，是模式系统赖以运转的底座。
+# 基础对话控制工具：与 ``mcp.describe+tool`` 同类，是模式系统赖以运转的底座。
 # 每个 AI 无论角色策略如何都必须能切换 / 管理自己的工作模式（``mode.manage``）——
 # 否则既没法从初始模式进工作间拿到设备 MCP，用户也无法在对话「+」面板里切换模式
 # （前端切换走同一条 /api/mcp/call）。因此这些工具始终放行，不受「按档位的工具箱
-# 白名单」收敛（与 ``mcp.describe_tool`` 的豁免一致，见 agent_mode_store 的
+# 白名单」收敛（与 ``mcp.describe+tool`` 的豁免一致，见 agent_mode_store 的
 # CHAT_MODE_TOOL_WHITELIST）。
-ALWAYS_ALLOWED_BASIC_TOOLS: Set[str] = {"mcp.describe_tool", "mode.manage"}
+ALWAYS_ALLOWED_BASIC_TOOLS: Set[str] = {"mcp.describe+tool", "mode.manage"}
 
 
 # 「工具箱」设备（多绑、按绑定门禁放行的服务端固定工具集）整体迁出到独立模块
@@ -201,11 +201,15 @@ def parse_role_permissions(user) -> Dict[str, List[str]]:
         return {}
     if not isinstance(data, dict):
         return {}
+    from api.services.mcp.mcp_tool_aliases import normalize_legacy_tool_name
+
     out: Dict[str, List[str]] = {}
     for role, tools in data.items():
         if role in ROLE_RANK and isinstance(tools, list):
+            # 存量授权可能还是旧工具名（如 message.send_to_ai），就地归一成现名，
+            # 否则改名后的工具会被角色策略误拦。
             out[role] = [
-                str(item).strip()
+                normalize_legacy_tool_name(str(item).strip())
                 for item in tools
                 if isinstance(item, str) and str(item).strip()
             ]
@@ -227,7 +231,7 @@ def effective_allowed_for_tier(user, tier: str, all_tool_names: Iterable[str]) -
         allowed = {tool for tool in policy[tier] if tool in ceiling}
         # 图书馆治理类工具、自省工具与基础模式控制工具不受「按档位的工具箱白名单」
         # 约束：图书馆工具由绑定门槛 + enforce_min_role 管控；基础对话控制工具
-        # （mcp.describe_tool / mode.manage）是系统底座，始终放行，避免运行时天花板把
+        # （mcp.describe+tool / mode.manage）是系统底座，始终放行，避免运行时天花板把
         # 它们误挡掉——与 clamp_tools_json 的同类豁免保持一致。
         allowed |= (LIBRARY_BOUND_TOOLS | ALWAYS_ALLOWED_BASIC_TOOLS) & ceiling
         return allowed
@@ -261,7 +265,7 @@ def clamp_tools_json(user, tier: str, mcp_tools_json: Optional[str]) -> str:
     for tool in requested:
         if tool.startswith("workspace.") and tool not in {
             "workspace.search",
-            "workspace.run_command",
+            "workspace.run+command",
         }:
             continue
         # Endpoint desktop/browser tools are governed exclusively by

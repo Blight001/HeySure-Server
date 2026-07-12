@@ -44,7 +44,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     invalidate references held by callers).
     """
     registry.register(MCPTool(
-        name="mcp.describe_tool",
+        name="mcp.describe+tool",
         description=(
             "读取已允许 MCP 工具的完整说明和参数 schema，读取后即可直接调用这些工具。"
             "用 tool 查单个工具；用 tools（数组）一次查多个；用 query 按名称/描述做关键词搜索。"
@@ -87,7 +87,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     ))
 
     registry.register(MCPTool(
-        name="workspace.run_command",
+        name="workspace.run+command",
         description=(
             "执行 shell 命令，用于开发或检查工作区。默认在当前 AI 可访问的工作区目录、使用正常进程环境运行。"
             "普通成员只能在自己的 AI 工作区目录内选择 cwd；管理者可使用更宽的用户工作区。"
@@ -159,7 +159,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
             "任务管理统一工具（任务=定时/无人值守、在独立会话中运行的后台工作）："
             "用 action 选择 list 列出 / create 创建 / update 接管更新 / delete 删除。"
             "create/update/delete 需管理者及以上。"
-            "对长动作做分阶段执行用 plan 域：plan.create / plan.phase_complete / plan.finish。"
+            "对长动作做分阶段执行用 plan 域：plan.create / plan.phase+complete / plan.finish。"
         ),
         input_schema=TASK_MANAGE_SCHEMA,
         handler=_task_manage,
@@ -176,7 +176,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
             "把整体目标拆成有序的多个阶段，"
             "每个阶段有明确的目标(goal)与结束标志(done_signal)，并可在 actions 里列出该阶段的子行动"
             "（每个子行动也有自己的 goal 与 done_signal）。"
-            "登记后从第 1 个阶段开始执行：每完成一个阶段调用 plan.phase_complete；"
+            "登记后从第 1 个阶段开始执行：每完成一个阶段调用 plan.phase+complete；"
             "完成最后一个阶段时，系统会自动收尾整个计划并归档，无需再单独调用收尾工具。"
             "同一会话只保留一份进行中的计划，重复调用会覆盖旧计划。"
         ),
@@ -216,7 +216,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         destructive=True,
     ))
     registry.register(MCPTool(
-        name="plan.phase_complete",
+        name="plan.phase+complete",
         description=(
             "plan 的子操作：完成当前阶段并收尾（无需总结）。调用后系统会自动隐藏上一阶段的深度思考与 MCP "
             "详细结果、只保留调用状态，并自动下发下一个阶段；若已是最后一个阶段，系统会自动收尾整个计划"
@@ -240,7 +240,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="plan.finish",
         description=(
-            "手动收尾整个计划（可选，正常情况下无需调用）。完成最后一个阶段（plan.phase_complete）时"
+            "手动收尾整个计划（可选，正常情况下无需调用）。完成最后一个阶段（plan.phase+complete）时"
             "系统会自动收尾并归档；本工具仅作为需要亲自给出完整复盘时的备用手段，且要求所有阶段均已收尾。"
             "系统会隐藏全过程的深度思考与 MCP 详细结果，把完整行动流程写入工作区的成功/失败日志"
             "（logs/success 或 logs/failure）。outcome=success 写成功日志，failure 写失败日志。"
@@ -266,7 +266,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     ))
     # 与用户通信：把底层机器人投递封装为业务语义上的"给用户发消息"。
     registry.register(MCPTool(
-        name="message.send_to_user",
+        name="message.send+to+user",
         description=(
             "通过绑定的机器人渠道（飞书或 QQ）给真人用户发文本消息。"
             "用于主动通知、状态更新，或异步请用户去做某事。"
@@ -336,7 +336,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
 
     # ---------- AI 间通信 ----------
     registry.register(MCPTool(
-        name="message.send_to_ai",
+        name="message.send+to+ai",
         description=(
             "给同一数字社会中的另一个 AI 发消息。目标用 to_ai_config_id（成员 ID）"
             "或 to_ai_name（成员名字）指定，成员名单见系统提示的 [数字社会成员名单] 段。"
@@ -373,7 +373,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
                     "type": "boolean",
                     "description": (
                         "默认 false，仅控制本次调用是否同步等待，不能替代必填的 message_type。"
-                        "常规 AI 协作请保持 false，对方的答复会作为新的 message.send_to_ai 调用回来。"
+                        "常规 AI 协作请保持 false，对方的答复会作为新的 message.send+to+ai 调用回来。"
                     ),
                 },
                 "timeout_seconds": {
@@ -426,7 +426,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     ))
 
     registry.register(MCPTool(
-        name="device_mcp.manage",
+        name="device+mcp.manage",
         description=(
             "自主管理设备端 MCP 工具（按设备类型 desktop/browser），可用于迭代更好用的工具实现。"
             "list/get 查看；capabilities 列出该类型设备可调用的原生能力；upsert 创建或覆盖；delete 删除。"

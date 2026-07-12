@@ -241,6 +241,18 @@ async def call_mcp_tool(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
+    # 宽容解析工具名（mcp_xxx / mcp__xxx / 旧名 → 真实名），再做门禁与调用；
+    # 模型/前端把 . 写成 _ 时不再直接报「未知工具」。
+    try:
+        from api.services.mcp.mcp_tool_aliases import resolve_tool_name
+
+        _cands = {str(t.get("name") or "").strip() for t in registry.list_tools() if t.get("name")}
+        if req.ai_config_id is not None:
+            _cands.update(endpoint_tools_for_config(req.ai_config_id, user.id))
+            _cands.update(endpoint_bridge_tools_for_config(req.ai_config_id, user.id))
+        req.tool = resolve_tool_name(req.tool, _cands)
+    except Exception:
+        pass
     if req.ai_config_id is not None:
         cfg = session.exec(
             select(AssistantAIConfig).where(
@@ -257,6 +269,8 @@ async def call_mcp_tool(
             if not isinstance(parsed_allowed, list):
                 raise ValueError("mcp_tools must be a JSON array")
             allowed_tools = {str(item).strip() for item in parsed_allowed if isinstance(item, str) and str(item).strip()}
+            from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names as _fully_clean
+            allowed_tools = _fully_clean(allowed_tools)
             allowed_tools = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(allowed_tools))
             allowed_tools.update(MCP_INTROSPECTION_TOOLS)
             allowed_tools.update(endpoint_bridge_tools_for_config(req.ai_config_id, user.id))

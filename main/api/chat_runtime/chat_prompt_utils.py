@@ -295,7 +295,7 @@ def _render_mcp_namespace_lines(cfg: Optional[AssistantAIConfig], namespace_hint
         return "- （空）"
     return (
         "- 本轮可用的具体 MCP 工具清单见对话中的「[本轮可用 MCP 工具]」；"
-        "需要某个工具的参数 schema 时用 mcp.describe_tool 传入具体工具名（如 workspace.search），"
+        "需要某个工具的参数 schema 时用 mcp.describe+tool 传入具体工具名（如 workspace.search），"
         "或用具体关键词搜索——不要传 browser/workspace 等父级 namespace 名，父级名不返回内容。"
     )
 
@@ -320,7 +320,7 @@ def _render_mcp_tool_catalog(allowed_tools: set[str], endpoint_tools: Optional[s
 
     Mirrors how mature agent runtimes list all tool names up front: the model
     can locate the right tool directly, then load the precise schema in a single
-    ``mcp.describe_tool`` call. ``!`` marks destructive tools.
+    ``mcp.describe+tool`` call. ``!`` marks destructive tools.
 
     ``endpoint_tools`` is the set of dynamically-allocated desktop/browser agent
     tools the caller already resolved as currently available for this AI. They
@@ -400,7 +400,7 @@ def _filter_tools_for_current_bindings(
       and narrow mcp_tools selections; this filter only removes them when unbound.
     - System built-in server MCPs (knowledge.search, workspace.*, plan.*, etc.) are DIRECT.
     - Device/endpoint MCPs remain governed by per-agent scopes.
-    - Always preserve introspection tools (mcp.describe_tool etc.).
+    - Always preserve introspection tools (mcp.describe+tool etc.).
     This keeps the catalog honest: only show/callable what can actually be used.
     """
     if not ai_config_id:

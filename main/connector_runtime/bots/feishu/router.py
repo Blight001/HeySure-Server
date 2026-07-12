@@ -51,7 +51,7 @@ def _build_feishu_runtime_prompt(base_prompt: str, event: Dict[str, str]) -> str
         "[飞书通知前置模板]\n"
         "本轮消息来自飞书事件回调。请直接生成要回复给飞书用户的内容，保持清晰、可直接发送。\n"
         "服务端只会把实际回复内容发回来源会话，不需要输出处理状态或工具调用状态。\n"
-        "除非用户明确要求额外通知其他飞书会话，否则不要调用 MCP 工具 `message.send_to_user`，避免重复回复。\n"
+        "除非用户明确要求额外通知其他飞书会话，否则不要调用 MCP 工具 `message.send+to+user`，避免重复回复。\n"
         "如果用户要求忘掉/清除/重置/忽略此前对话或上下文，请先调用 MCP 工具 "
         "`conversation.manage`，使用 `action=clear`；默认只删除当前用户消息之前的内容。\n"
         "当用户想要 列出/读取/切换/新开 对话或会话时，调用 MCP 工具 "
