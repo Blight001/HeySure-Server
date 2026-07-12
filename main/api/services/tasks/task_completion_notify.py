@@ -227,7 +227,7 @@ def notify_task_completion(
         if job.completion_notified_at:
             return {"notified": False, "reason": "already_notified", "notified_at": job.completion_notified_at}
 
-        # 先占住幂等位：plan.finish（计划收尾）和自然结束路径（简单任务）会进入本函数，回执与机器人推送整体只执行一次
+        # 先占住幂等位：todo 最后阶段自动收尾和自然结束路径（简单任务）会进入本函数，回执与机器人推送整体只执行一次
         # （原 task.complete 调用路径已移除）
         now = time.time()
         job.completion_notified_at = now

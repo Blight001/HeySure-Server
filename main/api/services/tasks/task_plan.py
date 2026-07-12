@@ -7,9 +7,9 @@ logging stay consistent across processes.
 
 Lifecycle::
 
-    plan.create         -> one TaskPlan (status=active) + N TaskPhase rows; phase 0 active
-    plan.phase+complete -> mark current phase completed/failed, advance current_phase_seq
-    plan.finish         -> mark plan completed/failed, write success/failure log file
+    todo.manage(action=create) -> one TaskPlan + N TaskPhase rows; phase 0 active
+    todo.manage(action=edit)   -> close current phase and advance; last phase auto-finishes
+    todo.manage(action=delete) -> abandon the active plan
 
 The runtime layer is responsible for the *context* side effects (hiding the
 finished phase's deep-thinking + MCP detail from the live conversation); this
@@ -59,7 +59,7 @@ def normalize_actions(raw: Any) -> List[Dict[str, str]]:
 
 
 def normalize_phases(raw: Any) -> List[Dict[str, Any]]:
-    """Validate + normalize the phases input for ``plan.create``.
+    """Validate + normalize the phases input for ``todo.manage(action=create)``.
 
     Returns a list of ``{title, goal, done_signal, actions}``. Raises
     ``ValueError`` with a human-readable, model-facing message on bad input.
@@ -151,9 +151,9 @@ def current_phase(session: Session, plan: TaskPlan) -> Optional[TaskPhase]:
 
 
 def awaiting_finish(session: Session, plan: Optional[TaskPlan]) -> bool:
-    """True when every phase is done and only ``plan.finish`` remains.
+    """True when every phase is done and automatic finalization should run.
 
-    After the last phase's ``plan.phase+complete`` the plan's ``current_phase_seq``
+    After the last ``todo.manage(action=edit)`` the plan's ``current_phase_seq``
     stays on the final phase (no next phase to advance to); that phase being
     finished is the signal the whole plan should be summarized and closed.
     """
@@ -170,9 +170,8 @@ def awaiting_finish(session: Session, plan: Optional[TaskPlan]) -> bool:
 def unfinished_phases(session: Session, plan: Optional[TaskPlan]) -> List[Dict[str, Any]]:
     """Return phases that have not been explicitly closed yet.
 
-    A phase is considered closed once ``plan.phase+complete`` records either
-    ``completed`` or ``failed``. The final plan outcome can still be success or
-    failure, but ``plan.finish`` must not skip unclosed phase boundaries.
+    A phase is considered closed once ``todo.manage(action=edit)`` records either
+    ``completed`` or ``failed``.
     """
     if plan is None or plan.status not in ACTIVE_PLAN_STATUSES:
         return []
@@ -340,6 +339,24 @@ def complete_current_phase(
         "next_phase": _phase_dict(nxt) if nxt is not None else None,
         "all_phases_done": all_done,
     }
+
+
+def abandon_plan(session: Session, plan: TaskPlan, *, reason: str = "") -> Dict[str, Any]:
+    """Abandon the active plan while preserving it for history/audit display."""
+    now = time.time()
+    plan.status = "abandoned"
+    plan.outcome = "abandoned"
+    plan.summary = _clean_str(reason, 8000)
+    plan.updated_at = now
+    plan.finished_at = now
+    session.add(plan)
+    for phase in list_phases(session, plan.plan_id):
+        if phase.status in {"active", "pending"}:
+            phase.status = "abandoned"
+            phase.finished_at = phase.finished_at or now
+            session.add(phase)
+    session.commit()
+    return plan_progress(session, plan)
 
 
 def finish_plan(

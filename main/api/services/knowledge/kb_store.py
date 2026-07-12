@@ -101,6 +101,25 @@ SYSTEM_PROMPT_KEYS: Tuple[Tuple[str, str], ...] = (
 )
 _SYSTEM_PROMPT_TYPE = {key: kind for key, kind in SYSTEM_PROMPT_KEYS}
 
+_TODO_MCP_PROMPT_KEYS = {
+    "mcp_namespace_hints",
+    "default_start_task_prompt",
+    "default_resume_task_prompt",
+    "default_supervision_prompt",
+    "task_plan_flow_prompt",
+}
+
+
+def normalize_todo_mcp_prompt(value: Any) -> str:
+    """Upgrade stored prompts from the former three plan MCPs to todo.manage."""
+    text = str(value if value is not None else "")
+    return (
+        text.replace("plan.phase+complete", "todo.manage(action=edit)")
+        .replace("plan.phase_complete", "todo.manage(action=edit)")
+        .replace("plan.create", "todo.manage(action=create)")
+        .replace("plan.finish", "todo.manage(action=edit)")
+    )
+
 # Markdown 内部用 ``## @key`` 分隔不同 Prompt 段，round-trip 稳定。
 _PERSONA_SECTIONS: Tuple[Tuple[str, str], ...] = (
     ("prompt", "人格 Prompt"),
@@ -408,11 +427,12 @@ def effective_system_value(user_id: int, key: str, fallback: Any = None) -> str:
     if user_id:
         body = read_system_prompt(int(user_id), key)
         if body is not None:
-            return body
+            return normalize_todo_mcp_prompt(body) if key in _TODO_MCP_PROMPT_KEYS else body
     fb = str(fallback) if fallback not in (None, "") else ""
     if fb:
-        return fb
-    return _SYSTEM_PROMPT_DEFAULTS.get(key, "")
+        return normalize_todo_mcp_prompt(fb) if key in _TODO_MCP_PROMPT_KEYS else fb
+    default = _SYSTEM_PROMPT_DEFAULTS.get(key, "")
+    return normalize_todo_mcp_prompt(default) if key in _TODO_MCP_PROMPT_KEYS else default
 
 
 # ============================================================

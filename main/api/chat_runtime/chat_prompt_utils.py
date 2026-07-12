@@ -394,11 +394,11 @@ def _filter_tools_for_current_bindings(
 ) -> set[str]:
     """Filter out tools that the AI cannot actually use because of missing bindings.
 
-    - LIBRARY_BOUND_TOOLS (知识工坊/图书馆治理工具: knowledge.manage, prompt.manage 等)
+    - LIBRARY_BOUND_TOOLS (知识工坊/图书馆任务管理与治理工具: task.manage, knowledge.manage, prompt.manage 等)
       require library (workshop) binding. They are now force-included by the
       runtime allowlist builder (chat_runtime_helpers) so they survive task overrides
       and narrow mcp_tools selections; this filter only removes them when unbound.
-    - System built-in server MCPs (knowledge.search, workspace.*, plan.*, etc.) are DIRECT.
+    - System built-in server MCPs (knowledge.search, workspace.*, todo.manage, etc.) are DIRECT.
     - Device/endpoint MCPs remain governed by per-agent scopes.
     - Always preserve introspection tools (mcp.describe+tool etc.).
     This keeps the catalog honest: only show/callable what can actually be used.
@@ -411,7 +411,7 @@ def _filter_tools_for_current_bindings(
         from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
         from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
         # Note: toolbox binding no longer gates system built-in MCPs (knowledge.search,
-        # workspace.*, plan.* etc. are direct). Only library governance remains gated.
+        # workspace.*, todo.manage etc. are direct). Only library task-management/governance remains gated.
         # is_toolbox_gated_tool / config_bound_to_toolbox kept for UI grouping only.
 
         protected = set(MCP_INTROSPECTION_TOOLS or set())
@@ -419,7 +419,7 @@ def _filter_tools_for_current_bindings(
             result -= (set(LIBRARY_BOUND_TOOLS) - protected)
 
         # Toolbox-gated removal intentionally removed: system server MCPs are now
-        # always direct-callable (subject only to mcp_enabled + mode + library for gov tools).
+        # always direct-callable (subject only to mcp_enabled + mode + library for bound tools).
     except Exception:
         # Fail open on any lookup error to avoid breaking catalogs.
         pass

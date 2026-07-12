@@ -239,7 +239,7 @@ def build_runtime_system_prompt_and_tools(
             except Exception:
                 pass
             # Even under task override, ensure core system built-ins are directly available
-            # (knowledge.search, knowledge.manage, plan.*, workspace.*, etc. must not be
+            # (knowledge.search, knowledge.manage, todo.manage, workspace.*, etc. must not be
             # stripped for pre-plan / task flows). Library governance tools are force-included
             # here and the binding filter below will drop unbound ones. This fixes calls to
             # "图书馆 MCP" (e.g. knowledge.manage) being rejected during task execution.
@@ -269,7 +269,7 @@ def build_runtime_system_prompt_and_tools(
 
     # System built-in MCPs (from MCP registry) are allowed for direct AI calls.
     # They are NOT gated behind toolbox binding/selection like device (endpoint) MCPs.
-    # This fixes "Tool not allowed for this task" for knowledge.* / plan.* / workspace.* etc.
+    # This fixes "Tool not allowed for this task" for knowledge.* / todo.manage / workspace.* etc.
     # Library governance tools (LIBRARY_BOUND_TOOLS) are included here; the subsequent
     # _filter_tools_for_current_bindings drops them only if the AI is not bound to library.
     # This makes 图书馆 MCP usable in task mode / task runtime when bound.

@@ -44,7 +44,7 @@ def is_builtin_toolbox_device_id(device_id) -> bool:
 # 门禁：哪些服务端固定工具属于「工具箱」（需绑定工具箱才能由 AI 调用）
 # ---------------------------------------------------------------------------
 def _library_bound_tools() -> Set[str]:
-    """图书馆绑定制工具集合（治理类）。工具箱 = 服务端固定工具中除此之外的部分。"""
+    """图书馆绑定制工具集合（任务管理与治理类）。工具箱 = 服务端固定工具中除此之外的部分。"""
     try:
         from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
 
@@ -281,7 +281,7 @@ def sanitize_mcp_tools(raw: Optional[str], *, user_id: Optional[int] = None, ai_
         names = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(names))
         names.update(MCP_INTROSPECTION_TOOLS)
 
-        # 3. 仅清理图书馆绑定类（系统自带工具如 knowledge.search / workspace.* / plan.* 已改为直接调用，不再按工具箱绑定剥离）
+        # 3. 仅清理图书馆绑定类（系统自带工具如 knowledge.search / workspace.* / todo.manage 直接调用，不按工具箱绑定剥离）
         if user_id and ai_config_id:
             try:
                 from api.devices.workshop_bindings import config_bound_to_library

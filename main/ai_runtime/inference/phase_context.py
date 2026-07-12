@@ -1,6 +1,6 @@
-"""Phase-aware context compaction for the plan flow.
+"""Phase-aware context compaction for the unified todo flow.
 
-When a phase finishes (``plan.phase+complete``) the inference loop folds that phase's
+When ``todo.manage(action=edit)`` finishes a phase, the inference loop folds that phase's
 turns out of the live conversation — the deep-thinking (reasoning) and the
 verbose MCP results are dropped, and only a compact line of "which tools ran and
 whether they succeeded" plus the phase summary is kept. The same turns are
@@ -21,9 +21,7 @@ from api.models import ChatMessage
 # Flow-control tools are not "real work"; they should not appear in a phase's
 # MCP-status line (they are how the phase boundary itself is driven).
 _FLOW_TOOLS = {
-    "plan.create",
-    "plan.phase+complete",
-    "plan.finish",
+    "todo.manage",
     "mcp.describe+tool",
 }
 
@@ -66,12 +64,12 @@ def render_plan_required_notice() -> str:
     """System directive: plan mode is optional and should be used for complex tasks."""
     return (
         "[系统提示 · 计划模式可选]\n"
-        "当前任务可以直接执行，不必强制进入 plan 模式。若步骤较多、依赖较多、风险较高或不确定性较强，"
-        "再自行调用 plan.create 制定分阶段计划：把总体目标拆成有序的多个阶段，每个阶段写清目标(goal)"
+        "当前任务可以直接执行，不必强制建立计划。若步骤较多、依赖较多、风险较高或不确定性较强，"
+        "再自行调用 todo.manage(action=create) 制定分阶段计划：把总体目标拆成有序的多个阶段，每个阶段写清目标(goal)"
         "与结束标志(done_signal)，可在 actions 里列出子行动。\n"
-        "**重要：在调用 plan.create 之前，必须先调用 knowledge.search**（或 librarian.consult，若已绑定图书馆）"
+        "**重要：在创建计划之前，必须先调用 knowledge.search**（或 librarian.consult，若已绑定图书馆）"
         "用任务目标/关键动作构造 query，检索知识库中的相关历史流程、经验和已沉淀资料。"
-        "当前阶段可用工具：knowledge.search、librarian.consult、librarian.list_topics、plan.create。"
+        "当前阶段可用工具：knowledge.search、librarian.consult、librarian.list_topics、todo.manage。"
         "请先完成知识检索，再基于检索结果制定更准确的阶段计划。\n"
         "进入 plan 模式后，系统会自动下发当前阶段并统一控制进度。"
     )
@@ -90,7 +88,7 @@ def render_plan_overview(progress: Optional[dict]) -> str:
 
     A rebuilt run (fresh worker call, post-compression, or a user reply that
     resumes after the AI paused to confirm the plan) drops the verbose
-    ``plan.create`` tool bubble from the model context. The per-phase directive
+    ``todo.manage(action=create)`` tool bubble from the model context. The per-phase directive
     alone only re-injects the *current* phase, so the model loses the overall
     goal and the later phases it had just planned. This renders the durable plan
     state back as a compact list (goal + each phase's title/status) so the full
@@ -143,18 +141,16 @@ def render_phase_directive(phase: Optional[dict], total: int) -> str:
             if not a_goal:
                 continue
             lines.append(f"  - {a_goal}" + (f"（结束标志：{a_done}）" if a_done else ""))
-    lines.append("达成本阶段结束标志后，调用 plan.phase+complete 收尾本阶段（无需总结），由系统安排下一步。")
+    lines.append("达成本阶段结束标志后，调用 todo.manage(action=edit, status=completed) 更新本阶段；若未达成则 status=failed。系统会自动安排下一步。")
     return "\n".join(lines)
 
 
 def render_finish_required_notice(goal: str) -> str:
-    """System directive: all phases done, the run must close via plan.finish."""
+    """Compatibility directive for a persisted plan awaiting automatic finish."""
     return (
-        "[系统要求 · 收尾总结]\n"
+        "[系统提示 · 自动收尾]\n"
         f"计划「{str(goal or '').strip()}」的所有阶段均已完成。"
-        "现在必须调用 plan.finish 对整个任务做完整总结并收尾："
-        "outcome 填 success 或 failure，summary 给出完整复盘。\n"
-        "系统只接受 plan.finish 调用，其它工具一律拒绝。"
+        "系统正在自动生成总结、写入日志并完成任务，无需再调用 MCP。"
     )
 
 
@@ -162,7 +158,7 @@ def render_continue_phase_notice() -> str:
     """System directive: don't end a task by talking; keep executing the phase."""
     return (
         "[系统要求 · 继续执行]\n"
-        "当前阶段尚未收尾。请继续执行本阶段，达成结束标志后调用 plan.phase+complete；"
+        "当前阶段尚未收尾。请继续执行本阶段，达成结束标志后调用 todo.manage(action=edit) 更新阶段状态；"
         "不要用普通回复结束任务。"
     )
 

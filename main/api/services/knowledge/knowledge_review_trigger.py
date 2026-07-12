@@ -1,6 +1,6 @@
 """Plan-completion → knowledge review trigger.
 
-当一个**非图书馆**的 AI 完成一个计划（``plan.finish``）时，主动把这份计划的
+当一个**非图书馆**的 AI 完成 todo 计划并由系统自动收尾时，主动把这份计划的
 总结投喂给"绑定了图书馆（知识工坊）的那个 AI"，并唤醒它一次，由它**自己决定**
 是否把其中可复用的经验/教训沉淀进知识库（``knowledge.manage action=record_experience``，
 直接 active、无需用户审批）。
@@ -9,7 +9,7 @@
 - 复用 ``task_completion_notify`` 已验证的"等目标会话空闲→唤醒一次 run"机制；
 - 投喂落在图书馆 AI 的一个**专用会话**（``kb_auto_review``），不污染它与用户的对话；
 - 防回环：图书馆 AI 自己跑的计划不触发（executor == 绑定 AI 时跳过）；
-- best-effort：任何失败都不影响 ``plan.finish`` 本身。
+- best-effort：任何失败都不影响计划自动收尾。
 """
 
 import threading
@@ -196,7 +196,7 @@ def trigger_plan_knowledge_review(
     phases: Optional[List[Dict[str, Any]]] = None,
     log_path: str = "",
 ) -> None:
-    """在 ``plan.finish`` 后调用（best-effort，不阻塞）。
+    """在 todo 计划自动收尾后调用（best-effort，不阻塞）。
 
     若该用户有 AI 绑定了图书馆、且本计划的执行者不是该图书馆 AI，则把计划总结
     投喂给图书馆 AI 并唤醒它，由它自行决定是否沉淀进知识库。

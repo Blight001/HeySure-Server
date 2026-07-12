@@ -11,9 +11,8 @@ from tools.tasks import (
     TASK_MANAGE_SCHEMA,
 )
 from tools.task_plan import (
-    _phase_complete,
-    _plan_create,
-    _plan_finish,
+    _todo_manage,
+    TODO_MANAGE_SCHEMA,
 )
 from tools.prompts import (
     _prompt_manage,
@@ -158,110 +157,26 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         description=(
             "任务管理统一工具（任务=定时/无人值守、在独立会话中运行的后台工作）："
             "用 action 选择 list 列出 / create 创建 / update 接管更新 / delete 删除。"
+            "本工具属于图书馆 MCP，调用 AI 必须已绑定图书馆。"
             "create/update/delete 需管理者及以上。"
-            "对长动作做分阶段执行用 plan 域：plan.create / plan.phase+complete / plan.finish。"
+            "复杂长动作用 todo.manage 创建和推进计划。"
         ),
         input_schema=TASK_MANAGE_SCHEMA,
         handler=_task_manage,
         destructive=True,
     ))
 
-    # ---------- plan 域：分阶段执行（长动作；普通对话与任务对话均可用） ----------
+    # ---------- todo：统一计划管理（普通对话与任务对话均可用） ----------
     registry.register(MCPTool(
-        name="plan.create",
+        name="todo.manage",
         description=(
-            "为复杂的长动作制定一份完整计划，行动前先调用（普通对话和任务对话都可使用）。"
-            "对于实际的多阶段操作任务，**请先调用 knowledge.search（或 librarian.consult，若已绑定）检索知识库中相关历史经验与流程**，"
-            "再基于检索结果拆分阶段。"
-            "把整体目标拆成有序的多个阶段，"
-            "每个阶段有明确的目标(goal)与结束标志(done_signal)，并可在 actions 里列出该阶段的子行动"
-            "（每个子行动也有自己的 goal 与 done_signal）。"
-            "登记后从第 1 个阶段开始执行：每完成一个阶段调用 plan.phase+complete；"
-            "完成最后一个阶段时，系统会自动收尾整个计划并归档，无需再单独调用收尾工具。"
-            "同一会话只保留一份进行中的计划，重复调用会覆盖旧计划。"
+            "统一计划管理工具，只有这一个计划 MCP。action=create 创建/替换分阶段计划；"
+            "get 查看当前计划；edit 把当前阶段更新为 completed 或 failed 并自动推进；delete 删除计划。"
+            "复杂任务创建计划前先用 knowledge.search 检索历史经验。"
+            "最后阶段通过 edit 更新后，系统自动完成总结、日志归档和任务收尾，不需要其它完成工具。"
         ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "goal": {"type": "string", "description": "整个任务的总体目标，一句话讲清要交付什么。"},
-                "phases": {
-                    "type": "array",
-                    "description": "有序的阶段列表（建议 2-20 个）。阶段太少说明任务不需要计划，太多说明拆得过细。",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "description": "阶段名称。"},
-                            "goal": {"type": "string", "description": "该阶段要达成的明确目标。"},
-                            "done_signal": {"type": "string", "description": "判断该阶段已完成的明确结束标志。"},
-                            "actions": {
-                                "type": "array",
-                                "description": "该阶段的子行动列表，每个子行动有自己的 goal 与 done_signal。",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "goal": {"type": "string", "description": "子行动的目标。"},
-                                        "done_signal": {"type": "string", "description": "子行动的结束标志。"},
-                                    },
-                                    "required": ["goal"],
-                                },
-                            },
-                        },
-                        "required": ["goal", "done_signal"],
-                    },
-                },
-            },
-            "required": ["goal", "phases"],
-        },
-        handler=_plan_create,
-        destructive=True,
-    ))
-    registry.register(MCPTool(
-        name="plan.phase+complete",
-        description=(
-            "plan 的子操作：完成当前阶段并收尾（无需总结）。调用后系统会自动隐藏上一阶段的深度思考与 MCP "
-            "详细结果、只保留调用状态，并自动下发下一个阶段；若已是最后一个阶段，系统会自动收尾整个计划"
-            "并归档，无需你再调用其它收尾工具。若该阶段未达成目标，可传 status=failed 如实记录后继续。"
-            "summary 可选，一般留空即可。"
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "status": {
-                    "type": "string",
-                    "enum": ["completed", "failed"],
-                    "description": "阶段结果，默认 completed；未达成目标用 failed。",
-                },
-                "summary": {"type": "string", "description": "可选，一句话备注该阶段；留空即可。"},
-            },
-        },
-        handler=_phase_complete,
-        destructive=True,
-    ))
-    registry.register(MCPTool(
-        name="plan.finish",
-        description=(
-            "手动收尾整个计划（可选，正常情况下无需调用）。完成最后一个阶段（plan.phase+complete）时"
-            "系统会自动收尾并归档；本工具仅作为需要亲自给出完整复盘时的备用手段，且要求所有阶段均已收尾。"
-            "系统会隐藏全过程的深度思考与 MCP 详细结果，把完整行动流程写入工作区的成功/失败日志"
-            "（logs/success 或 logs/failure）。outcome=success 写成功日志，failure 写失败日志。"
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "outcome": {
-                    "type": "string",
-                    "enum": ["success", "failure"],
-                    "description": "整个任务的最终结果：success=成功，failure=失败。",
-                },
-                "summary": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "整个任务的完整复盘总结：目标、过程、产出/失败原因、可复用经验。",
-                },
-            },
-            "required": ["outcome", "summary"],
-        },
-        handler=_plan_finish,
+        input_schema=TODO_MANAGE_SCHEMA,
+        handler=_todo_manage,
         destructive=True,
     ))
     # 与用户通信：把底层机器人投递封装为业务语义上的"给用户发消息"。

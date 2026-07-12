@@ -1485,7 +1485,7 @@ def _run_worker_impl(
                         # compressed_away (intended), but this compact summary must
                         # survive a run rebuild so the model knows phases already
                         # done and does not re-plan from phase 1. Replayed as the
-                        # user role to match the live injection (see plan.phase+complete
+                        # user role to match the live injection (see todo.manage edit
                         # handler) and avoid mid-conversation system messages.
                         convo.append({"role": "user", "content": m.content})
                     elif "mcp_tool_call" in tags and "mode.manage" in (m.content or ""):
@@ -1605,7 +1605,7 @@ def _run_worker_impl(
             })
 
             pending_ai_reply_message_id = ""
-            # Planned task flow state. ``plan_state`` is non-None only while an
+            # Planned todo flow state. ``plan_state`` is non-None only while an
             # active plan exists for this (ai, session); it drives per-phase
             # context compaction. ``phase_start_convo_index`` marks where the
             # current phase begins in the live convo; ``phase_started_at`` marks
@@ -1617,7 +1617,7 @@ def _run_worker_impl(
             phase_started_at = time.time()
             phase_mcp_statuses: List[tuple] = []
             # Plan mode is optional for task runtimes. If the AI chooses to
-            # enter a plan, the system drives phase transitions and finish
+            # create a todo plan, the system drives phase transitions and finish
             # handling from that point onward.
             flow_awaiting_finish = False
             flow_nudges = 0
@@ -1628,7 +1628,7 @@ def _run_worker_impl(
             # normal conversation too — not only a task runtime — so the lookup
             # is unconditional. Without it, a rebuilt run (fresh worker call or
             # post-compression) loses the plan thread and the model re-plans from
-            # phase 1 (which abandons the live plan via plan.create).
+            # phase 1 (which abandons the live plan via todo.manage create).
             if ai_config_id is not None:
                 try:
                     plan_state = plan_service.get_active_plan(
@@ -1652,7 +1652,7 @@ def _run_worker_impl(
                 # Re-anchor the full plan skeleton first (goal + every phase's
                 # status), then the active directive. Without the overview a
                 # rebuilt run only sees the current phase and loses the rest of
-                # the plan it had registered via plan.create.
+                # the plan it had registered via todo.manage(action=create).
                 _prog = plan_service.plan_progress(bg, plan_state)
                 _overview = phase_context.render_plan_overview(_prog)
                 if _overview:
@@ -1675,12 +1675,12 @@ def _run_worker_impl(
             def _auto_finalize_plan(final_phase_since_ts: float) -> None:
                 """Close the whole plan automatically once its last phase is done.
 
-                The AI no longer has to spend a separate ``plan.finish`` turn:
-                completing the final phase *is* the finish. The outcome is derived
+                The AI only edits the final phase through ``todo.manage``;
+                completing that phase *is* the finish. The outcome is derived
                 from the phase statuses and a summary is synthesized from each
                 phase's own summary, then the durable success/failure log is
                 written, the linked task job is completed and knowledge review is
-                triggered — mirroring the ``plan.finish`` tool's side effects."""
+                triggered automatically."""
                 nonlocal plan_state, flow_awaiting_finish
                 if plan_state is None:
                     return
@@ -1699,7 +1699,7 @@ def _run_worker_impl(
                     _summary_lines.append(f"- {_title}：{_s or '（无小结）'}")
                 _summary = "\n".join(_summary_lines)
                 # Fold any still-verbose final-phase turns out of the persisted
-                # context (usually a no-op: plan.phase+complete already folded them).
+                # context (usually a no-op: todo.manage edit already folded them).
                 try:
                     phase_context.mark_phase_messages_compressed(
                         bg,
@@ -1794,7 +1794,7 @@ def _run_worker_impl(
                 except Exception:
                     logger.exception("auto plan finalize: notice persist failed")
                     bg.rollback()
-                # Plan is closed; drop the flow state so nothing forces plan.finish.
+                # Plan is closed; drop the flow state.
                 plan_state = None
                 flow_awaiting_finish = False
 
@@ -1802,7 +1802,7 @@ def _run_worker_impl(
             # current phase. Without one, only a task runtime is nudged to plan
             # (plan mode stays optional/AI-driven in normal conversations).
             # A resumed run whose plan already closed its last phase is finalized
-            # here rather than forcing a separate plan.finish turn.
+            # here without forcing any separate finish call.
             _was_awaiting_finish_on_load = flow_awaiting_finish
             if flow_awaiting_finish:
                 _auto_finalize_plan(phase_started_at)
@@ -1819,7 +1819,7 @@ def _run_worker_impl(
                 if name in MCP_INTROSPECTION_TOOLS:
                     return True
                 if flow_awaiting_finish:
-                    return name == "plan.finish"
+                    return name == "todo.manage"
                 return True
 
             for step_index in range(max_steps):
@@ -1921,12 +1921,10 @@ def _run_worker_impl(
                             "librarian.list_topics",
                         }
                         current_exposed_tools = (
-                            {"plan.create"} | set(MCP_INTROSPECTION_TOOLS) | _pre_plan_kb_tools
+                            {"todo.manage"} | set(MCP_INTROSPECTION_TOOLS) | _pre_plan_kb_tools
                         ) & set(effective_tool_allowlist)
                     elif is_task_runtime and flow_awaiting_finish:
-                        current_exposed_tools = (
-                            {"plan.finish"} | set(MCP_INTROSPECTION_TOOLS)
-                        ) & set(effective_tool_allowlist)
+                        current_exposed_tools = set(MCP_INTROSPECTION_TOOLS) & set(effective_tool_allowlist)
                     step_tools, native_tool_name_map = _build_native_tools_payload(current_exposed_tools)
                 else:
                     current_exposed_tools = set()
@@ -2295,7 +2293,7 @@ def _run_worker_impl(
                     and bool(getattr(user, "conversation_auto_compress_enabled", True))
                     and not task_is_finished
                     and not compression_failed
-                    and payload_tool not in ("plan.phase+complete", "plan.finish")
+                    and payload_tool != "todo.manage"
                 ):
                     threshold = token_threshold_override if token_threshold_override is not None else max(1, int(cfg.token_limit or 1))
                     session_tokens = _session_total_tokens(bg, user_id, ai_kind, session_id, ai_config_id)
@@ -2444,7 +2442,8 @@ def _run_worker_impl(
                         finally:
                             pending_ai_reply_message_id = ""
                     # Auto-finalize simple (non-plan) task jobs when the run ends naturally.
-                    # If a plan was created, the AI is required to call plan.finish explicitly
+                    # If a todo plan exists, the AI must keep working until its current
+                    # phase is updated through todo.manage(action=edit).
                     # (enforced by flow_awaiting_finish + _flow_allowed_tool).
                     if task_job is not None and str(getattr(task_job, "status", "") or "").strip() not in {"completed", "cancelled", "stopped", "error"}:
                         try:
@@ -2841,13 +2840,21 @@ def _run_worker_impl(
                     _set_run_live_phase(run_id, "generating")
                     continue
 
-                # Planned task flow (system-driven). ``plan.create`` is followed
-                # by the system handing the AI phase 1; ``plan.phase+complete`` folds
-                # the finished phase out of context and the system hands over the
-                # next phase (or requires plan.finish); ``plan.finish`` closes the
-                # whole plan run. Simple (non-plan) tasks complete naturally without
-                # an explicit completion tool call.
-                if (not tool_failed) and tool == "plan.create":
+                # Planned task flow (system-driven). All plan operations use the
+                # single todo.manage MCP. create starts the flow; edit closes the
+                # current phase and hands over the next; editing the last phase
+                # auto-finalizes. Legacy normalized calls may omit action, so infer
+                # it from their old argument shapes.
+                todo_action = str((arguments or {}).get("action") or "").strip().lower()
+                if tool == "todo.manage" and not todo_action:
+                    if (arguments or {}).get("phases") is not None or (arguments or {}).get("goal"):
+                        todo_action = "create"
+                    elif any(key in (arguments or {}) for key in ("status", "summary", "outcome")):
+                        todo_action = "edit"
+                    else:
+                        todo_action = "get"
+
+                if (not tool_failed) and tool == "todo.manage" and todo_action == "create":
                     # Answer the tool call, then drive straight into phase 1 — the
                     # AI never has to poll plan progress itself.
                     if _has_native_tc:
@@ -2871,7 +2878,7 @@ def _run_worker_impl(
                         ) if ai_config_id is not None else None
                         flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
                     except Exception:
-                        logger.exception("plan reload after plan.create failed")
+                        logger.exception("plan reload after todo.manage create failed")
                         plan_state = None
                     flow_nudges = 0
                     phase_start_convo_index = len(convo)
@@ -2890,7 +2897,7 @@ def _run_worker_impl(
                     _set_run_live_phase(run_id, "generating")
                     continue
 
-                if (not tool_failed) and tool == "plan.phase+complete" and plan_state is not None:
+                if (not tool_failed) and tool == "todo.manage" and todo_action == "edit" and plan_state is not None:
                     result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
                     finished_phase = result_payload.get("finished_phase") if isinstance(result_payload, dict) else None
                     boundary = max(0, min(phase_start_convo_index, len(convo)))
@@ -2940,15 +2947,15 @@ def _run_worker_impl(
                         ) if ai_config_id is not None else None
                         flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
                     except Exception:
-                        logger.exception("plan reload after plan.phase+complete failed")
+                        logger.exception("plan reload after todo.manage edit failed")
                     flow_nudges = 0
                     phase_start_convo_index = len(convo)
                     phase_started_at = time.time()
                     phase_mcp_statuses = []
                     # System drives the next step: hand over the next phase, or —
                     # when every phase is done — finalize the whole plan on its own.
-                    # Completing the last phase IS the finish; the AI does not need
-                    # a separate, forced plan.finish turn.
+                    # Completing the last phase IS the finish; there is no separate
+                    # completion MCP.
                     if flow_awaiting_finish:
                         _auto_finalize_plan(phase_started_at)
                         _set_run_live_phase(run_id, "idle")
@@ -2967,131 +2974,67 @@ def _run_worker_impl(
                     _set_run_live_phase(run_id, "generating")
                     continue
 
-                if (not tool_failed) and tool == "plan.finish":
-                    result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
-                    finish_outcome = str(result_payload.get("outcome") or "").strip() or "success"
-                    finish_job_id = str(result_payload.get("job_id") or "").strip()
-                    finish_log_path = str(result_payload.get("log_path") or "").strip()
-                    finish_summary = str((arguments or {}).get("summary") or "").strip()
-                    # Hide the whole run's deep-thinking + MCP detail: the final
-                    # phase (since its boundary) still carries verbose turns;
-                    # earlier phases were already folded at plan.phase+complete.
-                    now_ts = time.time()
-                    completed_job = None
-                    if finish_job_id and ai_config_id is not None:
-                        completed_job = bg.exec(
-                            select(AITaskJob).where(
-                                AITaskJob.user_id == user_id,
-                                AITaskJob.ai_config_id == ai_config_id,
-                                AITaskJob.job_id == finish_job_id,
-                            )
-                        ).first()
-                    if completed_job is None and task_job is not None:
-                        completed_job = task_job
-                    try:
-                        phase_context.mark_phase_messages_compressed(
-                            bg,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            since_ts=phase_started_at,
-                            until_ts=now_ts,
-                        )
-                    except Exception:
-                        logger.exception("plan.finish compaction tagging failed")
-                    next_loop_job = None
-                    if completed_job is not None:
-                        try:
-                            notify_task_completion(
-                                user_id=user_id,
-                                job_id=str(completed_job.job_id or ""),
-                                summary=finish_summary,
-                            )
-                        except Exception:
-                            logger.exception("plan.finish completion notify failed")
-                        # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
-                        # 未续期（非循环 / 循环已结束）才真正标记完成。
-                        next_loop_job = _renew_loop_scheduled_job(bg, completed_job, now_ts)
-                        if next_loop_job is None:
-                            completed_job.status = "completed"
-                            completed_job.finished_at = now_ts
-                            completed_job.updated_at = now_ts
-                            bg.add(completed_job)
-                    finish_notice_lines = [
-                        "[系统提示]",
-                        f"任务已通过 `plan.finish` 收尾，结果：{'成功' if finish_outcome == 'success' else '失败'}。",
-                    ]
-                    if finish_log_path:
-                        finish_notice_lines.append(
-                            f"- 完整流程已写入{'成功' if finish_outcome == 'success' else '失败'}日志: {finish_log_path}"
-                        )
-                    if next_loop_job is not None:
-                        finish_notice_lines.append(f"- 循环任务已续期: {next_loop_job.job_id} 回到待执行状态，等待下一轮定时触发")
-                    finish_notice_lines.append("")
-                    if next_loop_job is not None:
-                        finish_notice_lines.append("本轮任务对话已收尾，下一轮到点后将继续执行。")
-                    else:
-                        finish_notice_lines.append("本任务对话已自动锁定，不再继续后续操作。")
-                    _save_message(
-                        bg,
-                        user_id,
-                        ChatMessageCreate(
-                            role="system",
-                            content="\n".join(finish_notice_lines),
-                            tags="system_notice_task_complete",
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            model=model,
-                            total_tokens=0,
-                        ),
-                    )
-                    bg.commit()
-                    _set_run_live_phase(run_id, "idle")
-                    _run_set_status(run_id, "completed", finished=True)
-                    return
-
-                else:
-                    screenshot_message = _browser_screenshot_image_message(tool, tool_result)
-                    attach_screenshot = bool(screenshot_message) and not image_input_disabled
-                    if attach_screenshot:
-                        _prune_prior_runtime_screenshot_images(convo)
+                if (not tool_failed) and tool == "todo.manage" and todo_action == "delete":
                     if _has_native_tc:
-                        # Native path: use tool role so model sees structured result.
                         convo.append({
                             "role": "tool",
                             "tool_call_id": _tc_id or "call_0",
-                            "content": _safe_json(_model_visible_tool_result(
-                                tool,
-                                tool_result,
-                                image_attached=attach_screenshot,
-                            )),
+                            "content": _safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False)),
                         })
-                        if attach_screenshot:
-                            convo.append(screenshot_message)
                     else:
-                        follow_up_text = (
-                            f"[MCP执行{'失败' if tool_failed else '确认'}]\n"
-                            f"系统已执行工具：{tool}\n"
-                            f"执行状态：{'失败' if tool_failed else '成功'}\n\n"
-                            "[工具参数]\n"
-                            f"{_safe_json(arguments)}\n\n"
-                            "[工具执行结果]\n"
-                            f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=attach_screenshot))}\n\n"
-                            "请基于以上结果继续完成任务。"
-                        )
-                        if attach_screenshot:
-                            convo.append({
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": follow_up_text},
-                                    *screenshot_message["content"],
-                                ],
-                            })
-                        else:
-                            convo.append({"role": "user", "content": follow_up_text})
+                        convo.append({
+                            "role": "user",
+                            "content": (
+                                f"[MCP执行确认]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
+                                "[工具执行结果]\n"
+                                f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
+                            ),
+                        })
+                    plan_state = None
+                    flow_awaiting_finish = False
+                    flow_nudges = 0
+                    phase_mcp_statuses = []
+                    _set_run_live_phase(run_id, "generating")
+                    continue
+
+                screenshot_message = _browser_screenshot_image_message(tool, tool_result)
+                attach_screenshot = bool(screenshot_message) and not image_input_disabled
+                if attach_screenshot:
+                    _prune_prior_runtime_screenshot_images(convo)
+                if _has_native_tc:
+                    # Native path: use tool role so model sees structured result.
+                    convo.append({
+                        "role": "tool",
+                        "tool_call_id": _tc_id or "call_0",
+                        "content": _safe_json(_model_visible_tool_result(
+                            tool,
+                            tool_result,
+                            image_attached=attach_screenshot,
+                        )),
+                    })
+                    if attach_screenshot:
+                        convo.append(screenshot_message)
+                else:
+                    follow_up_text = (
+                        f"[MCP执行{'失败' if tool_failed else '确认'}]\n"
+                        f"系统已执行工具：{tool}\n"
+                        f"执行状态：{'失败' if tool_failed else '成功'}\n\n"
+                        "[工具参数]\n"
+                        f"{_safe_json(arguments)}\n\n"
+                        "[工具执行结果]\n"
+                        f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=attach_screenshot))}\n\n"
+                        "请基于以上结果继续完成任务。"
+                    )
+                    if attach_screenshot:
+                        convo.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": follow_up_text},
+                                *screenshot_message["content"],
+                            ],
+                        })
+                    else:
+                        convo.append({"role": "user", "content": follow_up_text})
                 _set_run_live_phase(run_id, "generating")
 
             notice = (

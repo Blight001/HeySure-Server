@@ -28,13 +28,16 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
     "conversation.new": "conversation.manage",
     "conversation.forget_before_current": "conversation.manage",
     "conversation.find": "conversation.manage",
-    # 任务管理（完成用 plan.finish 或自然结束，task 域仅管理）
+    # 任务管理（计划流统一走 todo.manage，task 域仅管理后台任务）
     "task.create": "task.manage",
     "task.list": "task.manage",
     "task.update": "task.manage",
     "task.delete": "task.manage",
-    # plan 域：phase 收归 plan 子操作
-    "phase.complete": "plan.phase+complete",
+    # 历史计划工具全部收归 todo.manage；handler 会按参数推断旧调用动作。
+    "phase.complete": "todo.manage",
+    "plan.create": "todo.manage",
+    "plan.phase+complete": "todo.manage",
+    "plan.finish": "todo.manage",
     # Prompt
     "prompt.list_targets": "prompt.manage",
     "prompt.read_ai": "prompt.manage",
@@ -49,7 +52,7 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
     # 改成 + 后下划线只可能是域分隔符（见 resolve_tool_name）。
     "mcp.describe_tool": "mcp.describe+tool",
     "workspace.run_command": "workspace.run+command",
-    "plan.phase_complete": "plan.phase+complete",
+    "plan.phase_complete": "todo.manage",
     "message.send_to_user": "message.send+to+user",
     "message.send_to_ai": "message.send+to+ai",
     "device_mcp.manage": "device+mcp.manage",

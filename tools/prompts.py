@@ -47,7 +47,7 @@ SYSTEM_PROMPT_USAGE = {
     "default_resume_task_prompt": "任务传承/恢复时的默认注入提示，不是 AI 基础人格 prompt。",
     "default_supervision_prompt": "任务空闲监督时的默认追问提示，不是 AI 基础人格 prompt。",
     "default_compression_prompt": "数字成员会话 token 达到阈值时，用于把较早的对话历史压缩成摘要的模板，不是 AI 基础人格 prompt。",
-    "task_plan_flow_prompt": "任务运行时注入的分阶段流程说明（先规划→逐阶段执行→plan.finish 收尾），由系统强制驱动。",
+    "task_plan_flow_prompt": "任务运行时注入的分阶段流程说明（todo.manage 创建→edit 推进→末阶段自动收尾），由系统强制驱动。",
 }
 
 

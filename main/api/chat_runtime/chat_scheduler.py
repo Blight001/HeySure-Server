@@ -126,7 +126,7 @@ def _start_task_run(
         + payload_block
         + briefing_block
         + "**执行前必做**：先调用 knowledge.search（用任务标题或核心动作构造 query），语义召回图书馆里相关的主题思想（传承思想），包括可复用的操作 SOP、SKILL 包和过往经验。检索结果是决定执行策略和是否制定分阶段计划的依据。\n\n"
-        + "简单任务执行结束后自然完成；若使用了 plan.create，则最后必须调用 plan.finish 收尾。"
+        + "简单任务执行结束后自然完成；复杂任务用 todo.manage(action=create) 建计划，阶段完成后用 action=edit 更新，最后阶段由系统自动收尾。"
     )
     user_msg = _save_message(
         session,

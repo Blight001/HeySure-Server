@@ -53,12 +53,9 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # handler. The self-execution operators below stay separate because the
     # task-runtime flow drives them by name.
     "task.manage": ROLE_MEMBER,
-    # plan 域：分阶段执行（普通对话与任务对话均可用）。phase_complete/finish
-    # 是 plan 的子操作；每个成员都能为自己的长动作制定并推进计划。
-    # 注意：创建计划后必须用 plan.finish 收尾，小任务可不走计划流程。
-    "plan.create": ROLE_MEMBER,
-    "plan.phase+complete": ROLE_MEMBER,
-    "plan.finish": ROLE_MEMBER,
+    # 统一计划管理：create/get/edit/delete 全部走 todo.manage；edit 完成当前阶段，
+    # 最后阶段更新后由系统自动收尾。
+    "todo.manage": ROLE_MEMBER,
     # Unified prompt tool. Member floor so everyone can read its own prompt; the
     # write/system actions are gated inside the handler (write_ai=manager+,
     # read_system=manager+, write_system=assistant_admin+).
@@ -82,11 +79,12 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
 
 
 # 图书馆（绑定制）工具：在角色门槛之外，**还要求调用 AI 已绑定知识工坊（图书馆）**。
-# 这些是治理/管理类能力（prompt 管理、管理员操作、设备管理、知识库管理）。其余
+# 这些是治理/管理类能力（任务管理、prompt 管理、管理员操作、设备管理、知识库管理）。其余
 # 服务端固定工具属于「工具箱」，每个 AI 默认即可用、无需绑定。``knowledge.manage``
 # 的门面早已在 workshop 引擎内校验绑定，这里一并登记以表达完整的图书馆工具集，
 # 中央分发处的绑定校验对它是幂等的；知识库具体操作经 knowledge.manage action 分发。
 LIBRARY_BOUND_TOOLS: Set[str] = {
+    "task.manage",
     "prompt.manage",
     "admin.manage",
     "device+mcp.manage",

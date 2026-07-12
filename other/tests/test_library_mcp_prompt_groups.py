@@ -1,11 +1,14 @@
 import json
 
+from api.chat_runtime.chat_prompt_utils import _filter_tools_for_current_bindings
 from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
 from mcp_runtime.mcp.permissions import (
     LIBRARY_BOUND_TOOLS,
     clamp_tools_json,
     effective_allowed_for_tier,
+    requires_library_binding,
 )
+from tools.engine import is_toolbox_gated_tool, toolbox_capability_names
 
 
 class _User:
@@ -34,6 +37,29 @@ def test_clamp_tools_json_keeps_library_bound_tools_despite_role_policy():
         clamp_tools_json(_User(), "digital_member_member", requested)
     )
     assert set(clamped) == set(LIBRARY_BOUND_TOOLS)
+
+
+def test_task_manage_belongs_to_library_instead_of_toolbox():
+    assert "task.manage" in LIBRARY_BOUND_TOOLS
+    assert requires_library_binding("task.manage") is True
+    assert is_toolbox_gated_tool("task.manage") is False
+    assert "task.manage" not in toolbox_capability_names()
+
+
+def test_unbound_ai_loses_task_manage_but_keeps_todo_tool(monkeypatch):
+    monkeypatch.setattr(
+        "api.devices.workshop_bindings.config_bound_to_library",
+        lambda user_id, ai_config_id: False,
+    )
+
+    filtered = _filter_tools_for_current_bindings(
+        {"task.manage", "todo.manage"},
+        user_id=1,
+        ai_config_id=42,
+    )
+
+    assert "task.manage" not in filtered
+    assert "todo.manage" in filtered
 
 
 def test_mode_manage_allowed_despite_restrictive_role_policy():
@@ -83,3 +109,6 @@ def test_build_prompt_tool_groups_includes_governance_tools(monkeypatch):
     library_group = next(group for group in groups if group.get("groupKey") == "library")
     names = {tool["name"] for tool in library_group["tools"]}
     assert LIBRARY_BOUND_TOOLS.issubset(names)
+    assert "task.manage" in names
+    toolbox_group = next(group for group in groups if group.get("groupKey") == "toolbox")
+    assert "task.manage" not in {tool["name"] for tool in toolbox_group["tools"]}

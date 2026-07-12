@@ -1,18 +1,18 @@
-"""MCP tools for the phased execution flow (the ``plan`` domain).
+"""Unified ``todo.manage`` MCP for phased execution.
 
 A plan breaks a long action into ordered phases so quality stays high. It is
 *not* the same thing as a task: a task (see :mod:`tools.tasks`)
 is scheduled, independent work that runs in its own session, whereas a plan can
-appear inside either a normal conversation or a task conversation. ``phase`` is
-a sub-operation of ``plan`` and lives under the ``plan.*`` namespace; closing a
-run uses the plan-domain ``plan.finish`` (the ``plan`` namespace stays separate).
+appear inside either a normal conversation or a task conversation. The AI only
+sees one tool and selects an operation with ``action``:
 
-The AI drives a plan through three tools:
+- ``create`` creates/replaces the phased plan
+- ``get`` reads the current plan
+- ``edit`` closes the current phase as completed/failed and advances
+- ``delete`` abandons the current plan
 
-- ``plan.create``         commit a full multi-phase plan before acting
-- ``plan.phase+complete`` finish the current phase (runtime then hides its
-                          deep-thinking + MCP detail from the live context)
-- ``plan.finish``         summarize the whole plan into a success/failure log
+Completing the final phase through ``edit`` automatically finalizes the whole
+plan; there is no separate phase-complete or finish MCP.
 
 Durable plan state lives in :mod:`api.services.tasks.task_plan`; the conversation
 context side effects are applied by the inference loop.
@@ -28,8 +28,6 @@ from api.database import engine
 from api.models import AITaskJob
 from api.services.tasks import task_plan as plan_service
 from connector_runtime.dispatch.device_dispatch import get_run_session_context
-# get_project_root is imported inside _plan_finish to avoid circular import
-# (tools.task_plan <-> mcp_runtime.mcp.registry during full MCP bootstrap)
 
 
 def _run_context() -> Dict[str, Any]:
@@ -65,7 +63,7 @@ def _resolve_job_id(session: Session, user_id: int, ai_config_id: int, session_i
 
 def _require_ai_config_id(ai_config_id: Optional[int]) -> int:
     if not ai_config_id:
-        raise HTTPException(status_code=400, detail="ai_config_id is required for plan tools")
+        raise HTTPException(status_code=400, detail="ai_config_id is required for todo.manage")
     return int(ai_config_id)
 
 
@@ -95,9 +93,9 @@ def _plan_create(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
         "created": True,
         "plan": progress,
         "next_step_hint": (
-            "计划已登记。现在从第 1 个阶段开始执行；完成一个阶段后调用 plan.phase+complete 收尾该阶段"
-            "（系统会自动精简上一阶段的上下文）；完成最后一个阶段时系统会自动收尾整个计划并归档，"
-            "无需再单独调用收尾工具。"
+            "计划已登记。现在从第 1 个阶段开始执行；完成一个阶段后调用 "
+            "todo.manage(action=edit, status=completed) 更新阶段状态。系统会自动精简上一阶段上下文并下发下一阶段；"
+            "最后一个阶段编辑为 completed/failed 后会自动收尾并归档。"
         ),
     }
 
@@ -108,14 +106,14 @@ def _plan_get(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -
     with Session(engine) as session:
         plan = plan_service.get_active_plan(session, user_id, cfg_id, session_id)
         if plan is None:
-            return {"has_plan": False, "note": "当前没有进行中的计划。复杂任务请先用 knowledge.search（或 librarian.consult）检索相关知识，再用 plan.create 制定计划。"}
+            return {"has_plan": False, "note": "当前没有进行中的计划。复杂任务请先用 knowledge.search（或 librarian.consult）检索相关知识，再用 todo.manage(action=create) 制定计划。"}
         return {"has_plan": True, "plan": plan_service.plan_progress(session, plan)}
 
 
 def _phase_complete(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     cfg_id = _require_ai_config_id(ai_config_id)
     # Summary is optional: the system drives phase progression, so
-    # plan.phase+complete only needs to mark the boundary.
+    # todo.manage(action=edit) marks the current phase boundary.
     summary = str((args or {}).get("summary") or "").strip()
     status = str((args or {}).get("status") or "completed").strip().lower()
     if status not in {"completed", "failed"}:
@@ -124,7 +122,7 @@ def _phase_complete(user_id: int, args: Dict[str, Any], ai_config_id: Optional[i
     with Session(engine) as session:
         plan = plan_service.get_active_plan(session, user_id, cfg_id, session_id)
         if plan is None:
-            raise HTTPException(status_code=404, detail="没有进行中的计划；请先 plan.create 或直接作答。")
+            raise HTTPException(status_code=404, detail="没有进行中的计划；请先 todo.manage(action=create) 或直接作答。")
         result = plan_service.complete_current_phase(session, plan, summary=summary, status=status)
         progress = plan_service.plan_progress(session, plan)
     hint = (
@@ -142,79 +140,91 @@ def _phase_complete(user_id: int, args: Dict[str, Any], ai_config_id: Optional[i
     }
 
 
-def _plan_finish(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+def _plan_delete(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     cfg_id = _require_ai_config_id(ai_config_id)
-    summary = str((args or {}).get("summary") or "").strip()
-    if not summary:
-        raise HTTPException(status_code=400, detail="summary is required: 给出整个任务的完整复盘总结。")
-    outcome = str((args or {}).get("outcome") or "").strip().lower()
-    if outcome not in {"success", "failure"}:
-        raise HTTPException(status_code=400, detail="outcome 必须是 success 或 failure。")
     session_id = _resolve_session_id(args)
+    reason = str((args or {}).get("reason") or (args or {}).get("summary") or "").strip()
     with Session(engine) as session:
         plan = plan_service.get_active_plan(session, user_id, cfg_id, session_id)
         if plan is None:
-            raise HTTPException(status_code=404, detail="没有进行中的计划可以收尾。")
-        unfinished = plan_service.unfinished_phases(session, plan)
-        if unfinished:
-            labels = "；".join(
-                f"阶段{int(item.get('seq', 0)) + 1}（{item.get('title') or item.get('goal') or '未命名'}，状态={item.get('status') or 'unknown'}）"
-                for item in unfinished[:5]
-            )
-            more = "；..." if len(unfinished) > 5 else ""
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "阶段性目标尚未全部收尾，已自动阻止 plan.finish。"
-                    "请先继续执行当前阶段；达成结束标志后调用 plan.phase+complete，"
-                    "若该阶段失败也请用 plan.phase+complete(status=failed) 如实收尾。"
-                    f"未收尾阶段：{labels}{more}"
-                ),
-            )
-        plan_service.finish_plan(session, plan, outcome=outcome, summary=summary)
-        phases = plan_service.list_phases(session, plan.plan_id)
-        from mcp_runtime.mcp.core import get_project_root
-        workspace_root = get_project_root(user_id, cfg_id)
-        try:
-            log_path = plan_service.write_outcome_log(workspace_root, plan, phases, summary=summary)
-        except Exception as exc:  # log failure must not abort task completion
-            log_path = ""
-            log_error = str(exc)
-        else:
-            log_error = ""
-        progress = plan_service.plan_progress(session, plan)
-        job_id = plan.job_id
-    result: Dict[str, Any] = {
-        "finished": True,
-        "outcome": outcome,
-        "plan_id": progress["plan_id"],
-        "job_id": job_id,
-        "log_path": log_path,
-        "next_step_hint": (
-            "任务已收尾，完整流程已写入"
-            + ("成功" if outcome == "success" else "失败")
-            + "日志，供后续沉淀为可复用知识。"
-        ),
+            return {"deleted": False, "note": "当前没有进行中的计划。"}
+        progress = plan_service.abandon_plan(session, plan, reason=reason)
+    return {
+        "deleted": True,
+        "plan": progress,
+        "note": "计划已删除（历史记录保留为 abandoned）。",
     }
-    if log_error:
-        result["log_warning"] = f"日志写入失败（不影响任务收尾）: {log_error}"
 
-    # 计划收尾后：若有 AI 绑定了图书馆且执行者不是它，主动把本计划总结投喂给
-    # 图书馆 AI，由它自行决定是否沉淀进知识库（best-effort，不影响收尾返回）。
-    try:
-        from api.services.knowledge.knowledge_review_trigger import trigger_plan_knowledge_review
 
-        trigger_plan_knowledge_review(
-            user_id=user_id,
-            executor_ai_config_id=cfg_id,
-            goal=progress.get("goal") or "",
-            outcome=outcome,
-            summary=summary,
-            phases=progress.get("phases") or [],
-            log_path=log_path,
-        )
-    except Exception:
-        pass
+def _infer_todo_action(args: Dict[str, Any]) -> str:
+    """Infer legacy calls that were normalized from old plan.* names."""
+    action = str((args or {}).get("action") or "").strip().lower()
+    if action:
+        return action
+    if (args or {}).get("phases") is not None or (args or {}).get("goal") or (args or {}).get("objective"):
+        return "create"
+    if any(key in (args or {}) for key in ("status", "summary", "outcome")):
+        return "edit"
+    return "get"
 
-    return result
+
+def _todo_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+    """Single MCP entry point for plan create/read/phase-close/delete."""
+    action = _infer_todo_action(args)
+    if action == "create":
+        return _plan_create(user_id, args, ai_config_id)
+    if action in {"get", "list", "read"}:
+        return _plan_get(user_id, args, ai_config_id)
+    if action in {"edit", "update", "complete"}:
+        return _phase_complete(user_id, args, ai_config_id)
+    if action in {"delete", "remove", "abandon"}:
+        return _plan_delete(user_id, args, ai_config_id)
+    raise HTTPException(status_code=400, detail="action 必须是 create、get、edit 或 delete。")
+
+
+TODO_MANAGE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["create", "get", "edit", "delete"],
+            "description": "create 创建/替换计划；get 查看计划；edit 完成当前阶段并推进；delete 删除当前计划。",
+        },
+        "goal": {"type": "string", "description": "create：整个任务的总体目标。"},
+        "phases": {
+            "type": "array",
+            "description": "create：有序阶段列表，每阶段必须有 goal 与 done_signal。",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "阶段名称。"},
+                    "goal": {"type": "string", "description": "阶段目标。"},
+                    "done_signal": {"type": "string", "description": "阶段完成的明确判断标准。"},
+                    "actions": {
+                        "type": "array",
+                        "description": "可选子行动。",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {"type": "string"},
+                                "done_signal": {"type": "string"},
+                            },
+                            "required": ["goal"],
+                        },
+                    },
+                },
+                "required": ["goal", "done_signal"],
+            },
+        },
+        "status": {
+            "type": "string",
+            "enum": ["completed", "failed"],
+            "description": "edit：当前阶段结果；默认 completed。最后阶段更新后系统自动收尾整个计划。",
+        },
+        "summary": {"type": "string", "description": "edit：阶段小结；delete：删除原因。"},
+        "reason": {"type": "string", "description": "delete：可选删除原因。"},
+        "session_id": {"type": "string", "description": "可选；默认使用当前会话。"},
+    },
+    "required": ["action"],
+}
 

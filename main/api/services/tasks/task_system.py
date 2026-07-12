@@ -37,17 +37,15 @@ TASK_RUNTIME_REQUIRED_TOOLS = {
     # tier while gating create/update/delete to manager+.
     "task.manage",
     "message.send+to+ai",
-    # Planned task flow: a task runtime can always plan and close out its own
-    # plan even when the operational tool allowlist is narrowed.
+    # Planned task flow: create/get/edit/delete all use one MCP. Editing the
+    # final phase automatically closes the plan.
     # Small/non-plan tasks no longer require an explicit completion MCP call.
-    "plan.create",
-    "plan.phase+complete",
-    "plan.finish",
+    "todo.manage",
 }
 
 # Injected into the task-runtime system prompt. The flow is enforced by the
-# runtime (see ai_runtime.inference.core): plan first, the system hands over
-# each phase, and the run must close via plan.finish (only when a plan was created).
+# runtime (see ai_runtime.inference.core): todo.create first, the system hands over
+# each phase, and todo.edit advances/automatically closes the final phase.
 # Simple tasks do not require an explicit completion tool. The text is editable as a
 # 固有思想 system prompt (key ``task_plan_flow_prompt``); this constant is only
 # the built-in fallback.
