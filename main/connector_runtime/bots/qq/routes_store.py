@@ -54,6 +54,15 @@ class QQRouteHandle:
         return int(self.row.next_msg_seq or 1)
 
 
+@dataclass(frozen=True)
+class QQBoundTarget:
+    """A QQ recipient learned from an inbound, already-bound conversation."""
+
+    target_id: str
+    target_type: str
+    session_id: str
+
+
 def _decode_target(row: BotSessionRoute) -> tuple[str, str]:
     try:
         target = json.loads(row.target_json or "{}")
@@ -137,3 +146,40 @@ def load_qq_route(
         return None
     target_id, target_type = _decode_target(row)
     return QQRouteHandle(row=row, target_id=target_id, target_type=target_type)
+
+
+def find_qq_bound_target(
+    session: "Session",
+    *,
+    user_id: int,
+    ai_config_id: int,
+    ai_kind: str,
+    session_id: str = "",
+) -> Optional[QQBoundTarget]:
+    """Resolve a recipient previously learned from QQ inbound traffic.
+
+    When ``session_id`` is present the lookup is intentionally exact: a tool
+    running inside a QQ-owned conversation must notify that same identity.
+    With no session id, the most recently refreshed QQ route is used; this is
+    the fallback needed by web/background runs that have no bot session of
+    their own.
+    """
+    stmt = select(BotSessionRoute).where(
+        BotSessionRoute.channel == CHANNEL,
+        BotSessionRoute.user_id == int(user_id),
+        BotSessionRoute.ai_config_id == int(ai_config_id),
+        BotSessionRoute.ai_kind == str(ai_kind or "core"),
+    )
+    wanted_session_id = str(session_id or "").strip()
+    if wanted_session_id:
+        stmt = stmt.where(BotSessionRoute.session_id == wanted_session_id)
+    rows = session.exec(stmt.order_by(BotSessionRoute.updated_at.desc())).all()
+    for row in rows:
+        target_id, target_type = _decode_target(row)
+        if target_id:
+            return QQBoundTarget(
+                target_id=target_id,
+                target_type=target_type or "c2c",
+                session_id=str(row.session_id or ""),
+            )
+    return None

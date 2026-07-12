@@ -9,12 +9,12 @@ import os
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
-from sqlmodel import Session
+from sqlmodel import Session, select
 
-from connector_runtime.bots.messaging import MediaPayload, dispatcher
+from connector_runtime.bots.messaging import MediaPayload, Recipient, dispatcher
 from api.database import engine
 from mcp_runtime.mcp.core import get_project_root, safe_join
-from api.models import User
+from api.models import AssistantAIConfig, User
 from ai_runtime.inference import ai_message_service
 from connector_runtime.dispatch.device_dispatch import get_run_session_context
 
@@ -47,6 +47,103 @@ def _coerce_message_type(raw: Any) -> str:
 
 # ---------- 与用户通信 ----------
 
+def _qq_not_bound(message: str, *, reason: str) -> Dict[str, Any]:
+    """Return a model-readable binding failure instead of a transport error."""
+    return {
+        "delivered": False,
+        "channel": "qq",
+        "reason": reason,
+        "message": message,
+    }
+
+
+def _resolve_qq_notification_recipient(
+    user_id: int,
+    ai_config_id: Optional[int],
+) -> tuple[Optional[Recipient], str, Optional[Dict[str, Any]]]:
+    """Resolve the QQ user currently bound to this AI without caller ids.
+
+    Priority is deliberately deterministic:
+    1. the QQ route for the MCP call's current conversation;
+    2. the default target explicitly configured for this AI;
+    3. the most recently used QQ route for web/background conversations.
+    """
+    if not ai_config_id:
+        return None, "", _qq_not_bound(
+            "当前 AI 未绑定 QQ 连接（缺少 AI 配置上下文）。",
+            reason="qq_ai_config_missing",
+        )
+
+    run_ctx = get_run_session_context() or {}
+    current_session_id = str(run_ctx.get("session_id") or "").strip()
+    with Session(engine) as session:
+        cfg = session.exec(
+            select(AssistantAIConfig).where(
+                AssistantAIConfig.id == int(ai_config_id),
+                AssistantAIConfig.user_id == int(user_id),
+            )
+        ).first()
+        if cfg is None:
+            return None, "", _qq_not_bound(
+                "当前 AI 未绑定 QQ 连接（未找到对应的 AI 配置）。",
+                reason="qq_ai_config_not_found",
+            )
+        if str(cfg.bot_channel or "").strip().lower() != "qq":
+            return None, "", _qq_not_bound(
+                "当前 AI 未绑定 QQ 连接（当前机器人渠道不是 QQ）。",
+                reason="qq_channel_not_bound",
+            )
+
+        from connector_runtime.bots.qq._config import read_qq_config
+        from connector_runtime.bots.qq.routes_store import find_qq_bound_target
+
+        qq_cfg = read_qq_config(cfg)
+        if not qq_cfg.get("enabled"):
+            return None, "", _qq_not_bound(
+                "当前 AI 未绑定可用的 QQ 连接（QQ 机器人未启用）。",
+                reason="qq_not_enabled",
+            )
+        if not str(qq_cfg.get("app_id") or "").strip() or not str(qq_cfg.get("app_secret") or "").strip():
+            return None, "", _qq_not_bound(
+                "当前 AI 未绑定可用的 QQ 连接（App ID / App Secret 配置不完整）。",
+                reason="qq_credentials_missing",
+            )
+
+        ai_kind = str(run_ctx.get("ai_kind") or "").strip()
+        if ai_kind not in {"assistant", "core"}:
+            ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
+
+        if current_session_id:
+            current = find_qq_bound_target(
+                session,
+                user_id=user_id,
+                ai_config_id=int(ai_config_id),
+                ai_kind=ai_kind,
+                session_id=current_session_id,
+            )
+            if current is not None:
+                return Recipient(to_id=current.target_id, to_type=current.target_type), "current_qq_session", None
+
+        default_target_id = str(qq_cfg.get("default_target_id") or "").strip()
+        if default_target_id:
+            default_target_type = str(qq_cfg.get("default_target_type") or "c2c").strip() or "c2c"
+            return Recipient(to_id=default_target_id, to_type=default_target_type), "configured_default", None
+
+        recent = find_qq_bound_target(
+            session,
+            user_id=user_id,
+            ai_config_id=int(ai_config_id),
+            ai_kind=ai_kind,
+        )
+        if recent is not None:
+            return Recipient(to_id=recent.target_id, to_type=recent.target_type), "recent_qq_binding", None
+
+    return None, "", _qq_not_bound(
+        "当前 AI 尚未绑定 QQ 接收用户或会话；请先让用户通过 QQ 给该 AI 发送一条消息，或配置默认接收目标。",
+        reason="qq_recipient_not_bound",
+    )
+
+
 def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     """主动向用户推送一条消息。当前支持：飞书机器人、QQ机器人。"""
     text = str(args.get("text") or args.get("content") or args.get("message") or "").strip()
@@ -70,6 +167,26 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     if not text and not media_url and not media_path:
         raise HTTPException(status_code=400, detail="text or media_url/media_path is required for message.send+to+user")
     channel = str(args.get("channel") or "").strip().lower()
+    resolved_channel = dispatcher.resolve_channel(channel or None, ai_config_id, user_id)
+    recipient: Optional[Recipient] = None
+    binding_source = ""
+
+    # Backward-compatible explicit addressing still wins. In the normal MCP
+    # path the model supplies only content; QQ is then resolved from the
+    # current/known binding instead of asking the model for opaque ids.
+    if resolved_channel == "qq":
+        qq_bot = dispatcher.resolve_bot("qq")
+        explicit_recipient = qq_bot.parse_recipient(args) if qq_bot is not None else Recipient()
+        if explicit_recipient.is_explicit:
+            recipient = explicit_recipient
+            binding_source = "explicit"
+        else:
+            recipient, binding_source, unavailable = _resolve_qq_notification_recipient(
+                user_id,
+                ai_config_id,
+            )
+            if unavailable is not None:
+                return unavailable
 
     # The whole arg bag is handed to the dispatcher as the raw addressing
     # payload; each channel's adapter (parse_recipient) picks the aliases it
@@ -79,7 +196,7 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
         delivery = dispatcher.send_media(
             user_id=user_id,
             ai_config_id=ai_config_id,
-            channel=channel or None,
+            channel=resolved_channel,
             media=MediaPayload(
                 text=text,
                 url=media_url,
@@ -88,15 +205,17 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
                 file_name=file_name,
                 duration=args.get("duration"),
             ),
-            raw_target=args,
+            recipient=recipient,
+            raw_target=None if recipient is not None else args,
         )
     else:
         delivery = dispatcher.send_text(
             user_id=user_id,
             ai_config_id=ai_config_id,
-            channel=channel or None,
+            channel=resolved_channel,
             text=text,
-            raw_target=args,
+            recipient=recipient,
+            raw_target=None if recipient is not None else args,
         )
     channel = delivery.channel
     result = delivery.detail
@@ -122,9 +241,11 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
             notice = notice_template
 
     out: Dict[str, Any] = {
-        "delivered": True,
+        "delivered": bool(delivery.ok),
         "channel": channel,
     }
+    if binding_source:
+        out["binding_source"] = binding_source
     # 底层机器人返回里若带消息 id，保留一个轻量引用即可，不回吐整包响应。
     if isinstance(result, dict):
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -411,5 +532,3 @@ async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Opt
     else:
         base_out["note"] = "未能拿到回复，详见 status / failure_reason。"
     return base_out
-
-

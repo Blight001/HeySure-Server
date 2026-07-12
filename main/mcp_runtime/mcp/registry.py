@@ -183,23 +183,25 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="message.send+to+user",
         description=(
-            "通过绑定的机器人渠道（飞书或 QQ）给真人用户发文本消息。"
-            "用于主动通知、状态更新，或异步请用户去做某事。"
+            "通过该 AI 已绑定的机器人渠道（飞书或 QQ）给真人用户发送通知。"
+            "正常调用只需提供 text 或媒体；不要向用户询问会话 id、openid、target_id 等寻址参数。"
+            "QQ 会自动使用当前会话绑定、配置的默认接收目标或最近一次已绑定 QQ 会话；"
+            "尚未绑定时工具会返回 delivered=false 和明确原因。"
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "发给用户的文本；只发媒体时可省略。"},
+                "text": {"type": "string", "description": "发给当前已绑定用户的文本；只发媒体时可省略。"},
                 "channel": {
                     "type": "string",
                     "enum": ["feishu", "qq"],
-                    "description": "发送渠道；默认用该 AI 配置的机器人渠道。",
+                    "description": "兼容性覆盖项；通常不要传，默认自动使用该 AI 绑定的机器人渠道。",
                 },
-                "receive_id": {"type": "string", "description": "可选，接收者 id；默认用 AI 配置里的默认接收者。"},
+                "receive_id": {"type": "string", "description": "兼容性覆盖项；通知当前绑定用户时不要传，由系统自动解析。"},
                 "receive_id_type": {
                     "type": "string",
                     "enum": ["chat_id", "open_id", "user_id", "union_id", "email", "c2c", "group", "channel", "dm"],
-                    "description": "接收者 id 类型；QQ 用 c2c/group/channel/dm。",
+                    "description": "兼容性覆盖项；与 receive_id 一起人工指定目标时使用。",
                 },
                 "media_url": {"type": "string", "description": "图片或视频的 HTTP(S) 链接，服务端拉取后发送。"},
                 "media_path": {"type": "string", "description": "服务端本地的图片或视频路径。"},
