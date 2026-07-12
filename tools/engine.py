@@ -26,7 +26,7 @@ TOOLBOX_DISPLAY_NAME = "工具箱（内置）"
 TOOLBOX_PLATFORM = "Workshop-Server"
 
 # 工具箱门禁豁免：自省工具始终可用，避免未绑定时连工具说明都查不了。
-TOOLBOX_GATE_EXEMPT: Set[str] = {"mcp.describe_tool"}
+TOOLBOX_GATE_EXEMPT: Set[str] = {"mcp.describe+tool"}
 
 
 # ---------------------------------------------------------------------------

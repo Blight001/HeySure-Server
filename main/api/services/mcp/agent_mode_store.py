@@ -83,7 +83,7 @@ BUILTIN_MODES: List[Dict[str, Any]] = [
         "name": "初始对话模式",
         "allow_device_mcp": False,
         "description": "默认模式：普通聊天，不进工作间——只有基础对话工具，看不到设备/工作 MCP；要干活先切到 task/learning。",
-        "prompt": "你现在处于「初始对话模式」（默认模式，等同普通聊天）。\n- 这是「不在工作房间」的状态：只做普通交流、答疑、闲聊，回答简洁直接。\n- 本模式下你**只有基础对话工具**（切换模式 mode.manage、查询工具说明 mcp.describe_tool、收发消息 message.*）；**看不到、也无法调用任何设备 / 工作类 MCP**（桌面、浏览器、安卓、文件、命令、任务、知识库、系统治理等）。\n- 一旦需要真正干活，先判断属于哪类，再用 mode.manage(action=use, mode_key=...) 切换：\n  · 有明确任务 / 目标要交付 → task 任务模式；\n  · 讲解 / 教学 → learning 学习模式。\n- 切到工作模式后，系统才会把对应的设备 / 工作 MCP 工具交给你——就像离开聊天、走进工作间拿起工具再干活。若只是聊天、无需动手，保持本模式即可。",
+        "prompt": "你现在处于「初始对话模式」（默认模式，等同普通聊天）。\n- 这是「不在工作房间」的状态：只做普通交流、答疑、闲聊，回答简洁直接。\n- 本模式下你**只有基础对话工具**（切换模式 mode.manage、查询工具说明 mcp.describe+tool、收发消息 message.*）；**看不到、也无法调用任何设备 / 工作类 MCP**（桌面、浏览器、安卓、文件、命令、任务、知识库、系统治理等）。\n- 一旦需要真正干活，先判断属于哪类，再用 mode.manage(action=use, mode_key=...) 切换：\n  · 有明确任务 / 目标要交付 → task 任务模式；\n  · 讲解 / 教学 → learning 学习模式。\n- 切到工作模式后，系统才会把对应的设备 / 工作 MCP 工具交给你——就像离开聊天、走进工作间拿起工具再干活。若只是聊天、无需动手，保持本模式即可。",
     },
     {
         "mode_key": "task",
@@ -122,9 +122,9 @@ _LEGACY_REMOVED_BUILTIN_KEYS = {"chat", "fix"}
 # 其余（设备端 desktop/browser/android、workspace、task、knowledge、admin… 全部工作类）在此模式收走。
 CHAT_MODE_TOOL_WHITELIST = {
     "mode.manage",
-    "mcp.describe_tool",
-    "message.send_to_user",
-    "message.send_to_ai",
+    "mcp.describe+tool",
+    "message.send+to+user",
+    "message.send+to+ai",
 }
 
 

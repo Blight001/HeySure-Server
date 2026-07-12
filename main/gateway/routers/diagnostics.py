@@ -182,10 +182,10 @@ async def _mcp_checks(user_id: int) -> List[Dict[str, Any]]:
     # 3) 调用通道端到端自检（describe_tool 无副作用）
     started = time.perf_counter()
     try:
-        res = await _call_mcp("mcp.describe_tool", user_id, {"tool": "mcp.describe_tool"})
+        res = await _call_mcp("mcp.describe+tool", user_id, {"tool": "mcp.describe+tool"})
         payload = res.get("result", res) if isinstance(res, dict) else res
         name = (payload or {}).get("name") if isinstance(payload, dict) else None
-        ok = name == "mcp.describe_tool"
+        ok = name == "mcp.describe+tool"
         checks.append({
             "id": "mcp_call", "label": "MCP 调用通道", "ok": ok,
             "detail": "调用链路正常（已成功读取工具 schema）" if ok else "调用返回异常",

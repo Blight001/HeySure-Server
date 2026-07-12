@@ -5,18 +5,18 @@
 
 - REST:  gateway/routers/ai_task_routes.py（task-trigger / PATCH task-jobs）
 - MCP:   mcp_runtime/mcp/tools/tasks.py（task.create 等）
-- 续期:  api/chat_runtime/chat_runtime_helpers._create_loop_scheduled_job
+- 续期:  api/chat_runtime/chat_runtime_helpers._renew_loop_scheduled_job
 - 调度:  api/chat_runtime/chat_scheduler._is_job_time_ready
 
 task_payload["schedule"] 的规范结构::
 
     {
       "enabled": bool,            # 是否启用定时/循环
-      "loop_enabled": bool,       # 是否循环（完成后自动创建下一轮）
+      "loop_enabled": bool,       # 是否循环（每轮完成后原任务自动续期）
       "loop_mode": str,           # 循环方式: interval / daily / weekly
       "run_immediately": bool,    # 循环任务首轮是否立即执行
       "duration_minutes": int,    # interval 循环间隔 / 单次定时延迟（分钟）
-      "daily_time": "HH:MM",      # daily/weekly 循环每次触发时刻（服务器本地时区）
+      "daily_time": "HH:MM",      # daily/weekly 循环每次触发时刻（schedule_timezone 时区，默认 Asia/Shanghai）
       "weekly_days": [int],       # weekly 循环触发的星期（0=周一 ... 6=周日）
       "max_runs": int,            # 循环总轮数上限（0=不限）
       "runs_done": int,           # 已完成轮数（续期时 +1，由系统维护）
@@ -31,7 +31,7 @@ task_payload["schedule"] 的规范结构::
 """
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_DURATION_MINUTES = 30
@@ -53,6 +53,37 @@ MAX_RUNS_KEYS: Tuple[str, ...] = ("schedule_max_runs", "max_runs", "loop_max_run
 END_AT_KEYS: Tuple[str, ...] = ("schedule_end_at", "end_at", "loop_end_at")
 
 _WEEKDAY_LABELS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def schedule_timezone() -> Optional[tzinfo]:
+    """定时/循环墙钟时间（daily_time 等）所用时区。
+
+    读 settings.timezone（默认 Asia/Shanghai）。容器常跑 UTC，若不固定
+    时区，用户配置的"每天 10:00"会被按 UTC 计算，展示到浏览器就偏成
+    18:00。未配置或时区名非法时返回 None（退回服务器本地时区，即旧行为）。
+    """
+    try:
+        from api.core.settings import settings
+
+        name = str(getattr(settings, "timezone", "") or "").strip()
+    except Exception:
+        name = ""
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:
+        return None
+
+
+def format_schedule_ts(value: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    """按 schedule_timezone 把时间戳格式化成人类可读时间（展示统一入口）。"""
+    ts = parse_timestamp(value)
+    if ts is None:
+        return ""
+    return datetime.fromtimestamp(ts, schedule_timezone()).strftime(fmt)
 
 
 def _parse_bool(value: Any, default: bool = False) -> bool:
@@ -78,7 +109,7 @@ def _parse_int(value: Any, default: int, minimum: int, maximum: int) -> int:
 
 
 def parse_timestamp(value: Any) -> Optional[float]:
-    """宽松时间戳解析：Unix 秒或 ISO-8601；无时区按服务器本地时区。"""
+    """宽松时间戳解析：Unix 秒或 ISO-8601；无时区按 schedule_timezone。"""
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -94,6 +125,10 @@ def parse_timestamp(value: Any) -> Optional[float]:
         pass
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            tz = schedule_timezone()
+            if tz is not None:
+                dt = dt.replace(tzinfo=tz)
         return dt.timestamp()
     except Exception:
         return None
@@ -285,13 +320,13 @@ def normalize_schedule(raw: Any) -> Dict[str, Any]:
 
 
 def next_loop_occurrence(schedule: Dict[str, Any], now: float) -> float:
-    """按循环方式计算 now 之后最近一次触发时刻（服务器本地时区）。"""
+    """按循环方式计算 now 之后最近一次触发时刻（时区见 schedule_timezone）。"""
     loop_mode = str(schedule.get("loop_mode") or "interval")
     if loop_mode in {"daily", "weekly"}:
         daily = parse_daily_time(schedule.get("daily_time"))
         if daily is not None:
             hour, minute = daily
-            base = datetime.fromtimestamp(now)
+            base = datetime.fromtimestamp(now, schedule_timezone())
             candidate = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if loop_mode == "daily":
                 if candidate.timestamp() <= now:
@@ -387,11 +422,7 @@ def describe_schedule(schedule: Any) -> str:
         if sched["max_runs"] > 0:
             parts.append(f"共 {sched['max_runs']} 轮（已完成 {sched['runs_done']} 轮）")
         if sched["end_at"]:
-            parts.append(
-                "截止 " + datetime.fromtimestamp(float(sched["end_at"])).strftime("%Y-%m-%d %H:%M")
-            )
+            parts.append("截止 " + format_schedule_ts(sched["end_at"]))
     elif sched["schedule_at"]:
-        parts.append(
-            "定时 " + datetime.fromtimestamp(float(sched["schedule_at"])).strftime("%Y-%m-%d %H:%M")
-        )
+        parts.append("定时 " + format_schedule_ts(sched["schedule_at"]))
     return "；".join(parts)

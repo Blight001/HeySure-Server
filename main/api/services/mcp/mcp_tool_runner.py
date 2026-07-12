@@ -14,8 +14,11 @@ from connector_runtime.dispatch.device_dispatch import dispatch_task_to_agent
 
 
 def _to_native_tool_name(name: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9_-]", "__", str(name or "").strip())
-    safe = safe.strip("_") or "tool"
+    # 与 ai_runtime.inference.core._to_native_tool_name 保持同一可逆编码：
+    # . → _，+ → -，其余非法字符 → -。
+    safe = str(name or "").strip().replace(".", "_").replace("+", "-")
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "-", safe)
+    safe = safe.strip("_-") or "tool"
     return safe[:64]
 
 

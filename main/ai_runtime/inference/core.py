@@ -68,10 +68,10 @@ from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
 from api.chat_runtime.chat_stream_cli import stream_turn_cli
 from api.chat_runtime.chat_runtime_helpers import (
-    _create_loop_scheduled_job,
     _is_task_finished_status,
     _load_task_job_by_session,
     _load_task_payload_by_session,
+    _renew_loop_scheduled_job,
     _parse_allowed_tools,
     _resolve_ai_runtime,
     _run_set_status,
@@ -174,7 +174,7 @@ def _render_ai_message_system_prompt(
         "- chitchat（闲聊）：非任务型闲聊，可自然继续多轮。"
     )
     reply_rule = (
-        "这条消息需要你回复。回复时调用 MCP 工具 `message.send_to_ai`，"
+        "这条消息需要你回复。回复时调用 MCP 工具 `message.send+to+ai`，"
         f"参数必须包含 `to_ai_config_id={from_ai_config_id}`、`message_type=\"reply\"`、"
         "`require_reply=false`、"
         f"`reply_to_message_id=\"{message_id}\"`、`current_session_id=\"{current_session_id}\"`。"
@@ -196,7 +196,7 @@ def _render_ai_message_system_prompt(
         "[发送类型说明]\n"
         f"{message_type_guide}\n\n"
         "[处理规则]\n"
-        "你以后调用 MCP 工具 `message.send_to_ai` 时，`message_type` 是必填字段，不能省略。\n"
+        "你以后调用 MCP 工具 `message.send+to+ai` 时，`message_type` 是必填字段，不能省略。\n"
         f"{reply_rule}"
     )
 
@@ -255,8 +255,12 @@ def _raise_for_upstream_error(response: requests.Response) -> None:
 
 
 def _to_native_tool_name(name: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9_-]", "__", str(name or "").strip())
-    safe = safe.strip("_") or "tool"
+    # 原生 function 名只允许 [a-zA-Z0-9_-]。可逆编码：域分隔符 . → _，
+    # 名字内部的 + → -（真实工具名内部不再用下划线，见 mcp_tool_aliases），
+    # 模型回吐 mcp_describe-tool 时可经 resolve_tool_name 唯一还原。
+    safe = str(name or "").strip().replace(".", "_").replace("+", "-")
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "-", safe)
+    safe = safe.strip("_-") or "tool"
     return safe[:64]
 
 
@@ -1481,7 +1485,7 @@ def _run_worker_impl(
                         # compressed_away (intended), but this compact summary must
                         # survive a run rebuild so the model knows phases already
                         # done and does not re-plan from phase 1. Replayed as the
-                        # user role to match the live injection (see plan.phase_complete
+                        # user role to match the live injection (see plan.phase+complete
                         # handler) and avoid mid-conversation system messages.
                         convo.append({"role": "user", "content": m.content})
                     elif "mcp_tool_call" in tags and "mode.manage" in (m.content or ""):
@@ -1695,7 +1699,7 @@ def _run_worker_impl(
                     _summary_lines.append(f"- {_title}：{_s or '（无小结）'}")
                 _summary = "\n".join(_summary_lines)
                 # Fold any still-verbose final-phase turns out of the persisted
-                # context (usually a no-op: plan.phase_complete already folded them).
+                # context (usually a no-op: plan.phase+complete already folded them).
                 try:
                     phase_context.mark_phase_messages_compressed(
                         bg,
@@ -1742,10 +1746,6 @@ def _run_worker_impl(
                     "completed", "cancelled", "stopped", "error",
                 }:
                     try:
-                        task_job.status = "completed"
-                        task_job.finished_at = now_ts
-                        task_job.updated_at = now_ts
-                        bg.add(task_job)
                         try:
                             notify_task_completion(
                                 user_id=user_id,
@@ -1754,7 +1754,14 @@ def _run_worker_impl(
                             )
                         except Exception:
                             logger.exception("auto plan finalize: completion notify failed")
-                        _next_loop_job = _create_loop_scheduled_job(bg, task_job, now_ts)
+                        # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
+                        # 未续期（非循环 / 循环已结束）才真正标记完成。
+                        _next_loop_job = _renew_loop_scheduled_job(bg, task_job, now_ts)
+                        if _next_loop_job is None:
+                            task_job.status = "completed"
+                            task_job.finished_at = now_ts
+                            task_job.updated_at = now_ts
+                            bg.add(task_job)
                     except Exception:
                         logger.exception("auto plan finalize: task job completion failed")
                 _notice_lines = [
@@ -1766,7 +1773,7 @@ def _run_worker_impl(
                         f"- 完整流程已写入{'成功' if _outcome == 'success' else '失败'}日志: {_log_path}"
                     )
                 if _next_loop_job is not None:
-                    _notice_lines.append(f"- 循环任务已创建: {_next_loop_job.job_id}")
+                    _notice_lines.append(f"- 循环任务已续期: {_next_loop_job.job_id} 回到待执行状态，等待下一轮定时触发")
                 try:
                     _save_message(
                         bg,
@@ -1922,6 +1929,7 @@ def _run_worker_impl(
                         ) & set(effective_tool_allowlist)
                     step_tools, native_tool_name_map = _build_native_tools_payload(current_exposed_tools)
                 else:
+                    current_exposed_tools = set()
                     step_tools, native_tool_name_map = [], {}
                 start_at = time.time()
                 _ai_debug_stage(
@@ -2171,6 +2179,25 @@ def _run_worker_impl(
                 if payload_call and payload_tool in native_tool_name_map:
                     payload_tool = native_tool_name_map[payload_tool]
                     payload_call["tool"] = payload_tool
+                elif payload_call and payload_tool:
+                    # 模型经常混用分隔符（mcp_xxx / mcp__xxx / 旧名）——宽容
+                    # 解析成真实工具名，避免「下划线格式不兼容」直接报错。
+                    from api.services.mcp.mcp_tool_aliases import resolve_tool_name
+
+                    _resolve_cands = set(native_tool_name_map.values())
+                    _resolve_cands.update(current_exposed_tools or set())
+                    try:
+                        _resolve_cands.update(
+                            str(t.get("name") or "").strip()
+                            for t in registry.list_tools()
+                            if t.get("name")
+                        )
+                    except Exception:
+                        pass
+                    _resolved_tool = resolve_tool_name(payload_tool, _resolve_cands)
+                    if _resolved_tool != payload_tool:
+                        payload_tool = _resolved_tool
+                        payload_call["tool"] = payload_tool
                 # AI 主动压缩上下文：复用自动压缩机制，但不看 token 阈值，立即把
                 # 较早的对话历史折叠成摘要并重建当前会话，让本轮就用上压缩结果。
                 _payload_args = (payload_call or {}).get("arguments", {}) or {}
@@ -2268,7 +2295,7 @@ def _run_worker_impl(
                     and bool(getattr(user, "conversation_auto_compress_enabled", True))
                     and not task_is_finished
                     and not compression_failed
-                    and payload_tool not in ("plan.phase_complete", "plan.finish")
+                    and payload_tool not in ("plan.phase+complete", "plan.finish")
                 ):
                     threshold = token_threshold_override if token_threshold_override is not None else max(1, int(cfg.token_limit or 1))
                     session_tokens = _session_total_tokens(bg, user_id, ai_kind, session_id, ai_config_id)
@@ -2426,10 +2453,6 @@ def _run_worker_impl(
                                 active_plan = plan_service.get_active_plan(bg, user_id, int(ai_config_id), session_id)
                             if active_plan is None:
                                 finished_at = time.time()
-                                task_job.status = "completed"
-                                task_job.finished_at = finished_at
-                                task_job.updated_at = finished_at
-                                bg.add(task_job)
                                 try:
                                     notify_task_completion(
                                         user_id=user_id,
@@ -2438,10 +2461,18 @@ def _run_worker_impl(
                                     )
                                 except Exception:
                                     logger.exception("auto simple task completion notify failed")
+                                # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
+                                # 未续期（非循环 / 循环已结束）才真正标记完成。
+                                _renewed_loop_job = None
                                 try:
-                                    _create_loop_scheduled_job(bg, task_job, time.time())
+                                    _renewed_loop_job = _renew_loop_scheduled_job(bg, task_job, finished_at)
                                 except Exception:
                                     logger.exception("auto simple task loop schedule failed")
+                                if _renewed_loop_job is None:
+                                    task_job.status = "completed"
+                                    task_job.finished_at = finished_at
+                                    task_job.updated_at = finished_at
+                                    bg.add(task_job)
                                 try:
                                     bg.commit()
                                 except Exception:
@@ -2749,7 +2780,7 @@ def _run_worker_impl(
                     tool_result=tool_result if isinstance(tool_result, dict) else None,
                 )
 
-                if (not tool_failed) and tool == "mcp.describe_tool":
+                if (not tool_failed) and tool == "mcp.describe+tool":
                     described_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
                     described_items: list[dict] = []
                     described_names: list[str] = []
@@ -2811,7 +2842,7 @@ def _run_worker_impl(
                     continue
 
                 # Planned task flow (system-driven). ``plan.create`` is followed
-                # by the system handing the AI phase 1; ``plan.phase_complete`` folds
+                # by the system handing the AI phase 1; ``plan.phase+complete`` folds
                 # the finished phase out of context and the system hands over the
                 # next phase (or requires plan.finish); ``plan.finish`` closes the
                 # whole plan run. Simple (non-plan) tasks complete naturally without
@@ -2859,7 +2890,7 @@ def _run_worker_impl(
                     _set_run_live_phase(run_id, "generating")
                     continue
 
-                if (not tool_failed) and tool == "plan.phase_complete" and plan_state is not None:
+                if (not tool_failed) and tool == "plan.phase+complete" and plan_state is not None:
                     result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
                     finished_phase = result_payload.get("finished_phase") if isinstance(result_payload, dict) else None
                     boundary = max(0, min(phase_start_convo_index, len(convo)))
@@ -2909,7 +2940,7 @@ def _run_worker_impl(
                         ) if ai_config_id is not None else None
                         flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
                     except Exception:
-                        logger.exception("plan reload after plan.phase_complete failed")
+                        logger.exception("plan reload after plan.phase+complete failed")
                     flow_nudges = 0
                     phase_start_convo_index = len(convo)
                     phase_started_at = time.time()
@@ -2944,7 +2975,7 @@ def _run_worker_impl(
                     finish_summary = str((arguments or {}).get("summary") or "").strip()
                     # Hide the whole run's deep-thinking + MCP detail: the final
                     # phase (since its boundary) still carries verbose turns;
-                    # earlier phases were already folded at plan.phase_complete.
+                    # earlier phases were already folded at plan.phase+complete.
                     now_ts = time.time()
                     completed_job = None
                     if finish_job_id and ai_config_id is not None:
@@ -2969,11 +3000,8 @@ def _run_worker_impl(
                         )
                     except Exception:
                         logger.exception("plan.finish compaction tagging failed")
+                    next_loop_job = None
                     if completed_job is not None:
-                        completed_job.status = "completed"
-                        completed_job.finished_at = now_ts
-                        completed_job.updated_at = now_ts
-                        bg.add(completed_job)
                         try:
                             notify_task_completion(
                                 user_id=user_id,
@@ -2982,7 +3010,14 @@ def _run_worker_impl(
                             )
                         except Exception:
                             logger.exception("plan.finish completion notify failed")
-                    next_loop_job = _create_loop_scheduled_job(bg, completed_job, time.time())
+                        # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
+                        # 未续期（非循环 / 循环已结束）才真正标记完成。
+                        next_loop_job = _renew_loop_scheduled_job(bg, completed_job, now_ts)
+                        if next_loop_job is None:
+                            completed_job.status = "completed"
+                            completed_job.finished_at = now_ts
+                            completed_job.updated_at = now_ts
+                            bg.add(completed_job)
                     finish_notice_lines = [
                         "[系统提示]",
                         f"任务已通过 `plan.finish` 收尾，结果：{'成功' if finish_outcome == 'success' else '失败'}。",
@@ -2992,9 +3027,12 @@ def _run_worker_impl(
                             f"- 完整流程已写入{'成功' if finish_outcome == 'success' else '失败'}日志: {finish_log_path}"
                         )
                     if next_loop_job is not None:
-                        finish_notice_lines.append(f"- 循环任务已创建: {next_loop_job.job_id}")
+                        finish_notice_lines.append(f"- 循环任务已续期: {next_loop_job.job_id} 回到待执行状态，等待下一轮定时触发")
                     finish_notice_lines.append("")
-                    finish_notice_lines.append("本任务对话已自动锁定，不再继续后续操作。")
+                    if next_loop_job is not None:
+                        finish_notice_lines.append("本轮任务对话已收尾，下一轮到点后将继续执行。")
+                    else:
+                        finish_notice_lines.append("本任务对话已自动锁定，不再继续后续操作。")
                     _save_message(
                         bg,
                         user_id,

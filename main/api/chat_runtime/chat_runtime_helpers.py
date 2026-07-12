@@ -6,10 +6,10 @@ IS_ROUTER_ENTRY = False
 
 import json
 import time
-import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
+from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
 from api.database import engine
@@ -27,6 +27,48 @@ from .chat_prompt_utils import (
     _strip_runtime_injected_sections,
     _strip_task_runtime_sections,
 )
+
+
+def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_id: int) -> str:
+    """组装数字社会成员名单（ID / 名字 / 角色），注入系统 prompt。
+
+    message.send+to+ai 需要对方的 ai_config_id，但普通成员没有任何工具
+    可以查询同伴的 ID（admin.manage 门槛是辅助管理员+图书馆绑定），
+    导致 AI 之间无法互相通信。名单只从 DB 读取，保证 gateway 预览与
+    ai-runtime 两进程组装结果一致。
+    """
+    from mcp_runtime.mcp.permissions import ROLE_LABELS_ZH, config_role_tier
+
+    rows = session.exec(
+        select(AssistantAIConfig).where(
+            AssistantAIConfig.user_id == user_id,
+            AssistantAIConfig.ai_role.in_(["digital_member", "assistant_admin"]),
+        ).order_by(AssistantAIConfig.id.asc())
+    ).all()
+    lines = []
+    self_name = ""
+    for cfg in rows:
+        if str(cfg.lifecycle_status or "") == "dead":
+            continue
+        cfg_id = int(cfg.id or 0)
+        if cfg_id == int(self_ai_config_id):
+            self_name = str(cfg.name or "").strip()
+            continue
+        tier = config_role_tier(cfg)
+        label = ROLE_LABELS_ZH.get(tier, tier)
+        if bool(getattr(cfg, "is_librarian", False)):
+            label += "，图书管理员"
+        lines.append(f"- ID {cfg_id}：{cfg.name}（{label}）")
+    if not lines:
+        return ""
+    header = f"你的 ai_config_id 是 {self_ai_config_id}"
+    if self_name:
+        header += f"（{self_name}）"
+    header += (
+        "。数字社会中的其他成员如下；用 message.send+to+ai 与他们沟通时，"
+        "to_ai_config_id 填对方的 ID（也可用 to_ai_name 填对方名字）："
+    )
+    return header + "\n" + "\n".join(lines[:100])
 
 
 def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id: Optional[int]):
@@ -79,7 +121,7 @@ def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id
 # Web 前端勾选工坊/工具组后，会把该组 MCP 工具目录以这个段标题追加进当轮用户
 # 消息（model_content），随消息动态携带。系统提示不再注入 [动态 MCP 说明]
 # 目录（见 build_runtime_system_prompt_and_tools 内的说明）；模型侧的工具发现
-# 依赖该段 + mcp.describe_tool（tool / tools / query）。
+# 依赖该段 + mcp.describe+tool（tool / tools / query）。
 CLIENT_MCP_CATALOG_MARKER = "[本轮可用 MCP 工具]"
 
 def build_runtime_system_prompt_and_tools(
@@ -163,7 +205,7 @@ def build_runtime_system_prompt_and_tools(
     if ai_config_id is not None:
         # System-injected AI-to-AI messages must remain answerable even when a
         # task or config narrows the general MCP tool allowlist.
-        effective_tool_allowlist.add("message.send_to_ai")
+        effective_tool_allowlist.add("message.send+to+ai")
     try:
         effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
     except Exception:
@@ -191,7 +233,7 @@ def build_runtime_system_prompt_and_tools(
                 effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, uid))
                 effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, uid))
                 if ai_config_id is not None:
-                    effective_tool_allowlist.add("message.send_to_ai")
+                    effective_tool_allowlist.add("message.send+to+ai")
             try:
                 effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
             except Exception:
@@ -256,6 +298,16 @@ def build_runtime_system_prompt_and_tools(
 
     if merged_system_prompt:
         system_prompt = merged_system_prompt
+    # 数字社会成员名单：让每个 AI 知道同伴的 ai_config_id / 名字，否则
+    # message.send+to+ai 无从填 to_ai_config_id（成员查询工具是辅助管理员门槛）。
+    if ai_config_id is not None:
+        try:
+            roster_text = _digital_society_roster_text(session, uid, int(ai_config_id))
+        except Exception:
+            roster_text = ""
+        system_prompt = _strip_prompt_section(system_prompt, "数字社会成员名单")
+        if roster_text:
+            system_prompt = _append_prompt_section(system_prompt, "数字社会成员名单", roster_text)
     if is_task_runtime:
         # Remove legacy task-runtime prompt sections; task constraints are enforced server-side.
         system_prompt = _strip_task_runtime_sections(system_prompt)
@@ -388,22 +440,26 @@ def _load_task_job_by_session(
 def _is_task_finished_status(status: str) -> bool:
     return str(status or "").strip() in {"completed", "cancelled", "stopped", "error"}
 
-def _create_loop_scheduled_job(
+def _renew_loop_scheduled_job(
     session: Session,
-    source_job: Optional[AITaskJob],
+    job: Optional[AITaskJob],
     now: float,
 ) -> Optional[AITaskJob]:
-    """循环任务完成后创建下一轮实例；循环已结束（轮数跑满/超截止时间）返回 None。
+    """循环任务一轮完成后原地续期同一个 job（回到 queued 等待下一轮）。
+
+    循环未结束时返回续期后的 job；非循环任务或循环已结束（轮数跑满/超
+    截止时间）返回 None，由调用方按普通完成流程置 completed。
 
     下一轮触发时刻由 task_schedule.build_next_loop_schedule 按循环方式
-    （interval / daily / weekly）统一计算。
+    （interval / daily / weekly）统一计算。同一个 job 贯穿所有轮次，
+    轮次之间保持 queued，可正常编辑/暂停/停止，不会变成已完成任务。
     """
-    if not source_job:
+    if not job:
         return None
-    if str(source_job.trigger_type or "").strip().lower() != "schedule":
+    if str(job.trigger_type or "").strip().lower() != "schedule":
         return None
     try:
-        payload = json.loads(source_job.task_payload) if source_job.task_payload else {}
+        payload = json.loads(job.task_payload) if job.task_payload else {}
     except Exception:
         payload = {}
     if not isinstance(payload, dict):
@@ -415,23 +471,21 @@ def _create_loop_scheduled_job(
     if next_schedule is None:
         return None
     payload["schedule"] = next_schedule
-    next_job = AITaskJob(
-        job_id=f"job_{uuid.uuid4().hex[:12]}",
-        user_id=source_job.user_id,
-        ai_config_id=source_job.ai_config_id,
-        created_by_ai_config_id=source_job.created_by_ai_config_id,
-        created_by_session_id=source_job.created_by_session_id,
-        ai_kind=source_job.ai_kind or "core",
-        template_id=source_job.template_id,
-        title=source_job.title,
-        instruction=source_job.instruction,
-        task_payload=json.dumps(payload, ensure_ascii=False),
-        priority=max(1, min(10, int(source_job.priority or 5))),
-        status="queued",
-        trigger_type="schedule",
-    )
-    session.add(next_job)
-    return next_job
+    job.task_payload = json.dumps(payload, ensure_ascii=False)
+    job.status = "queued"
+    job.finished_at = None
+    job.started_at = None
+    job.last_supervised_at = None
+    job.supervision_count = 0
+    # 完成回执的幂等位随轮次重置，下一轮结束时才能再次通知。
+    # notify_task_completion 在独立 Session 里已把该字段写成本轮时间，
+    # 而当前 Session 的快照仍是 None，直接赋 None 不会被视为变更，
+    # 必须强制标脏才能真正写回 NULL。
+    job.completion_notified_at = None
+    flag_modified(job, "completion_notified_at")
+    job.updated_at = now
+    session.add(job)
+    return job
 
 def _run_set_status(run_id: str, status: str, error_message: Optional[str] = None, finished: bool = False):
     with Session(engine) as bg:

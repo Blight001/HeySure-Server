@@ -10,7 +10,7 @@ run uses the plan-domain ``plan.finish`` (the ``plan`` namespace stays separate)
 The AI drives a plan through three tools:
 
 - ``plan.create``         commit a full multi-phase plan before acting
-- ``plan.phase_complete`` finish the current phase (runtime then hides its
+- ``plan.phase+complete`` finish the current phase (runtime then hides its
                           deep-thinking + MCP detail from the live context)
 - ``plan.finish``         summarize the whole plan into a success/failure log
 
@@ -95,7 +95,7 @@ def _plan_create(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
         "created": True,
         "plan": progress,
         "next_step_hint": (
-            "计划已登记。现在从第 1 个阶段开始执行；完成一个阶段后调用 plan.phase_complete 收尾该阶段"
+            "计划已登记。现在从第 1 个阶段开始执行；完成一个阶段后调用 plan.phase+complete 收尾该阶段"
             "（系统会自动精简上一阶段的上下文）；完成最后一个阶段时系统会自动收尾整个计划并归档，"
             "无需再单独调用收尾工具。"
         ),
@@ -115,7 +115,7 @@ def _plan_get(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -
 def _phase_complete(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     cfg_id = _require_ai_config_id(ai_config_id)
     # Summary is optional: the system drives phase progression, so
-    # plan.phase_complete only needs to mark the boundary.
+    # plan.phase+complete only needs to mark the boundary.
     summary = str((args or {}).get("summary") or "").strip()
     status = str((args or {}).get("status") or "completed").strip().lower()
     if status not in {"completed", "failed"}:
@@ -166,8 +166,8 @@ def _plan_finish(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
                 status_code=409,
                 detail=(
                     "阶段性目标尚未全部收尾，已自动阻止 plan.finish。"
-                    "请先继续执行当前阶段；达成结束标志后调用 plan.phase_complete，"
-                    "若该阶段失败也请用 plan.phase_complete(status=failed) 如实收尾。"
+                    "请先继续执行当前阶段；达成结束标志后调用 plan.phase+complete，"
+                    "若该阶段失败也请用 plan.phase+complete(status=failed) 如实收尾。"
                     f"未收尾阶段：{labels}{more}"
                 ),
             )

@@ -2,7 +2,7 @@
 
 ``record_call`` is called from the AI worker for every tool call (best-effort —
 it must never break a run). Reads power the failure-rate view in the web console
-and the ``device_mcp.manage`` stats/failures actions, so an AI can see which of
+and the ``device+mcp.manage`` stats/failures actions, so an AI can see which of
 its tools are flaky and jump to where each failure happened.
 """
 

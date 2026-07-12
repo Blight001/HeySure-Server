@@ -28,7 +28,7 @@ class RunLiveRelayTests(unittest.IsolatedAsyncioTestCase):
             "text": "hello",
             "reasoning": "thinking",
             "phase": "waiting_mcp",
-            "current_tool": "workspace.run_command",
+            "current_tool": "workspace.run+command",
             "prompt_tokens": 10,
             "completion_tokens": 4,
             "total_tokens": 14,

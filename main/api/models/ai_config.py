@@ -4,12 +4,12 @@ from typing import Any, Dict, Optional
 from sqlmodel import Field, SQLModel
 
 _DEFAULT_MCP_TOOLS = (
-    '["mcp.describe_tool","workspace.search","workspace.run_command",'
-    '"admin.manage","device_mcp.manage",'
+    '["mcp.describe+tool","workspace.search","workspace.run+command",'
+    '"admin.manage","device+mcp.manage",'
     '"task.manage",'
     '"prompt.manage","knowledge.manage","mode.manage",'
-    '"message.send_to_user","conversation.manage",'
-    '"message.send_to_ai"]'
+    '"message.send+to+user","conversation.manage",'
+    '"message.send+to+ai"]'
 )
 
 _DEFAULT_SYSTEM_AUTO_CONTROL = (

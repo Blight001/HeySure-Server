@@ -25,13 +25,13 @@ def test_namespaced_invoke_with_parameters():
     text = (
         "好的，我来查一下。\n"
         "<mcp:tool_calls>\n"
-        '<mcp:invoke name="mcp.describe_tool">\n'
+        '<mcp:invoke name="mcp.describe+tool">\n'
         '<mcp:parameter name="name">workspace.search</mcp:parameter>\n'
         "</mcp:invoke>\n"
         "</mcp:tool_calls>"
     )
     assert extract_first_mcp_call(text) == {
-        "tool": "mcp.describe_tool",
+        "tool": "mcp.describe+tool",
         "arguments": {"name": "workspace.search"},
     }
 
@@ -66,9 +66,9 @@ def test_hermes_tool_call_uses_name_alias():
 
 
 def test_fenced_json_with_parameters_alias():
-    text = '```json\n{"name":"mcp.describe_tool","parameters":{"name":"browser.open"}}\n```'
+    text = '```json\n{"name":"mcp.describe+tool","parameters":{"name":"browser.open"}}\n```'
     assert extract_first_mcp_call(text) == {
-        "tool": "mcp.describe_tool",
+        "tool": "mcp.describe+tool",
         "arguments": {"name": "browser.open"},
     }
 
@@ -102,7 +102,7 @@ def test_strip_removes_invoke_block_keeps_prose():
     text = (
         "Answer here.\n"
         "<mcp:tool_calls>\n"
-        '<mcp:invoke name="mcp.describe_tool">\n'
+        '<mcp:invoke name="mcp.describe+tool">\n'
         '<mcp:parameter name="name">workspace.search</mcp:parameter>\n'
         "</mcp:invoke>\n"
         "</mcp:tool_calls>"

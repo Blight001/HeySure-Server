@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class CallRequest(BaseModel):
-    tool: str = Field(..., description="MCP tool name (e.g. workspace.run_command)")
+    tool: str = Field(..., description="MCP tool name (e.g. workspace.run+command)")
     user_id: int = Field(..., description="Acting user id; tools scope file/DB access to this user")
     ai_config_id: Optional[int] = None
     arguments: Optional[Dict[str, Any]] = Field(default_factory=dict)
@@ -85,6 +85,14 @@ def create_app() -> FastAPI:
 
     @router.post("/mcp/call")
     async def call_tool(req: CallRequest) -> Dict[str, Any]:
+        if not registry.has(req.tool):
+            # 宽容解析：mcp_xxx / mcp__xxx / 旧名 → 真实注册名
+            from api.services.mcp.mcp_tool_aliases import resolve_tool_name
+
+            req.tool = resolve_tool_name(
+                req.tool,
+                {str(t.get("name") or "").strip() for t in registry.list_tools() if t.get("name")},
+            )
         if not registry.has(req.tool):
             raise HTTPException(status_code=404, detail=f"Unknown tool: {req.tool}")
         # Re-establish the caller's run session context so tools that rely on

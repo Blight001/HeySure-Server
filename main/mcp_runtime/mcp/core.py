@@ -14,7 +14,7 @@ from api.database import engine
 from api.models import AIRuntimeStatus, AssistantAIConfig
 from api.sio import sio
 
-MCP_INTROSPECTION_TOOLS = {"mcp.describe_tool"}
+MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
 _IGNORED_WORKSPACE_DIRS = {".git", "__pycache__", "venv", "node_modules", ".aider"}
 
 def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
@@ -201,7 +201,7 @@ def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Option
 
     没有 ``ai_config_id`` 视为核心 / 管理员直调，放行（与 ``enforce_min_role``
     约定一致）。仅服务端固定工具经 ``MCPRegistry.call``，故两类门禁均按确切设备
-    绑定逐次校验；自省工具（mcp.describe_tool）始终放行。
+    绑定逐次校验；自省工具（mcp.describe+tool）始终放行。
     """
     if not ai_config_id:
         return

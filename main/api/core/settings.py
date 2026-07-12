@@ -130,6 +130,16 @@ class Settings(BaseSettings):
     mcp_runtime_port: int = Field(default=3001)
     ai_runtime_port: int = Field(default=3003)
 
+    # ---- Time ------------------------------------------------------------------
+
+    timezone: str = Field(
+        default="Asia/Shanghai",
+        description="IANA 时区名（如 Asia/Shanghai），用于解释任务定时/循环里的 "
+        "daily_time、weekly_days 等墙钟时间并格式化时间展示。容器常跑在 UTC，"
+        "若不固定时区，用户配置的\"每天 10:00\"会被按 UTC 计算而偏移 8 小时。"
+        "置空则退回服务器本地时区。",
+    )
+
     # ---- Chat / AI runtime ---------------------------------------------------
 
     chat_max_steps: int = Field(
@@ -295,6 +305,7 @@ class Settings(BaseSettings):
         "clawhub_api_token",
         "public_base_url",
         "agent_socket_url",
+        "timezone",
         mode="before",
     )
     @classmethod

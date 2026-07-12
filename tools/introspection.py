@@ -9,7 +9,7 @@ from api.database import engine
 from api.models import AssistantAIConfig
 from api.devices.presence import online_tool_defs_for_user
 _TOOL_NAME_STOP_CHARS = (":", "：", "!", "！")
-MCP_INTROSPECTION_TOOLS = {"mcp.describe_tool"}
+MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
 
 
 def _with_schema_version(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,7 +145,7 @@ def _resolve_tool_alias(name: str, available: set[str]) -> str:
 
     # Native tool schemas replace characters outside [a-zA-Z0-9_-] with "__".
     # Accept that form here so models can pass the visible native name back to
-    # mcp.describe_tool, e.g. workspace__search -> workspace.search.
+    # mcp.describe+tool, e.g. workspace__search -> workspace.search.
     if "__" in raw:
         dotted = raw.replace("__", ".")
         if dotted in available:
@@ -176,14 +176,14 @@ def _describe_one_tool(name: str, endpoint_defs: Dict[str, Any], user_id: int = 
             "destructive": bool(spec.get("destructive", True)),
             "implementation": spec.get("implementation") if isinstance(spec.get("implementation"), dict) else {},
         }
-        # Editing lives server-side now (device_mcp.manage, library-bound), and
+        # Editing lives server-side now (device+mcp.manage, library-bound), and
         # only covers desktop/browser device types — there is no device-side
         # manager tool to fall back on anymore.
         device_type = str(spec.get("mcpSource") or "").strip()
         if device_type in ("desktop", "browser"):
             result["implementation_help"] = {
                 "inspect": {
-                    "tool": "device_mcp.manage",
+                    "tool": "device+mcp.manage",
                     "arguments": {"action": "get", "device_type": device_type, "name": name},
                 },
                 "note": "Call get to read the stored definition before editing via upsert (requires library binding).",
@@ -273,7 +273,7 @@ def _mcp_describe_tool(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
             example = next((name for name in sorted(available) if _tool_namespace(name) == needle), "")
             hint = (
                 f"'{query}' 是 MCP 工具的父级 namespace，不是具体工具，不返回内容。"
-                "请改用 mcp.describe_tool 指定具体工具名"
+                "请改用 mcp.describe+tool 指定具体工具名"
                 + (f"（如 {example}）" if example else "")
                 + "，或用更具体的关键词搜索。"
             )

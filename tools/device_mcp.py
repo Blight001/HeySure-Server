@@ -1,4 +1,4 @@
-"""``device_mcp.manage`` — let an AI iterate the device's MCP tools itself.
+"""``device+mcp.manage`` — let an AI iterate the device's MCP tools itself.
 
 This is the server-side, AI-callable counterpart to the web console's device
 dynamic-tools manager. It reads and writes the same ``DeviceDynamicTool`` store
