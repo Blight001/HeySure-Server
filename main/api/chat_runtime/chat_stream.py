@@ -26,8 +26,8 @@ import requests
 
 from api.runtime.http_client import ai_http_post
 from .chat_prompt_utils import (
+    _extract_all_complete_mcp_calls,
     _extract_delta_text,
-    _extract_first_complete_mcp_call,
     _set_run_live_phase,
     _set_run_live_reasoning,
     _set_run_live_text,
@@ -42,12 +42,84 @@ class StreamResult:
     reasoning_content: str = ""
     usage: Dict[str, Any] = field(default_factory=dict)
     finish_reason: str = ""
+    # Every tool call the model emitted this turn, in order. Each entry:
+    #   {"id", "native_name", "tool", "arguments", "raw_arguments"}
+    # ``tool`` is the resolved MCP name; ``native_name`` is the sanitized
+    # function name the provider saw (empty on the text protocol).
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    # First call, kept for callers that only ever act on one (e.g. the compress
+    # path). Always mirrors ``tool_calls[0]`` when the list is non-empty.
     payload_call: Optional[Dict[str, Any]] = None
     tc_id: str = ""
     tc_name: str = ""
     tc_args: str = ""
     has_native_tc: bool = False
     stopped: bool = False
+
+
+def _finalize_native_tool_calls(
+    sr: StreamResult,
+    ordered_parts: List[Dict[str, str]],
+    native_tool_name_map: Dict[str, str],
+) -> None:
+    """Normalize accumulated native tool-call fragments into ``sr.tool_calls``."""
+    for index, part in enumerate(ordered_parts):
+        native_name = str(part.get("name") or "").strip()
+        if not native_name:
+            continue
+        raw_arguments = part.get("arguments") or "{}"
+        try:
+            arguments = json.loads(raw_arguments or "{}")
+        except Exception:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        sr.tool_calls.append({
+            "id": str(part.get("id") or "").strip() or f"call_{index}",
+            "native_name": native_name,
+            "tool": native_tool_name_map.get(native_name, native_name),
+            "arguments": arguments,
+            "raw_arguments": raw_arguments,
+        })
+    _mirror_first_call(sr)
+
+
+def _finalize_text_tool_calls(sr: StreamResult) -> None:
+    """Parse every ``<mcp-call>``-style block out of the streamed assistant text.
+
+    Models without native function calling (grok via the CLI gateway,
+    deepseek-reasoner, …) express tool use as text blocks. A turn may carry
+    several; the worker executes them all before the next inference step.
+    """
+    calls = _extract_all_complete_mcp_calls(sr.assistant_text)
+    if not calls:
+        return
+    # Cut trailing chatter after the final call block: the model is waiting on
+    # tool results, so whatever it wrote past its last call is not an answer.
+    sr.assistant_text = sr.assistant_text[: calls[-1][1].end()]
+    for index, (payload, _match) in enumerate(calls):
+        arguments = payload.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        sr.tool_calls.append({
+            "id": f"call_{index}",
+            "native_name": "",
+            "tool": str(payload.get("tool") or "").strip(),
+            "arguments": arguments,
+            "raw_arguments": "",
+        })
+    sr.finish_reason = sr.finish_reason or "mcp_wait"
+    _mirror_first_call(sr)
+
+
+def _mirror_first_call(sr: StreamResult) -> None:
+    if not sr.tool_calls:
+        return
+    first = sr.tool_calls[0]
+    sr.tc_id = first["id"]
+    sr.tc_name = first["native_name"]
+    sr.tc_args = first["raw_arguments"] or "{}"
+    sr.payload_call = {"tool": first["tool"], "arguments": first["arguments"]}
 
 
 def _detect_provider(base_url: str) -> str:
@@ -284,54 +356,25 @@ def stream_turn_openai_compat(
 
         delta_text = _extract_delta_text(delta)
         if delta_text:
-            if sr.payload_call:
-                continue
             sr.assistant_text += delta_text
-            # Text-based MCP fallback (only when no native tool call is accumulating).
-            if not sr.has_native_tc:
-                parsed_call, mcp_match = _extract_first_complete_mcp_call(sr.assistant_text)
-                if parsed_call and mcp_match:
-                    sr.assistant_text = sr.assistant_text[:mcp_match.end()]
-                    sr.payload_call = parsed_call
-                    _set_run_live_text(run_id, sr.assistant_text)
-                    sr.finish_reason = sr.finish_reason or "mcp_wait"
-                    continue
             now = time.time()
             if (now - last_push_at) >= 0.05:
                 _set_run_live_text(run_id, sr.assistant_text)
                 last_push_at = now
 
     response.close()
+
+    # The whole turn's tool calls are resolved here — the worker executes them
+    # as a batch, so nothing is discarded. Native and text protocols are
+    # mutually exclusive: a model that emitted real tool_calls is not also
+    # writing <mcp-call> blocks.
+    if sr.has_native_tc:
+        ordered_parts = [tool_call_parts[key] for key in sorted(tool_call_parts)]
+        _finalize_native_tool_calls(sr, ordered_parts, native_tool_name_map)
+    else:
+        _finalize_text_tool_calls(sr)
+
     _set_run_live_text(run_id, sr.assistant_text)
-
-    # Resolve native tool calls into the first sequential payload. The worker
-    # intentionally performs one MCP call per turn; if a provider still streams
-    # multiple tool calls, keep the first one and let the model continue after
-    # the tool result instead of concatenating names/JSON fragments.
-    if sr.has_native_tc and tool_call_parts and not sr.tc_name:
-        first = next(
-            (
-                item
-                for _, item in sorted(tool_call_parts.items(), key=lambda kv: kv[0])
-                if item.get("name")
-            ),
-            None,
-        )
-        if first:
-            sr.tc_id = first.get("id") or "call_0"
-            sr.tc_name = first.get("name") or ""
-            sr.tc_args = first.get("arguments") or "{}"
-
-    if sr.has_native_tc and sr.tc_name and not sr.payload_call:
-        try:
-            tc_arguments = json.loads(sr.tc_args or "{}")
-        except Exception:
-            tc_arguments = {}
-        sr.payload_call = {
-            "tool": native_tool_name_map.get(sr.tc_name, sr.tc_name),
-            "arguments": tc_arguments,
-        }
-
     return sr
 
 
@@ -445,7 +488,7 @@ def stream_turn_anthropic(
             dtype = delta.get("type") or ""
             if dtype == "text_delta":
                 text = delta.get("text") or ""
-                if text and not sr.payload_call:
+                if text:
                     sr.assistant_text += text
                     now = time.time()
                     if (now - last_push_at) >= 0.05:
@@ -487,23 +530,13 @@ def stream_turn_anthropic(
             break
 
     response.close()
+
+    # Same batch semantics as the OpenAI-compatible path: every tool_use block
+    # in the turn is handed to the worker, not just the first.
+    if sr.has_native_tc:
+        _finalize_native_tool_calls(sr, anthropic_tool_calls, native_tool_name_map)
+    else:
+        _finalize_text_tool_calls(sr)
+
     _set_run_live_text(run_id, sr.assistant_text)
-
-    # Resolve the first tool call. The chat worker executes MCP sequentially.
-    if sr.has_native_tc and anthropic_tool_calls and not sr.tc_name:
-        first = anthropic_tool_calls[0]
-        sr.tc_id = first.get("id") or "call_0"
-        sr.tc_name = first.get("name") or ""
-        sr.tc_args = first.get("arguments") or "{}"
-
-    if sr.has_native_tc and sr.tc_name:
-        try:
-            tc_arguments = json.loads(sr.tc_args or "{}")
-        except Exception:
-            tc_arguments = {}
-        sr.payload_call = {
-            "tool": native_tool_name_map.get(sr.tc_name, sr.tc_name),
-            "arguments": tc_arguments,
-        }
-
     return sr

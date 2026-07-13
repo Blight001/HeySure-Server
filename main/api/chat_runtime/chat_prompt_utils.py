@@ -21,9 +21,10 @@ from fastapi import HTTPException
 from mcp_runtime.mcp import registry
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AssistantAIConfig, DEFAULT_MCP_FORMAT_ERROR_HINT
-from api.models.defaults import DEFAULT_MCP_NAMESPACE_HINTS
+from api.models.defaults import DEFAULT_MCP_NAMESPACE_HINTS, STALE_SERIAL_CALL_RULES
 from api.chat_runtime.mcp_parser import (
     MCP_CALL_BLOCK_RE,
+    extract_all_complete_mcp_calls,
     extract_first_complete_mcp_call,
     parse_mcp_payload,
 )
@@ -515,6 +516,19 @@ def _inject_mcp_placeholder_with_hints(template: str, cfg: Optional[AssistantAIC
         return text
     return text.replace("{MCP}", _render_mcp_namespace_lines(cfg, namespace_hints))
 
+def _strip_stale_serial_call_rules(text: str) -> str:
+    """Drop lines from older prompt revisions that mandated serial tool calling.
+
+    The worker now executes every tool call in a turn as a batch. A prompt
+    persisted before that (in the DB or the knowledge base) would otherwise keep
+    teaching the model to emit one call and wait, which is exactly the round trip
+    the batch execution exists to remove."""
+    return "\n".join(
+        line for line in str(text or "").splitlines()
+        if not any(stale in line for stale in STALE_SERIAL_CALL_RULES)
+    )
+
+
 def _merge_global_mcp_method(
     system_prompt: str,
     global_mcp_method: str,
@@ -526,10 +540,9 @@ def _merge_global_mcp_method(
     method = str(method or "").replace("\r\n", "\n").replace("\r", "\n")
     if not method:
         return base
-    method = "\n".join(
-        line for line in method.splitlines()
-        if "Call exactly one tool per <mcp-call> block; never join two tool names into one name." not in line
-    ).strip()
+    # The batch-call rule is injected by build_runtime_system_prompt_and_tools,
+    # not here — that is the path both the worker and the preview endpoint share.
+    method = _strip_stale_serial_call_rules(method).strip()
     # Legacy bug compatibility: global MCP template was once persisted to admin_prompt directly.
     if _looks_like_mcp_template(base) and method:
         base = ""
@@ -555,6 +568,9 @@ def _render_mcp_warning_text(template: str, details: List[str], values: Dict[str
         return text.strip()
 
     rendered = _replace_known_tokens(str(template or "").strip() or DEFAULT_MCP_FORMAT_ERROR_HINT)
+    # A hint persisted before batch execution still carries the old "call one
+    # tool and wait" rule; firing it on a format error would undo the batching.
+    rendered = _strip_stale_serial_call_rules(rendered).strip()
     if rendered:
         return rendered
 
@@ -758,6 +774,9 @@ def _extract_first_mcp_call(assistant_text: str):
 
 def _extract_first_complete_mcp_call(assistant_text: str):
     return extract_first_complete_mcp_call(assistant_text)
+
+def _extract_all_complete_mcp_calls(assistant_text: str):
+    return extract_all_complete_mcp_calls(assistant_text)
 
 def _extract_delta_text(delta) -> str:
     if not delta:

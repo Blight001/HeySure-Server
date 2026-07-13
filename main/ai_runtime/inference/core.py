@@ -52,7 +52,6 @@ from api.chat_runtime.chat_prompt_utils import (
     _append_prompt_section,
     _build_mcp_display_result,
     _build_mcp_stream_warning,
-    _extract_first_mcp_call,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
     _sanitize_large_media,
@@ -284,6 +283,39 @@ def _build_native_tools_payload(allowed_tools: Optional[set] = None) -> tuple[Li
         used_names.add(native_name)
         tools.append(native_tool)
     return tools, native_to_mcp
+
+
+def _resolve_mcp_tool_name(
+    tool: str,
+    native_tool_name_map: Dict[str, str],
+    exposed_tools: Optional[set] = None,
+) -> str:
+    """Map whatever name the model emitted back onto a real MCP tool name.
+
+    Native calls arrive already mapped through ``native_tool_name_map``. Models
+    on the text protocol routinely mix separators (``mcp_xxx`` / ``mcp__xxx`` /
+    superseded names), so fall back to the alias resolver rather than failing
+    the call outright.
+    """
+    name = str(tool or "").strip()
+    if not name:
+        return ""
+    if name in native_tool_name_map:
+        return native_tool_name_map[name]
+
+    from api.services.mcp.mcp_tool_aliases import resolve_tool_name
+
+    candidates = set(native_tool_name_map.values())
+    candidates.update(exposed_tools or set())
+    try:
+        candidates.update(
+            str(item.get("name") or "").strip()
+            for item in registry.list_tools()
+            if item.get("name")
+        )
+    except Exception:
+        pass
+    return resolve_tool_name(name, candidates) or name
 
 
 def _split_concatenated_native_tool_name(name: str, native_tool_name_map: Dict[str, str]) -> List[str]:
@@ -1200,13 +1232,13 @@ def _model_visible_tool_result(
         return cleaned
     if tool == "mouse.click":
         cleaned["instruction"] = (
-            "The pre-click confirmation image is attached in the next user message. "
+            "The pre-click confirmation image is attached in a following user message. "
             "The click has not been executed yet. Inspect the red marker. If it is not on the intended clickable target center, "
             "estimate correction_dx/correction_dy in pixels and call mouse.click again with corrected x/y to get a new confirmation image. "
             "If the marker is correct, call mouse.click again with confirmed:true to execute the click."
         )
     else:
-        cleaned["instruction"] = "The screenshot image is attached in the next user message. Analyze the image directly; do not ask the user to open a local path."
+        cleaned["instruction"] = "The screenshot image is attached in a following user message. Analyze the image directly; do not ask the user to open a local path."
     return cleaned
 
 
@@ -1821,6 +1853,648 @@ def _run_worker_impl(
                     return name == "todo.manage"
                 return True
 
+            def _answer_pending_calls(
+                pending: List[Dict[str, Any]],
+                payload: Dict[str, object],
+                *,
+                native: bool,
+            ) -> None:
+                """Close out tool calls the batch will not execute.
+
+                OpenAI-compatible providers reject the next request unless every
+                ``tool_call_id`` in an assistant message has a matching tool
+                message. When a control-flow tool (context clear, plan edit, …)
+                cuts a batch short, the calls behind it still need an answer.
+                """
+                if not pending:
+                    return
+                if native:
+                    for call in pending:
+                        convo.append({
+                            "role": "tool",
+                            "tool_call_id": str(call.get("id") or "call_0"),
+                            "content": _safe_json(payload),
+                        })
+                    return
+                skipped = ", ".join(str(call.get("tool") or "?") for call in pending)
+                convo.append({
+                    "role": "user",
+                    "content": (
+                        "[MCP未执行]\n"
+                        f"本轮以下工具未被执行：{skipped}\n\n"
+                        f"{_safe_json(payload)}"
+                    ),
+                })
+
+            def _flush_turn_screenshots() -> None:
+                """Append this turn's held-back screenshot images.
+
+                Only called once every tool message for the turn is in place, so
+                the assistant's tool_calls stay contiguous with their responses.
+                Barriers that rebuild or truncate ``convo`` drop the images
+                instead — the turn they belonged to no longer exists."""
+                while turn_screenshot_messages:
+                    convo.append(turn_screenshot_messages.pop(0))
+
+            def _execute_turn_call(
+                call: Dict[str, Any],
+                pending: List[Dict[str, Any]],
+            ) -> str:
+                """Run one tool call from the current turn's batch.
+
+                Returns one of:
+                  ``"next_call"`` — continue through the batch
+                  ``"next_turn"`` — batch is over, go back to the model
+                  ``"stop_run"``  — the run is finished (status already set)
+
+                Control-flow tools (context clear/compress, plan create/edit/
+                delete) rebuild or truncate ``convo``, so they end the batch;
+                ``pending`` is answered first so no tool_call_id is orphaned.
+                """
+                nonlocal session_name, last_rejected_tool_sig, rejected_repeat
+                nonlocal plan_state, flow_awaiting_finish, flow_nudges
+                nonlocal phase_start_convo_index, phase_started_at, phase_mcp_statuses
+
+                tool = str(call.get("tool") or "")
+                arguments = call.get("arguments") or {}
+                call_id = str(call.get("id") or "call_0")
+
+                if _run_should_stop(run_id):
+                    _run_set_status(run_id, "stopped", finished=True)
+                    return "stop_run"
+
+                if cfg and not cfg.mcp_enabled:
+                    denied_sig = f"mcp_disabled|{tool}|{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+                    if denied_sig == last_rejected_tool_sig:
+                        rejected_repeat += 1
+                    else:
+                        last_rejected_tool_sig = denied_sig
+                        rejected_repeat = 1
+                    _append_mcp_disabled_feedback(
+                        bg=bg,
+                        convo=convo,
+                        user_id=user_id,
+                        ai_config_id=ai_config_id,
+                        ai_kind=ai_kind,
+                        session_id=session_id,
+                        session_name=session_name,
+                        model=model,
+                        tool=tool,
+                        arguments=arguments,
+                        native_tool_call_id=call_id if _has_native_tc else "",
+                    )
+                    _answer_pending_calls(
+                        pending,
+                        {"success": False, "error": "MCP is disabled for this AI"},
+                        native=_has_native_tc,
+                    )
+                    if rejected_repeat >= 3:
+                        _run_set_status(run_id, "error", "Repeated MCP call while MCP is disabled", finished=True)
+                        return "stop_run"
+                    _set_run_live_phase(run_id, "generating")
+                    return "next_turn"
+
+                # Legacy compat: some text-protocol models glue several tool
+                # names into one. Split and run them under this single call id.
+                joined_native_tools = _split_concatenated_native_tool_name(tool, native_tool_name_map)
+                if joined_native_tools:
+                    joined_mcp_tools = [native_tool_name_map.get(item, item) for item in joined_native_tools]
+                    compound_results = []
+                    compound_failed = False
+                    for split_tool in joined_mcp_tools:
+                        if _run_should_stop(run_id):
+                            _run_set_status(run_id, "stopped", finished=True)
+                            return "stop_run"
+                        item_failed = False
+                        item_error = _joined_tool_skip_reason(split_tool, arguments, effective_tool_allowlist)
+                        if item_error:
+                            item_failed = True
+                            compound_failed = True
+                            item_result = {"result": {"success": False, "error": item_error}}
+                            item_result_text = _build_mcp_display_result(
+                                split_tool,
+                                item_result,
+                                ok=False,
+                                error_message=item_error,
+                            )
+                        else:
+                            _set_run_live_phase(run_id, "waiting_mcp", split_tool)
+                            try:
+                                # Same bridge-timeout widening as the single-tool path below:
+                                # endpoint-agent tools may run for minutes; let their inner
+                                # result-wait deadline govern instead of the 120s bridge cap.
+                                _split_bridge_timeout = None
+                                if is_endpoint_agent_tool(split_tool):
+                                    _split_bridge_timeout = _endpoint_dispatch_timeout(split_tool, arguments) + 30
+                                item_result = run_async(
+                                    _call_mcp_or_endpoint_tool(split_tool, user_id, arguments, ai_config_id),
+                                    timeout=_split_bridge_timeout,
+                                )
+                                endpoint_failed, endpoint_error = _tool_result_failed(item_result)
+                                if endpoint_failed:
+                                    item_failed = True
+                                    compound_failed = True
+                                    item_error = endpoint_error
+                                    item_result_text = _build_mcp_display_result(
+                                        split_tool,
+                                        item_result,
+                                        ok=False,
+                                        error_message=item_error,
+                                    )
+                                else:
+                                    item_result_text = _build_mcp_display_result(split_tool, item_result, ok=True)
+                            except Exception as mcp_exc:
+                                item_failed = True
+                                compound_failed = True
+                                item_error = _extract_mcp_error(mcp_exc)
+                                item_result = {"result": {"success": False, "error": item_error}}
+                                item_result_text = _build_mcp_display_result(
+                                    split_tool,
+                                    item_result,
+                                    ok=False,
+                                    error_message=item_error,
+                                )
+                        _record_mcp_call(
+                            tool=split_tool, user_id=user_id, ai_config_id=ai_config_id,
+                            session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
+                            failed=item_failed, error=item_error,
+                        )
+                        if plan_state is not None:
+                            phase_context.record_status(phase_mcp_statuses, split_tool, item_failed)
+                        saved.tags = _append_mcp_state_to_tags(
+                            saved.tags,
+                            split_tool,
+                            arguments,
+                            item_result_text,
+                        )
+                        bg.add(saved)
+                        bg.commit()
+                        item_screenshot_ref = {} if item_failed else _screenshot_display_ref(split_tool, item_result)
+                        _save_mcp_tool_bubble(
+                            bg,
+                            user_id=user_id,
+                            ai_config_id=ai_config_id,
+                            ai_kind=ai_kind,
+                            session_id=session_id,
+                            session_name=session_name,
+                            model=model,
+                            tool=split_tool,
+                            arguments=arguments,
+                            result_text=item_result_text,
+                            failed=item_failed,
+                            image_url=item_screenshot_ref.get("url", ""),
+                            image_data_url=item_screenshot_ref.get("data_url", ""),
+                            tool_result=item_result if isinstance(item_result, dict) else None,
+                        )
+                        compound_results.append({
+                            "tool": split_tool,
+                            "failed": item_failed,
+                            "error": item_error,
+                            "result": item_result.get("result", item_result),
+                        })
+
+                    compound_payload = {
+                        "success": not compound_failed,
+                        "compat_mode": "split_concatenated_tool_names",
+                        "original_tool": tool,
+                        "tools": compound_results,
+                    }
+                    if _has_native_tc:
+                        convo.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _safe_json(compound_payload),
+                        })
+                    else:
+                        convo.append({"role": "user", "content": (
+                            "[MCP兼容处理完成]\n"
+                            "系统检测到多个 MCP 工具名被拼接，已按顺序拆分处理。\n"
+                            "其中安全且参数完整的工具已执行；缺少参数或不适合从拼接调用执行的工具已逐项标记失败。\n\n"
+                            "[工具处理结果]\n"
+                            f"{_safe_json(compound_payload)}\n\n"
+                            "请基于以上结果继续；如仍需调用失败的工具，请按标准格式提供所需参数重新调用。"
+                        )})
+                    return "next_call"
+
+                if tool not in effective_tool_allowlist:
+                    denied_sig = f"{tool}|{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+                    if denied_sig == last_rejected_tool_sig:
+                        rejected_repeat += 1
+                    else:
+                        last_rejected_tool_sig = denied_sig
+                        rejected_repeat = 1
+                    tool_error = f"Tool not allowed for this task: {tool}"
+                    tool_result = {"result": {"success": False, "error": tool_error}}
+                    result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
+                    saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
+                    bg.add(saved)
+                    bg.commit()
+                    _save_mcp_tool_bubble(
+                        bg,
+                        user_id=user_id,
+                        ai_config_id=ai_config_id,
+                        ai_kind=ai_kind,
+                        session_id=session_id,
+                        session_name=session_name,
+                        model=model,
+                        tool=tool,
+                        arguments=arguments,
+                        result_text=result_text,
+                        failed=True,
+                    )
+                    if _has_native_tc:
+                        convo.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": json.dumps(
+                                {"error": tool_error, "allowed_tools": sorted(effective_tool_allowlist)},
+                                ensure_ascii=False,
+                            ),
+                        })
+                    else:
+                        convo.append({"role": "user", "content": (
+                            "[MCP执行失败]\n"
+                            f"工具 `{tool}` 未在当前任务允许范围内。\n"
+                            f"可用工具: {', '.join(sorted(effective_tool_allowlist)) or '（空）'}\n"
+                            "请改用任务允许的 MCP 工具继续执行。"
+                        )})
+                    if rejected_repeat >= 3:
+                        _answer_pending_calls(
+                            pending,
+                            {"success": False, "error": "Run aborted: repeated disallowed MCP tool call"},
+                            native=_has_native_tc,
+                        )
+                        _run_set_status(run_id, "error", f"Repeated disallowed MCP tool call: {tool}", finished=True)
+                        return "stop_run"
+                    # A rejected tool does not invalidate the rest of the batch:
+                    # answer it and let the sibling calls run.
+                    return "next_call"
+
+                _set_run_live_phase(run_id, "waiting_mcp", tool)
+                tool_failed = False
+                tool_error = ""
+                try:
+                    # The async bridge caps every tool call at _DEFAULT_TIMEOUT (120s)
+                    # and, when it fires, raises a bare concurrent.futures.TimeoutError
+                    # that surfaces to the model as just "TimeoutError". Endpoint-agent
+                    # tools (browser/desktop "run") legitimately run for minutes, so give
+                    # the bridge a window past their own result-wait deadline — the inner
+                    # deadline then wins and returns a structured, readable result (and the
+                    # device has time to finish and send back the full execution trace).
+                    _bridge_timeout = None
+                    if is_endpoint_agent_tool(tool):
+                        _bridge_timeout = _endpoint_dispatch_timeout(tool, arguments) + 30
+                    tool_result = run_async(
+                        _call_mcp_or_endpoint_tool(tool, user_id, arguments, ai_config_id),
+                        timeout=_bridge_timeout,
+                    )
+                    endpoint_failed, endpoint_error = _tool_result_failed(tool_result)
+                    if endpoint_failed:
+                        tool_failed = True
+                        tool_error = endpoint_error
+                        result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
+                    else:
+                        result_text = _build_mcp_display_result(tool, tool_result, ok=True)
+                except Exception as mcp_exc:
+                    tool_failed = True
+                    tool_error = _extract_mcp_error(mcp_exc)
+                    tool_result = {"result": {"success": False, "error": tool_error}}
+                    result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
+                _record_mcp_call(
+                    tool=tool, user_id=user_id, ai_config_id=ai_config_id,
+                    session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
+                    failed=tool_failed, error=tool_error,
+                )
+                if plan_state is not None:
+                    phase_context.record_status(phase_mcp_statuses, tool, tool_failed)
+                result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
+                if (
+                    (not tool_failed)
+                    and tool == "conversation.manage"
+                    and isinstance(result_payload, dict)
+                    and result_payload.get("action") == "rename"
+                    and str(result_payload.get("session_id") or "") == str(session_id)
+                ):
+                    renamed_session = str(result_payload.get("name") or "").strip()
+                    if renamed_session:
+                        session_name = renamed_session
+                        saved.session_name = renamed_session
+                saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
+                bg.add(saved)
+                bg.commit()
+                screenshot_ref = {} if tool_failed else _screenshot_display_ref(tool, tool_result)
+                _save_mcp_tool_bubble(
+                    bg,
+                    user_id=user_id,
+                    ai_config_id=ai_config_id,
+                    ai_kind=ai_kind,
+                    session_id=session_id,
+                    session_name=session_name,
+                    model=model,
+                    tool=tool,
+                    arguments=arguments,
+                    result_text=result_text,
+                    failed=tool_failed,
+                    image_url=screenshot_ref.get("url", ""),
+                    image_data_url=screenshot_ref.get("data_url", ""),
+                    tool_result=tool_result if isinstance(tool_result, dict) else None,
+                )
+
+                if (not tool_failed) and tool == "mcp.describe+tool":
+                    described_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
+                    described_items: list[dict] = []
+                    described_names: list[str] = []
+                    if isinstance(described_payload, dict):
+                        batch = described_payload.get("tools")
+                        if isinstance(batch, list):
+                            described_items = [item for item in batch if isinstance(item, dict)]
+                            described_names = [
+                                str((item or {}).get("name") or "").strip()
+                                for item in batch
+                                if isinstance(item, dict)
+                            ]
+                        else:
+                            described_items = [described_payload]
+                            described_names = [str(described_payload.get("name") or "").strip()]
+                    for described_tool in described_names:
+                        if described_tool and described_tool in effective_tool_allowlist:
+                            exposed_tool_allowlist.add(described_tool)
+                    try:
+                        mcp_session_context.remember_described_tools(
+                            bg,
+                            user_id=user_id,
+                            ai_config_id=ai_config_id,
+                            ai_kind=ai_kind,
+                            session_id=session_id,
+                            session_name=session_name,
+                            described=described_items,
+                        )
+                    except Exception:
+                        logger.exception("persist described MCP tools failed")
+
+                # ---- control-flow tools: they rewrite the conversation --------
+                if (
+                    (not tool_failed)
+                    and tool == "conversation.manage"
+                    and isinstance(result_payload, dict)
+                    and result_payload.get("action") == "clear"
+                    and str(result_payload.get("session_id") or "") == str(session_id)
+                ):
+                    current_user_content = _load_current_user_content(
+                        bg,
+                        user_id=user_id,
+                        ai_config_id=ai_config_id,
+                        ai_kind=ai_kind,
+                        session_id=session_id,
+                        current_user_message_id=current_user_message_id,
+                        fallback=model_user_content,
+                    )
+                    # The rebuild drops this turn's assistant message entirely,
+                    # so the unanswered ids vanish with it — nothing to close out,
+                    # and the held screenshots belong to a turn that no longer exists.
+                    turn_screenshot_messages.clear()
+                    _reset_convo_after_clear(
+                        convo,
+                        system_prompt=system_prompt,
+                        current_user_content=current_user_content,
+                        tool_result=tool_result,
+                    )
+                    if plan_state is not None:
+                        phase_start_convo_index = len(convo)
+                        phase_started_at = time.time()
+                        phase_mcp_statuses = []
+                    _set_run_live_phase(run_id, "generating")
+                    return "next_turn"
+
+                # Planned task flow (system-driven). All plan operations use the
+                # single todo.manage MCP. create starts the flow; edit closes the
+                # current phase and hands over the next; editing the last phase
+                # auto-finalizes. Legacy normalized calls may omit action, so infer
+                # it from their old argument shapes.
+                todo_action = str((arguments or {}).get("action") or "").strip().lower()
+                if tool == "todo.manage" and not todo_action:
+                    if (arguments or {}).get("phases") is not None or (arguments or {}).get("goal"):
+                        todo_action = "create"
+                    elif any(key in (arguments or {}) for key in ("status", "summary", "outcome")):
+                        todo_action = "edit"
+                    else:
+                        todo_action = "get"
+
+                if (not tool_failed) and tool == "todo.manage" and todo_action == "create":
+                    # Answer the tool call, then drive straight into phase 1 — the
+                    # AI never has to poll plan progress itself.
+                    if _has_native_tc:
+                        convo.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False)),
+                        })
+                    else:
+                        convo.append({
+                            "role": "user",
+                            "content": (
+                                f"[MCP执行确认]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
+                                "[工具执行结果]\n"
+                                f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
+                            ),
+                        })
+                    _answer_pending_calls(
+                        pending,
+                        {
+                            "success": False,
+                            "error": "not_executed",
+                            "note": "A todo plan was just created; the system handed over phase 1. Re-issue this call if the new phase still needs it.",
+                        },
+                        native=_has_native_tc,
+                    )
+                    # Every tool_call_id is now answered, so the held images can
+                    # land before this branch appends its phase directive.
+                    _flush_turn_screenshots()
+                    try:
+                        plan_state = plan_service.get_active_plan(
+                            bg, user_id, int(ai_config_id), session_id
+                        ) if ai_config_id is not None else None
+                        flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
+                    except Exception:
+                        logger.exception("plan reload after todo.manage create failed")
+                        plan_state = None
+                    flow_nudges = 0
+                    phase_start_convo_index = len(convo)
+                    phase_started_at = time.time()
+                    phase_mcp_statuses = []
+                    if plan_state is not None and not flow_awaiting_finish:
+                        _prog = plan_service.plan_progress(bg, plan_state)
+                        _cur = next(
+                            (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
+                            None,
+                        )
+                        convo.append({
+                            "role": "user",
+                            "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
+                        })
+                    _set_run_live_phase(run_id, "generating")
+                    return "next_turn"
+
+                if (not tool_failed) and tool == "todo.manage" and todo_action == "edit" and plan_state is not None:
+                    finished_phase = result_payload.get("finished_phase") if isinstance(result_payload, dict) else None
+                    boundary = max(0, min(phase_start_convo_index, len(convo)))
+                    compaction_text = phase_context.build_phase_compaction_text(
+                        finished_phase, phase_mcp_statuses
+                    )
+                    # Fold the finished phase out of the live conversation: drop
+                    # its deep-thinking + verbose MCP results, keep one status line.
+                    # This truncation also removes this turn's assistant message,
+                    # so any unexecuted sibling calls disappear with their ids.
+                    # Injected as the user role (not system) so it stays consistent
+                    # with the other plan-mode directives and avoids mid-conversation
+                    # system messages that some providers reject.
+                    turn_screenshot_messages.clear()
+                    convo[boundary:] = [{"role": "user", "content": compaction_text}]
+                    now_ts = time.time()
+                    try:
+                        phase_context.mark_phase_messages_compressed(
+                            bg,
+                            user_id=user_id,
+                            ai_config_id=ai_config_id,
+                            ai_kind=ai_kind,
+                            session_id=session_id,
+                            since_ts=phase_started_at,
+                            until_ts=now_ts,
+                        )
+                        _save_message(
+                            bg,
+                            user_id,
+                            ChatMessageCreate(
+                                role="system",
+                                content=compaction_text,
+                                tags="phase_summary",
+                                ai_config_id=ai_config_id,
+                                ai_kind=ai_kind,
+                                session_id=session_id,
+                                session_name=session_name,
+                                model=model,
+                                total_tokens=max(1, len(compaction_text) // 3),
+                            ),
+                        )
+                        bg.commit()
+                    except Exception:
+                        logger.exception("phase compaction persistence failed")
+                        bg.rollback()
+                    # Refresh plan state and open a fresh boundary for next phase.
+                    try:
+                        plan_state = plan_service.get_active_plan(
+                            bg, user_id, int(ai_config_id), session_id
+                        ) if ai_config_id is not None else None
+                        flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
+                    except Exception:
+                        logger.exception("plan reload after todo.manage edit failed")
+                    flow_nudges = 0
+                    phase_start_convo_index = len(convo)
+                    phase_started_at = time.time()
+                    phase_mcp_statuses = []
+                    # System drives the next step: hand over the next phase, or —
+                    # when every phase is done — finalize the whole plan on its own.
+                    # Completing the last phase IS the finish; there is no separate
+                    # completion MCP.
+                    if flow_awaiting_finish:
+                        _auto_finalize_plan(phase_started_at)
+                        _set_run_live_phase(run_id, "idle")
+                        _run_set_status(run_id, "completed", finished=True)
+                        return "stop_run"
+                    if plan_state is not None:
+                        _prog = plan_service.plan_progress(bg, plan_state)
+                        _cur = next(
+                            (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
+                            None,
+                        )
+                        convo.append({
+                            "role": "user",
+                            "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
+                        })
+                    _set_run_live_phase(run_id, "generating")
+                    return "next_turn"
+
+                if (not tool_failed) and tool == "todo.manage" and todo_action == "delete":
+                    if _has_native_tc:
+                        convo.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": _safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False)),
+                        })
+                    else:
+                        convo.append({
+                            "role": "user",
+                            "content": (
+                                f"[MCP执行确认]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
+                                "[工具执行结果]\n"
+                                f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
+                            ),
+                        })
+                    _answer_pending_calls(
+                        pending,
+                        {
+                            "success": False,
+                            "error": "not_executed",
+                            "note": "The todo plan was just deleted; the flow reset. Re-issue this call if it is still needed.",
+                        },
+                        native=_has_native_tc,
+                    )
+                    _flush_turn_screenshots()
+                    plan_state = None
+                    flow_awaiting_finish = False
+                    flow_nudges = 0
+                    phase_mcp_statuses = []
+                    _set_run_live_phase(run_id, "generating")
+                    return "next_turn"
+
+                # ---- ordinary tool: hand the result back and keep going --------
+                screenshot_message = _browser_screenshot_image_message(tool, tool_result)
+                attach_screenshot = bool(screenshot_message) and not image_input_disabled
+                if attach_screenshot:
+                    # Only prune screenshots from *earlier* turns. Two captures
+                    # inside one batch were both asked for and both stay attached.
+                    _prune_prior_runtime_screenshot_images(convo[:turn_convo_start])
+                if _has_native_tc:
+                    # Native path: use tool role so model sees structured result.
+                    convo.append({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": _safe_json(_model_visible_tool_result(
+                            tool,
+                            tool_result,
+                            image_attached=attach_screenshot,
+                        )),
+                    })
+                    if attach_screenshot:
+                        # The image rides in a *user* message, and every tool
+                        # message for this assistant turn must stay contiguous
+                        # behind it — a user message wedged between two tool
+                        # responses orphans the later tool_call_ids and the next
+                        # request 400s. So hold the image until the batch drains.
+                        turn_screenshot_messages.append(screenshot_message)
+                else:
+                    follow_up_text = (
+                        f"[MCP执行{'失败' if tool_failed else '确认'}]\n"
+                        f"系统已执行工具：{tool}\n"
+                        f"执行状态：{'失败' if tool_failed else '成功'}\n\n"
+                        "[工具参数]\n"
+                        f"{_safe_json(arguments)}\n\n"
+                        "[工具执行结果]\n"
+                        f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=attach_screenshot))}\n\n"
+                        "请基于以上结果继续完成任务。"
+                    )
+                    if attach_screenshot:
+                        convo.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": follow_up_text},
+                                *screenshot_message["content"],
+                            ],
+                        })
+                    else:
+                        convo.append({"role": "user", "content": follow_up_text})
+                return "next_call"
+
             for step_index in range(max_steps):
                 if _run_should_stop(run_id):
                     _run_set_status(run_id, "stopped", finished=True)
@@ -1957,12 +2631,11 @@ def _run_worker_impl(
                         if step_tools:
                             oa_payload["tools"] = step_tools
                             oa_payload["tool_choice"] = "auto"
-                            # The worker executes one MCP action at a time. If
-                            # an OpenAI-compatible model emits parallel tool
-                            # calls, some providers reject the next request
-                            # unless every call id is answered. Ask the model
-                            # for sequential calls at the protocol level too.
-                            oa_payload["parallel_tool_calls"] = False
+                            # The worker executes every tool call the model emits
+                            # in a turn, answering each tool_call_id before the
+                            # next request. Letting the model batch independent
+                            # actions collapses N round trips into one.
+                            oa_payload["parallel_tool_calls"] = True
                         response = ai_http_post(base_url, headers=headers, json=oa_payload, timeout=300, stream=True)
                         if not response.ok and "parallel_tool_calls" in oa_payload:
                             unsupported_hint = str(response.text or "").lower()
@@ -2092,28 +2765,33 @@ def _run_worker_impl(
                 reasoning_content = sr.reasoning_content
                 usage = sr.usage
                 finish_reason = sr.finish_reason
-                payload_call = sr.payload_call
                 _has_native_tc = sr.has_native_tc
-                _tc_id = sr.tc_id
-                _tc_name = sr.tc_name
-                _tc_args = sr.tc_args
                 latency = time.time() - start_at
+
+                # Every tool call this turn produced. The batch runs to completion
+                # before the next inference step, so a model that plans several
+                # independent actions pays one round trip instead of N.
+                turn_calls: List[Dict[str, Any]] = []
+                for _raw_call in sr.tool_calls:
+                    _resolved_call = dict(_raw_call)
+                    _resolved_call["tool"] = _resolve_mcp_tool_name(
+                        _raw_call.get("tool", ""), native_tool_name_map, current_exposed_tools
+                    )
+                    turn_calls.append(_resolved_call)
+
                 token_triplet = (
                     f"{int(usage.get('prompt_tokens') or 0)}/"
                     f"{int(usage.get('completion_tokens') or 0)}/"
                     f"{int(usage.get('total_tokens') or 0)}"
                 )
-                tc_name = _tc_name or (payload_call or {}).get("tool") or "-"
                 _ai_debug_stage(
                     "DONE",
                     f"{_ai_short_run_id(run_id)} #{step_index + 1}/{max_steps} "
                     f"{finish_reason or 'stop'} {int(latency * 1000)}ms tok={token_triplet} "
-                    f"tc={'native:' if _has_native_tc else ''}{_ai_short(tc_name, 32)}",
+                    f"tc={'native:' if _has_native_tc else ''}"
+                    f"{_ai_short(', '.join(c['tool'] for c in turn_calls) or '-', 48)}",
                     "32",
                 )
-                if not payload_call and not _has_native_tc:
-                    payload_call = _extract_first_mcp_call(assistant_text)
-                assistant_tags = "mcp_assistant_call" if (payload_call or _has_native_tc) else ""
 
                 saved = _save_message(
                     bg,
@@ -2122,7 +2800,7 @@ def _run_worker_impl(
                         role="assistant",
                         content=assistant_text,
                         think=reasoning_content or None,
-                        tags=assistant_tags,
+                        tags="mcp_assistant_call" if turn_calls else "",
                         ai_config_id=ai_config_id,
                         ai_kind=ai_kind,
                         session_id=session_id,
@@ -2137,59 +2815,52 @@ def _run_worker_impl(
                         latency=latency,
                     ),
                 )
-                if _has_native_tc and _tc_name:
+
+                # Where this turn starts in the live conversation. Screenshot
+                # pruning is bounded by it, so two captures inside one batch both
+                # survive while older ones still get dropped.
+                turn_convo_start = len(convo)
+                # Screenshot images captured by this turn's tools, held back until
+                # every tool response is appended (see _flush_turn_screenshots).
+                turn_screenshot_messages: List[Dict] = []
+                if _has_native_tc and turn_calls:
                     assistant_item = {
                         "role": "assistant",
                         "content": assistant_text or None,
-                        "tool_calls": [{
-                            "id": _tc_id or "call_0",
-                            "type": "function",
-                            "function": {"name": _tc_name, "arguments": _tc_args},
-                        }],
+                        "tool_calls": [
+                            {
+                                "id": call["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": call["native_name"] or call["tool"],
+                                    "arguments": call["raw_arguments"] or _safe_json(call["arguments"]),
+                                },
+                            }
+                            for call in turn_calls
+                        ],
                     }
-                    if reasoning_content:
-                        assistant_item["reasoning_content"] = reasoning_content
-                    convo.append(assistant_item)
                 else:
                     assistant_item = {"role": "assistant", "content": assistant_text}
-                    if reasoning_content:
-                        assistant_item["reasoning_content"] = reasoning_content
-                    convo.append(assistant_item)
+                if reasoning_content:
+                    assistant_item["reasoning_content"] = reasoning_content
+                convo.append(assistant_item)
                 _set_run_live_text(run_id, "")
                 _set_run_live_usage(run_id, 0, 0, 0)
 
-                # Text-based fallback: if no payload_call was detected during streaming.
-                if not payload_call and not _has_native_tc:
-                    payload_call = _extract_first_mcp_call(assistant_text)
-                payload_tool = str((payload_call or {}).get("tool") or "").strip()
-                if payload_call and payload_tool in native_tool_name_map:
-                    payload_tool = native_tool_name_map[payload_tool]
-                    payload_call["tool"] = payload_tool
-                elif payload_call and payload_tool:
-                    # 模型经常混用分隔符（mcp_xxx / mcp__xxx / 旧名）——宽容
-                    # 解析成真实工具名，避免「下划线格式不兼容」直接报错。
-                    from api.services.mcp.mcp_tool_aliases import resolve_tool_name
-
-                    _resolve_cands = set(native_tool_name_map.values())
-                    _resolve_cands.update(current_exposed_tools or set())
-                    try:
-                        _resolve_cands.update(
-                            str(t.get("name") or "").strip()
-                            for t in registry.list_tools()
-                            if t.get("name")
-                        )
-                    except Exception:
-                        pass
-                    _resolved_tool = resolve_tool_name(payload_tool, _resolve_cands)
-                    if _resolved_tool != payload_tool:
-                        payload_tool = _resolved_tool
-                        payload_call["tool"] = payload_tool
                 # AI 主动压缩上下文：复用自动压缩机制，但不看 token 阈值，立即把
                 # 较早的对话历史折叠成摘要并重建当前会话，让本轮就用上压缩结果。
-                _payload_args = (payload_call or {}).get("arguments", {}) or {}
-                _payload_action = str(_payload_args.get("action") or "").strip().lower()
-                if payload_tool == "conversation.manage" and _payload_action == "compress":
-                    _compress_args = _payload_args
+                # 该调用整体重建 convo，因此被拦截、不下发到工具层，并且必须独占
+                # 一轮——同轮其余调用一律不执行。
+                _compress_call = next(
+                    (
+                        call for call in turn_calls
+                        if call["tool"] == "conversation.manage"
+                        and str((call["arguments"] or {}).get("action") or "").strip().lower() == "compress"
+                    ),
+                    None,
+                )
+                if _compress_call is not None:
+                    _compress_args = _compress_call["arguments"] or {}
                     try:
                         _keep_recent = int(_compress_args.get("keep_recent", 4))
                     except Exception:
@@ -2251,20 +2922,28 @@ def _run_worker_impl(
                         if _has_native_tc:
                             convo.append({
                                 "role": "tool",
-                                "tool_call_id": _tc_id or "call_0",
+                                "tool_call_id": _compress_call["id"],
                                 "content": _safe_json(
                                     {"success": True, "compressed": False, "note": _compress_note}
                                 ),
                             })
+                            _answer_pending_calls(
+                                [call for call in turn_calls if call is not _compress_call],
+                                {
+                                    "success": False,
+                                    "error": "not_executed",
+                                    "note": (
+                                        "conversation.manage(compress) rewrites the whole context, "
+                                        "so it runs on its own. Re-issue this call afterwards."
+                                    ),
+                                },
+                                native=True,
+                            )
                         else:
                             convo.append({"role": "user", "content": _compress_note})
                     _set_run_live_phase(run_id, "generating")
                     continue
-                joined_native_tools = (
-                    _split_concatenated_native_tool_name(payload_tool, native_tool_name_map)
-                    if payload_call
-                    else []
-                )
+
                 if is_task_runtime:
                     latest_task_job = _load_task_job_by_session(bg, user_id, ai_config_id, session_id)
                     if latest_task_job:
@@ -2281,7 +2960,7 @@ def _run_worker_impl(
                     and bool(getattr(user, "conversation_auto_compress_enabled", True))
                     and not task_is_finished
                     and not compression_failed
-                    and payload_tool != "todo.manage"
+                    and not any(call["tool"] == "todo.manage" for call in turn_calls)
                 ):
                     threshold = token_threshold_override if token_threshold_override is not None else max(1, int(cfg.token_limit or 1))
                     session_tokens = _session_total_tokens(bg, user_id, ai_kind, session_id, ai_config_id)
@@ -2326,35 +3005,32 @@ def _run_worker_impl(
                         # don't retry-loop forever; fall through this turn.
                         compression_failed = True
 
-                # Plan-mode gate: once a plan exists, reject tool calls that do
-                # not move the current plan forward. The assistant tool_call
-                # message was already appended above, so we answer it (native)
-                # / reply (text) and steer back.
-                if payload_call and is_task_runtime and plan_state is not None and not _flow_allowed_tool(payload_tool):
-                    if plan_state is None:
-                        _flow_block_text = phase_context.render_plan_required_notice()
-                    elif flow_awaiting_finish:
-                        _flow_block_text = phase_context.render_finish_required_notice(
-                            plan_state.goal if plan_state else ""
-                        )
+                # Plan-mode gate: once a plan exists, reject a turn whose calls do
+                # not move the current plan forward. The assistant tool_call message
+                # was already appended above, so answer every id (native) / reply
+                # (text) and steer back.
+                if (
+                    turn_calls
+                    and is_task_runtime
+                    and plan_state is not None
+                    and any(not _flow_allowed_tool(call["tool"]) for call in turn_calls)
+                ):
+                    if flow_awaiting_finish:
+                        _flow_block_text = phase_context.render_finish_required_notice(plan_state.goal)
                     else:
                         _flow_block_text = phase_context.render_continue_phase_notice()
                     if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": _tc_id or "call_0",
-                            "content": _safe_json({
-                                "success": False,
-                                "error": "flow_violation",
-                                "note": _flow_block_text,
-                            }),
-                        })
+                        _answer_pending_calls(
+                            turn_calls,
+                            {"success": False, "error": "flow_violation", "note": _flow_block_text},
+                            native=True,
+                        )
                     else:
                         convo.append({"role": "user", "content": _flow_block_text})
                     _set_run_live_phase(run_id, "generating")
                     continue
 
-                if not payload_call:
+                if not turn_calls:
                     # Only check for text-format MCP warnings when not using native tool_calls.
                     if not _has_native_tc:
                         warning = _build_mcp_stream_warning(assistant_text, cfg, mcp_warning_template)
@@ -2381,12 +3057,8 @@ def _run_worker_impl(
                     # bounds this so a stubborn model degrades to a normal
                     # finish instead of burning the whole step budget.
                     if is_task_runtime and plan_state is not None and flow_nudges < 3:
-                        if plan_state is None:
-                            _nudge_text = phase_context.render_plan_required_notice()
-                        elif flow_awaiting_finish:
-                            _nudge_text = phase_context.render_finish_required_notice(
-                                plan_state.goal if plan_state else ""
-                            )
+                        if flow_awaiting_finish:
+                            _nudge_text = phase_context.render_finish_required_notice(plan_state.goal)
                         else:
                             _nudge_text = phase_context.render_continue_phase_notice()
                         flow_nudges += 1
@@ -2425,7 +3097,7 @@ def _run_worker_impl(
                                 )
                                 bg.add(saved)
                                 bg.commit()
-                        except Exception as _arex:
+                        except Exception:
                             logger.exception("auto AI message reply failed")
                         finally:
                             pending_ai_reply_message_id = ""
@@ -2468,561 +3140,24 @@ def _run_worker_impl(
                             logger.exception("auto finalize simple task job failed")
                     _run_set_status(run_id, "completed", finished=True)
                     return
-                if joined_native_tools:
-                    joined_mcp_tools = [native_tool_name_map.get(item, item) for item in joined_native_tools]
-                    tool = payload_tool
-                    arguments = payload_call.get("arguments", {}) or {}
-                    if cfg and not cfg.mcp_enabled:
-                        denied_sig = f"mcp_disabled|{tool}|{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
-                        if denied_sig == last_rejected_tool_sig:
-                            rejected_repeat += 1
-                        else:
-                            last_rejected_tool_sig = denied_sig
-                            rejected_repeat = 1
-                        _append_mcp_disabled_feedback(
-                            bg=bg,
-                            convo=convo,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            model=model,
-                            tool=tool,
-                            arguments=arguments,
-                            native_tool_call_id=_tc_id or "call_0" if _has_native_tc else "",
-                        )
-                        if rejected_repeat >= 3:
-                            _run_set_status(run_id, "error", "Repeated MCP call while MCP is disabled", finished=True)
-                            return
-                        _set_run_live_phase(run_id, "generating")
-                        continue
 
-                    compound_results = []
-                    compound_failed = False
-                    for split_tool in joined_mcp_tools:
-                        if _run_should_stop(run_id):
-                            _run_set_status(run_id, "stopped", finished=True)
-                            return
-                        item_failed = False
-                        item_error = _joined_tool_skip_reason(split_tool, arguments, effective_tool_allowlist)
-                        if item_error:
-                            item_failed = True
-                            compound_failed = True
-                            item_result = {"result": {"success": False, "error": item_error}}
-                            item_result_text = _build_mcp_display_result(
-                                split_tool,
-                                item_result,
-                                ok=False,
-                                error_message=item_error,
-                            )
-                        else:
-                            _set_run_live_phase(run_id, "waiting_mcp", split_tool)
-                            try:
-                                # Same bridge-timeout widening as the single-tool path below:
-                                # endpoint-agent tools may run for minutes; let their inner
-                                # result-wait deadline govern instead of the 120s bridge cap.
-                                _split_bridge_timeout = None
-                                if is_endpoint_agent_tool(split_tool):
-                                    _split_bridge_timeout = _endpoint_dispatch_timeout(split_tool, arguments) + 30
-                                item_result = run_async(
-                                    _call_mcp_or_endpoint_tool(split_tool, user_id, arguments, ai_config_id),
-                                    timeout=_split_bridge_timeout,
-                                )
-                                endpoint_failed, endpoint_error = _tool_result_failed(item_result)
-                                if endpoint_failed:
-                                    item_failed = True
-                                    compound_failed = True
-                                    item_error = endpoint_error
-                                    item_result_text = _build_mcp_display_result(
-                                        split_tool,
-                                        item_result,
-                                        ok=False,
-                                        error_message=item_error,
-                                    )
-                                else:
-                                    item_result_text = _build_mcp_display_result(split_tool, item_result, ok=True)
-                            except Exception as mcp_exc:
-                                item_failed = True
-                                compound_failed = True
-                                item_error = _extract_mcp_error(mcp_exc)
-                                item_result = {"result": {"success": False, "error": item_error}}
-                                item_result_text = _build_mcp_display_result(
-                                    split_tool,
-                                    item_result,
-                                    ok=False,
-                                    error_message=item_error,
-                                )
-                        _record_mcp_call(
-                            tool=split_tool, user_id=user_id, ai_config_id=ai_config_id,
-                            session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
-                            failed=item_failed, error=item_error,
-                        )
-                        if plan_state is not None:
-                            phase_context.record_status(phase_mcp_statuses, split_tool, item_failed)
-                        saved.tags = _append_mcp_state_to_tags(
-                            saved.tags,
-                            split_tool,
-                            arguments,
-                            item_result_text,
-                        )
-                        bg.add(saved)
-                        bg.commit()
-                        item_screenshot_ref = {} if item_failed else _screenshot_display_ref(split_tool, item_result)
-                        _save_mcp_tool_bubble(
-                            bg,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            model=model,
-                            tool=split_tool,
-                            arguments=arguments,
-                            result_text=item_result_text,
-                            failed=item_failed,
-                            image_url=item_screenshot_ref.get("url", ""),
-                            image_data_url=item_screenshot_ref.get("data_url", ""),
-                            tool_result=item_result if isinstance(item_result, dict) else None,
-                        )
-                        compound_results.append({
-                            "tool": split_tool,
-                            "failed": item_failed,
-                            "error": item_error,
-                            "result": item_result.get("result", item_result),
-                        })
-
-                    compound_payload = {
-                        "success": not compound_failed,
-                        "compat_mode": "split_concatenated_tool_names",
-                        "original_tool": tool,
-                        "tools": compound_results,
-                    }
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": _tc_id or "call_0",
-                            "content": _safe_json(compound_payload),
-                        })
-                    else:
-                        follow_up = (
-                            "[MCP兼容处理完成]\n"
-                            "系统检测到多个 MCP 工具名被拼接，已按顺序拆分处理。\n"
-                            "其中安全且参数完整的工具已执行；缺少参数或不适合从拼接调用执行的工具已逐项标记失败。\n\n"
-                            "[工具处理结果]\n"
-                            f"{_safe_json(compound_payload)}\n\n"
-                            "请基于以上结果继续；如仍需调用失败的工具，请按标准格式一次调用一个 MCP 工具并提供所需参数。"
-                        )
-                        convo.append({"role": "user", "content": follow_up})
-                    _set_run_live_phase(run_id, "generating")
-                    continue
-                if _run_should_stop(run_id):
-                    _run_set_status(run_id, "stopped", finished=True)
+                # ---- run this turn's tool calls as a batch --------------------
+                # Each call is answered before the next request goes out. A
+                # control-flow tool ends the batch early and closes out the
+                # remaining ids itself.
+                batch_action = "next_call"
+                for call_index, turn_call in enumerate(turn_calls):
+                    batch_action = _execute_turn_call(turn_call, turn_calls[call_index + 1:])
+                    if batch_action != "next_call":
+                        break
+                if batch_action == "stop_run":
                     return
-                if cfg and not cfg.mcp_enabled:
-                    tool = payload_call.get("tool", "")
-                    arguments = payload_call.get("arguments", {}) or {}
-                    denied_sig = f"mcp_disabled|{tool}|{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
-                    if denied_sig == last_rejected_tool_sig:
-                        rejected_repeat += 1
-                    else:
-                        last_rejected_tool_sig = denied_sig
-                        rejected_repeat = 1
-                    _append_mcp_disabled_feedback(
-                        bg=bg,
-                        convo=convo,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        session_name=session_name,
-                        model=model,
-                        tool=tool,
-                        arguments=arguments,
-                        native_tool_call_id=_tc_id or "call_0" if _has_native_tc else "",
-                    )
-                    if rejected_repeat >= 3:
-                        _run_set_status(run_id, "error", "Repeated MCP call while MCP is disabled", finished=True)
-                        return
-                    _set_run_live_phase(run_id, "generating")
+                if batch_action == "next_turn":
+                    # A barrier already flushed or dropped the held screenshots.
                     continue
-
-                tool = payload_call.get("tool", "")
-                arguments = payload_call.get("arguments", {}) or {}
-                if _run_should_stop(run_id):
-                    _run_set_status(run_id, "stopped", finished=True)
-                    return
-                if tool not in effective_tool_allowlist:
-                    denied_sig = f"{tool}|{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
-                    if denied_sig == last_rejected_tool_sig:
-                        rejected_repeat += 1
-                    else:
-                        last_rejected_tool_sig = denied_sig
-                        rejected_repeat = 1
-                    tool_failed = True
-                    tool_error = f"Tool not allowed for this task: {tool}"
-                    tool_result = {"result": {"success": False, "error": tool_error}}
-                    result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
-                    saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
-                    bg.add(saved)
-                    bg.commit()
-                    _save_mcp_tool_bubble(
-                        bg,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        session_name=session_name,
-                        model=model,
-                        tool=tool,
-                        arguments=arguments,
-                        result_text=result_text,
-                        failed=True,
-                    )
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": _tc_id or "call_0",
-                            "content": json.dumps({"error": tool_error, "allowed_tools": sorted(effective_tool_allowlist)}, ensure_ascii=False),
-                        })
-                    else:
-                        follow_up = (
-                            "[MCP执行失败]\n"
-                            f"工具 `{tool}` 未在当前任务允许范围内。\n"
-                            f"可用工具: {', '.join(sorted(effective_tool_allowlist)) or '（空）'}\n"
-                            "请改用任务允许的 MCP 工具继续执行。"
-                        )
-                        convo.append({"role": "user", "content": follow_up})
-                    if rejected_repeat >= 3:
-                        _run_set_status(run_id, "error", f"Repeated disallowed MCP tool call: {tool}", finished=True)
-                        return
-                    continue
-                _set_run_live_phase(run_id, "waiting_mcp", tool)
-                tool_failed = False
-                tool_error = ""
-                try:
-                    # The async bridge caps every tool call at _DEFAULT_TIMEOUT (120s)
-                    # and, when it fires, raises a bare concurrent.futures.TimeoutError
-                    # that surfaces to the model as just "TimeoutError". Endpoint-agent
-                    # tools (browser/desktop "run") legitimately run for minutes, so give
-                    # the bridge a window past their own result-wait deadline — the inner
-                    # deadline then wins and returns a structured, readable result (and the
-                    # device has time to finish and send back the full execution trace).
-                    _bridge_timeout = None
-                    if is_endpoint_agent_tool(tool):
-                        _bridge_timeout = _endpoint_dispatch_timeout(tool, arguments) + 30
-                    tool_result = run_async(
-                        _call_mcp_or_endpoint_tool(tool, user_id, arguments, ai_config_id),
-                        timeout=_bridge_timeout,
-                    )
-                    endpoint_failed, endpoint_error = _tool_result_failed(tool_result)
-                    if endpoint_failed:
-                        tool_failed = True
-                        tool_error = endpoint_error
-                        result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
-                    else:
-                        result_text = _build_mcp_display_result(tool, tool_result, ok=True)
-                except Exception as mcp_exc:
-                    tool_failed = True
-                    tool_error = _extract_mcp_error(mcp_exc)
-                    tool_result = {"result": {"success": False, "error": tool_error}}
-                    result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
-                _record_mcp_call(
-                    tool=tool, user_id=user_id, ai_config_id=ai_config_id,
-                    session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
-                    failed=tool_failed, error=tool_error,
-                )
-                if plan_state is not None:
-                    phase_context.record_status(phase_mcp_statuses, tool, tool_failed)
-                result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
-                if (
-                    (not tool_failed)
-                    and tool == "conversation.manage"
-                    and isinstance(result_payload, dict)
-                    and result_payload.get("action") == "rename"
-                    and str(result_payload.get("session_id") or "") == str(session_id)
-                ):
-                    renamed_session = str(result_payload.get("name") or "").strip()
-                    if renamed_session:
-                        session_name = renamed_session
-                        saved.session_name = renamed_session
-                saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
-                bg.add(saved)
-                bg.commit()
-                screenshot_ref = {} if tool_failed else _screenshot_display_ref(tool, tool_result)
-                _save_mcp_tool_bubble(
-                    bg,
-                    user_id=user_id,
-                    ai_config_id=ai_config_id,
-                    ai_kind=ai_kind,
-                    session_id=session_id,
-                    session_name=session_name,
-                    model=model,
-                    tool=tool,
-                    arguments=arguments,
-                    result_text=result_text,
-                    failed=tool_failed,
-                    image_url=screenshot_ref.get("url", ""),
-                    image_data_url=screenshot_ref.get("data_url", ""),
-                    tool_result=tool_result if isinstance(tool_result, dict) else None,
-                )
-
-                if (not tool_failed) and tool == "mcp.describe+tool":
-                    described_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
-                    described_items: list[dict] = []
-                    described_names: list[str] = []
-                    if isinstance(described_payload, dict):
-                        batch = described_payload.get("tools")
-                        if isinstance(batch, list):
-                            described_items = [item for item in batch if isinstance(item, dict)]
-                            described_names = [
-                                str((item or {}).get("name") or "").strip()
-                                for item in batch
-                                if isinstance(item, dict)
-                            ]
-                        else:
-                            described_items = [described_payload]
-                            described_names = [str(described_payload.get("name") or "").strip()]
-                    for described_tool in described_names:
-                        if described_tool and described_tool in effective_tool_allowlist:
-                            exposed_tool_allowlist.add(described_tool)
-                    try:
-                        mcp_session_context.remember_described_tools(
-                            bg,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            described=described_items,
-                        )
-                    except Exception:
-                        logger.exception("persist described MCP tools failed")
-
-                if (
-                    (not tool_failed)
-                    and tool == "conversation.manage"
-                    and isinstance(result_payload, dict)
-                    and result_payload.get("action") == "clear"
-                    and str(result_payload.get("session_id") or "") == str(session_id)
-                ):
-                    current_user_content = _load_current_user_content(
-                        bg,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        current_user_message_id=current_user_message_id,
-                        fallback=model_user_content,
-                    )
-                    _reset_convo_after_clear(
-                        convo,
-                        system_prompt=system_prompt,
-                        current_user_content=current_user_content,
-                        tool_result=tool_result,
-                    )
-                    if plan_state is not None:
-                        phase_start_convo_index = len(convo)
-                        phase_started_at = time.time()
-                        phase_mcp_statuses = []
-                    _set_run_live_phase(run_id, "generating")
-                    continue
-
-                # Planned task flow (system-driven). All plan operations use the
-                # single todo.manage MCP. create starts the flow; edit closes the
-                # current phase and hands over the next; editing the last phase
-                # auto-finalizes. Legacy normalized calls may omit action, so infer
-                # it from their old argument shapes.
-                todo_action = str((arguments or {}).get("action") or "").strip().lower()
-                if tool == "todo.manage" and not todo_action:
-                    if (arguments or {}).get("phases") is not None or (arguments or {}).get("goal"):
-                        todo_action = "create"
-                    elif any(key in (arguments or {}) for key in ("status", "summary", "outcome")):
-                        todo_action = "edit"
-                    else:
-                        todo_action = "get"
-
-                if (not tool_failed) and tool == "todo.manage" and todo_action == "create":
-                    # Answer the tool call, then drive straight into phase 1 — the
-                    # AI never has to poll plan progress itself.
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": _tc_id or "call_0",
-                            "content": _safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False)),
-                        })
-                    else:
-                        convo.append({
-                            "role": "user",
-                            "content": (
-                                f"[MCP执行确认]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
-                                "[工具执行结果]\n"
-                                f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
-                            ),
-                        })
-                    try:
-                        plan_state = plan_service.get_active_plan(
-                            bg, user_id, int(ai_config_id), session_id
-                        ) if ai_config_id is not None else None
-                        flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
-                    except Exception:
-                        logger.exception("plan reload after todo.manage create failed")
-                        plan_state = None
-                    flow_nudges = 0
-                    phase_start_convo_index = len(convo)
-                    phase_started_at = time.time()
-                    phase_mcp_statuses = []
-                    if plan_state is not None and not flow_awaiting_finish:
-                        _prog = plan_service.plan_progress(bg, plan_state)
-                        _cur = next(
-                            (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
-                            None,
-                        )
-                        convo.append({
-                            "role": "user",
-                            "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
-                        })
-                    _set_run_live_phase(run_id, "generating")
-                    continue
-
-                if (not tool_failed) and tool == "todo.manage" and todo_action == "edit" and plan_state is not None:
-                    result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
-                    finished_phase = result_payload.get("finished_phase") if isinstance(result_payload, dict) else None
-                    boundary = max(0, min(phase_start_convo_index, len(convo)))
-                    compaction_text = phase_context.build_phase_compaction_text(
-                        finished_phase, phase_mcp_statuses
-                    )
-                    # Fold the finished phase out of the live conversation: drop
-                    # its deep-thinking + verbose MCP results, keep one status line.
-                    # Injected as the user role (not system) so it stays consistent
-                    # with the other plan-mode directives and avoids mid-conversation
-                    # system messages that some providers reject.
-                    convo[boundary:] = [{"role": "user", "content": compaction_text}]
-                    now_ts = time.time()
-                    try:
-                        phase_context.mark_phase_messages_compressed(
-                            bg,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            since_ts=phase_started_at,
-                            until_ts=now_ts,
-                        )
-                        _save_message(
-                            bg,
-                            user_id,
-                            ChatMessageCreate(
-                                role="system",
-                                content=compaction_text,
-                                tags="phase_summary",
-                                ai_config_id=ai_config_id,
-                                ai_kind=ai_kind,
-                                session_id=session_id,
-                                session_name=session_name,
-                                model=model,
-                                total_tokens=max(1, len(compaction_text) // 3),
-                            ),
-                        )
-                        bg.commit()
-                    except Exception:
-                        logger.exception("phase compaction persistence failed")
-                        bg.rollback()
-                    # Refresh plan state and open a fresh boundary for next phase.
-                    try:
-                        plan_state = plan_service.get_active_plan(
-                            bg, user_id, int(ai_config_id), session_id
-                        ) if ai_config_id is not None else None
-                        flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
-                    except Exception:
-                        logger.exception("plan reload after todo.manage edit failed")
-                    flow_nudges = 0
-                    phase_start_convo_index = len(convo)
-                    phase_started_at = time.time()
-                    phase_mcp_statuses = []
-                    # System drives the next step: hand over the next phase, or —
-                    # when every phase is done — finalize the whole plan on its own.
-                    # Completing the last phase IS the finish; there is no separate
-                    # completion MCP.
-                    if flow_awaiting_finish:
-                        _auto_finalize_plan(phase_started_at)
-                        _set_run_live_phase(run_id, "idle")
-                        _run_set_status(run_id, "completed", finished=True)
-                        return
-                    elif plan_state is not None:
-                        _prog = plan_service.plan_progress(bg, plan_state)
-                        _cur = next(
-                            (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
-                            None,
-                        )
-                        convo.append({
-                            "role": "user",
-                            "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
-                        })
-                    _set_run_live_phase(run_id, "generating")
-                    continue
-
-                if (not tool_failed) and tool == "todo.manage" and todo_action == "delete":
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": _tc_id or "call_0",
-                            "content": _safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False)),
-                        })
-                    else:
-                        convo.append({
-                            "role": "user",
-                            "content": (
-                                f"[MCP执行确认]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
-                                "[工具执行结果]\n"
-                                f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
-                            ),
-                        })
-                    plan_state = None
-                    flow_awaiting_finish = False
-                    flow_nudges = 0
-                    phase_mcp_statuses = []
-                    _set_run_live_phase(run_id, "generating")
-                    continue
-
-                screenshot_message = _browser_screenshot_image_message(tool, tool_result)
-                attach_screenshot = bool(screenshot_message) and not image_input_disabled
-                if attach_screenshot:
-                    _prune_prior_runtime_screenshot_images(convo)
-                if _has_native_tc:
-                    # Native path: use tool role so model sees structured result.
-                    convo.append({
-                        "role": "tool",
-                        "tool_call_id": _tc_id or "call_0",
-                        "content": _safe_json(_model_visible_tool_result(
-                            tool,
-                            tool_result,
-                            image_attached=attach_screenshot,
-                        )),
-                    })
-                    if attach_screenshot:
-                        convo.append(screenshot_message)
-                else:
-                    follow_up_text = (
-                        f"[MCP执行{'失败' if tool_failed else '确认'}]\n"
-                        f"系统已执行工具：{tool}\n"
-                        f"执行状态：{'失败' if tool_failed else '成功'}\n\n"
-                        "[工具参数]\n"
-                        f"{_safe_json(arguments)}\n\n"
-                        "[工具执行结果]\n"
-                        f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=attach_screenshot))}\n\n"
-                        "请基于以上结果继续完成任务。"
-                    )
-                    if attach_screenshot:
-                        convo.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": follow_up_text},
-                                *screenshot_message["content"],
-                            ],
-                        })
-                    else:
-                        convo.append({"role": "user", "content": follow_up_text})
+                # Batch drained: every tool_call_id is answered, so the screenshot
+                # images can now follow the tool messages without splitting them.
+                _flush_turn_screenshots()
                 _set_run_live_phase(run_id, "generating")
 
             notice = (

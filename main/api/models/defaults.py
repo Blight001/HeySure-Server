@@ -56,6 +56,22 @@ Rules:
 - Use admin.* tools when managing connected agents.
 - Only fall back to legacy File/Create File/Delete File/Run Command formats if MCP is unavailable."""
 
+# Appended to the effective MCP call method at runtime (see
+# chat_runtime.chat_prompt_utils._merge_global_mcp_method) rather than living
+# only in the template above: installs whose prompt was persisted before batch
+# execution existed must still learn the rule, and they never re-read defaults.
+MCP_BATCH_CALL_RULE = """- 每个 <mcp-call> 块只写一个工具，不要把多个工具名拼接成一个名字。
+- 相互独立、彼此不依赖的工具，请在同一轮里连续输出多个 <mcp-call> 块。系统会按顺序全部执行，并把所有结果一次性返回给你——这样能大幅减少往返轮次。
+- 只有当后一个工具的参数依赖前一个工具的返回值时，才把它留到下一轮再调用。"""
+
+# Lines from older prompt revisions that taught strictly serial tool calling.
+# Stripped wherever an effective prompt is assembled, so a persisted prompt can
+# never re-teach the model to serialize calls the runtime now batches.
+STALE_SERIAL_CALL_RULES = (
+    "Call exactly one tool per <mcp-call> block; never join two tool names into one name.",
+    "一次只调用一个工具",
+)
+
 DEFAULT_AI_MESSAGE_REPLY_SUCCESS = """[系统提示] 你对消息 {message_id} 的回复已送达。
 现在请继续你刚才被打断的任务。"""
 
@@ -140,5 +156,5 @@ DEFAULT_MCP_FORMAT_ERROR_HINT = """[系统提示] 检测到你正在尝试调用
 注意：
 - <arguments> 标签内必须是 JSON 对象字符串。
 - 不要写成 <arguments><paths>...</paths></arguments> 这种嵌套标签格式。
-- 一次只调用一个工具，等待 MCP 返回后再继续。
+- 每个 <mcp-call> 块只写一个工具；需要调用多个互不依赖的工具时，请在同一轮里输出多个块。
 {details}"""

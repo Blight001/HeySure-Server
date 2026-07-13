@@ -254,6 +254,57 @@ def extract_first_mcp_call(assistant_text: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
+def extract_all_complete_mcp_calls(
+    assistant_text: str,
+) -> List[Tuple[Dict[str, Any], re.Match]]:
+    """Return every complete tool-call block in ``assistant_text``, in order.
+
+    The batch counterpart of :func:`extract_first_complete_mcp_call`: a model on
+    the text protocol may emit several calls in one turn, and the worker executes
+    all of them before the next inference step.
+
+    Blocks from the three recognised syntaxes are merged and sorted by position.
+    Overlapping matches are dropped (an ``<mcp-call>`` wrapping a ``<tool_call>``
+    would otherwise yield the same call twice). The fenced-JSON fallback only
+    applies when no tagged block parsed at all, mirroring the single-call path.
+    """
+    text = assistant_text or ""
+    candidates: List[Tuple[int, Dict[str, Any], re.Match]] = []
+
+    for match in MCP_CALL_BLOCK_RE.finditer(text):
+        payload = parse_mcp_payload(match.group(1))
+        if payload:
+            candidates.append((match.start(), payload, match))
+
+    for match in INVOKE_BLOCK_RE.finditer(text):
+        payload = _parse_invoke_block(match.group(1), match.group(2))
+        if payload:
+            candidates.append((match.start(), payload, match))
+
+    for match in TOOL_CALL_JSON_RE.finditer(text):
+        payload = parse_mcp_payload(match.group(1))
+        if payload:
+            candidates.append((match.start(), payload, match))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0])
+        calls: List[Tuple[Dict[str, Any], re.Match]] = []
+        consumed_until = -1
+        for start, payload, match in candidates:
+            if start < consumed_until:
+                continue
+            calls.append((payload, match))
+            consumed_until = match.end()
+        return calls
+
+    for fence_match in _FENCE_RE.finditer(text):
+        payload = parse_mcp_payload(fence_match.group(1))
+        if payload:
+            return [(payload, fence_match)]
+
+    return []
+
+
 def strip_tool_call_blocks(text: str) -> str:
     """Remove tool-call syntax (any recognised format) from user-visible text.
 

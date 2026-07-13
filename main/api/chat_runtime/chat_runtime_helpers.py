@@ -25,8 +25,10 @@ from .chat_prompt_utils import (
     _filter_tools_for_current_bindings,
     _strip_prompt_section,
     _strip_runtime_injected_sections,
+    _strip_stale_serial_call_rules,
     _strip_task_runtime_sections,
 )
+from api.models.defaults import MCP_BATCH_CALL_RULE
 
 
 def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_id: int) -> str:
@@ -360,6 +362,18 @@ def build_runtime_system_prompt_and_tools(
     # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。
     system_prompt = _strip_prompt_section(system_prompt, "动态 MCP 说明")
     system_prompt = _strip_prompt_section(system_prompt, "可用MCP工具")
+
+    # 批量调用规则。人格文件只教了 <mcp-call> 的格式，没说一轮可以发多个块；
+    # 而 worker 现在会把一轮里的全部调用当作一批顺序执行完再回模型。规则必须
+    # 由运行时注入（而不是写进人格）：存量人格不会被改写，却同样要学会批量调用。
+    # 放在这里而不是 worker 里，是为了同时喂给 /system-prompt-preview——两个进程
+    # 必须组装出同一份 prompt（见本函数开头的 INVARIANT）。
+    system_prompt = _strip_stale_serial_call_rules(system_prompt)
+    system_prompt = _strip_prompt_section(system_prompt, "MCP 批量调用")
+    if cfg and getattr(cfg, "mcp_enabled", False) and effective_tool_allowlist:
+        system_prompt = _append_prompt_section(
+            system_prompt, "MCP 批量调用", MCP_BATCH_CALL_RULE
+        )
     return system_prompt, effective_tool_allowlist
 
 

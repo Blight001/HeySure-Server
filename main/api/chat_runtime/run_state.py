@@ -43,6 +43,9 @@ _AUTO_RUNTIME_SECTION_TITLES: tuple[str, ...] = (
     # （workspace.read_file 等）。该段当前已不再注入，故在加载时一并剥离，
     # 让存量已落库的人格 prompt 就地自愈，无需数据迁移。
     "全局MCP调用方法",
+    # 批量调用规则由 build_runtime_system_prompt_and_tools 每轮注入；一并剥离，
+    # 避免它被写进人格文件后与运行时注入的那份重复。
+    "MCP 批量调用",
     "任务运行时工作目录(绝对路径)",
     "任务运行时MCP调用规则",
     "任务运行时MCP工具白名单",
