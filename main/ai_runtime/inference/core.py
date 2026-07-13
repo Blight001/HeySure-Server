@@ -66,7 +66,6 @@ from api.chat_runtime.chat_prompt_utils import (
 )
 from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
-from api.chat_runtime.chat_stream_cli import stream_turn_cli
 from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
     _load_task_job_by_session,
@@ -1938,18 +1937,7 @@ def _run_worker_impl(
                     "33",
                 )
                 try:
-                    if provider == "cli":
-                        # Local agent CLI (e.g. grok). Native tools don't
-                        # apply; MCP flows through the <mcp-call> text
-                        # protocol embedded in the system prompt.
-                        sr = stream_turn_cli(
-                            run_id=run_id,
-                            base_url=base_url,
-                            model=model,
-                            convo=convo,
-                            native_tool_name_map=native_tool_name_map,
-                        )
-                    elif provider == "anthropic":
+                    if provider == "anthropic":
                         sr = stream_turn_anthropic(
                             run_id=run_id,
                             base_url=base_url,

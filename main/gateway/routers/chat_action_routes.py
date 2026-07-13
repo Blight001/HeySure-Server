@@ -24,7 +24,7 @@ from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMe
 from .auth import get_current_user
 from ai_runtime.worker import notify_queue
 from api.core.settings import settings
-from api.services.model_presets import is_cli_base_url, resolve_model_preset
+from api.services.model_presets import resolve_model_preset
 from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, _RUN_THREADS, router
@@ -751,8 +751,6 @@ def stream_chat(
         raise HTTPException(status_code=400, detail="Base URL not configured")
     if not model:
         raise HTTPException(status_code=400, detail="Model not configured")
-    if is_cli_base_url(base_url):
-        raise HTTPException(status_code=400, detail="CLI 模型不支持此功能，请选择 API 类型的模型预设")
 
     headers = {
         "Content-Type": "application/json",

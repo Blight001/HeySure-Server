@@ -171,8 +171,6 @@ def _resolve_preset(user: User, preset_id: str) -> Dict[str, str]:
                 }
     if not selected:
         raise ValueError("未配置可用模型，请先在系统设置中添加模型预设")
-    if str(selected.get("provider") or "").strip().lower() == "cli":
-        raise ValueError("CLI 模型不支持 MCP 工具测试，请选择 API 类型的模型预设")
     if not str(selected.get("api_key") or "").strip():
         raise ValueError("所选模型缺少 API Key")
     if not str(selected.get("base_url") or "").strip():
