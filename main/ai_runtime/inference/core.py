@@ -152,6 +152,23 @@ def _normalize_ai_message_type(value: Any, require_reply: bool) -> str:
     return "inquiry" if require_reply else "notify"
 
 
+_SYSTEM_NOTICE_USER_REPLAY_TAG_PREFIXES = (
+    "ai_message_inbound:",
+    "task_completion_notice:",
+    # The library auto-review briefing is persisted as a system bubble so the
+    # UI can distinguish it from a real user message.  Providers only receive
+    # the runtime persona as ``system``, however, so this briefing must be
+    # replayed as ``user`` when a fresh worker rebuilds the conversation.
+    "kb_review_request",
+)
+
+
+def _should_replay_system_notice_as_user(tags: str) -> bool:
+    """Whether a persisted system notice is actionable model context."""
+    normalized = str(tags or "").strip()
+    return any(normalized.startswith(prefix) for prefix in _SYSTEM_NOTICE_USER_REPLAY_TAG_PREFIXES)
+
+
 def _render_ai_message_system_prompt(
     *,
     from_ai_name: str,
@@ -204,6 +221,16 @@ def _coerce_max_steps(value: object, default: int = 48) -> int:
         return max(1, min(999, int(value or default)))
     except Exception:
         return max(1, min(999, int(default)))
+
+
+def _has_active_todo_plan(plan_state: object) -> bool:
+    """An unfinished todo keeps its inference run alive until completion."""
+    return plan_state is not None
+
+
+def _can_start_inference_step(completed_steps: int, max_steps: int, plan_state: object) -> bool:
+    """Apply the ordinary step budget unless an unfinished todo owns the run."""
+    return completed_steps < max_steps or _has_active_todo_plan(plan_state)
 
 
 def _resolve_ai_name_safe(session: Session, ai_config_id: Optional[int]) -> str:
@@ -1508,7 +1535,7 @@ def _run_worker_impl(
                     # loop with its tool_calls).
                     convo.append({"role": m.role, "content": m.content})
                 elif m.role == "system":
-                    if tags.startswith("ai_message_inbound:") or tags.startswith("task_completion_notice:"):
+                    if _should_replay_system_notice_as_user(tags):
                         convo.append({"role": "user", "content": m.content})
                     elif "phase_summary" in tags:
                         # The per-phase progress anchor: it carries which phase
@@ -1651,7 +1678,6 @@ def _run_worker_impl(
             # create a todo plan, the system drives phase transitions and finish
             # handling from that point onward.
             flow_awaiting_finish = False
-            flow_nudges = 0
             # A directive to inject *after* the current tool result is appended
             # (so a native tool_call keeps its matching tool response adjacent).
             pending_flow_directive = ""
@@ -1912,7 +1938,7 @@ def _run_worker_impl(
                 ``pending`` is answered first so no tool_call_id is orphaned.
                 """
                 nonlocal session_name, last_rejected_tool_sig, rejected_repeat
-                nonlocal plan_state, flow_awaiting_finish, flow_nudges
+                nonlocal plan_state, flow_awaiting_finish
                 nonlocal phase_start_convo_index, phase_started_at, phase_mcp_statuses
 
                 tool = str(call.get("tool") or "")
@@ -2318,7 +2344,6 @@ def _run_worker_impl(
                     except Exception:
                         logger.exception("plan reload after todo.manage create failed")
                         plan_state = None
-                    flow_nudges = 0
                     phase_start_convo_index = len(convo)
                     phase_started_at = time.time()
                     phase_mcp_statuses = []
@@ -2388,7 +2413,6 @@ def _run_worker_impl(
                         flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
                     except Exception:
                         logger.exception("plan reload after todo.manage edit failed")
-                    flow_nudges = 0
                     phase_start_convo_index = len(convo)
                     phase_started_at = time.time()
                     phase_mcp_statuses = []
@@ -2442,7 +2466,6 @@ def _run_worker_impl(
                     _flush_turn_screenshots()
                     plan_state = None
                     flow_awaiting_finish = False
-                    flow_nudges = 0
                     phase_mcp_statuses = []
                     _set_run_live_phase(run_id, "generating")
                     return "next_turn"
@@ -2495,7 +2518,17 @@ def _run_worker_impl(
                         convo.append({"role": "user", "content": follow_up_text})
                 return "next_call"
 
-            for step_index in range(max_steps):
+            # The configured step limit protects ordinary conversations from
+            # runaway loops. Once a todo exists, completion (or an explicit
+            # user stop) becomes the terminal condition: a model-side natural
+            # stop simply starts another inference turn.
+            completed_steps = 0
+            while _can_start_inference_step(completed_steps, max_steps, plan_state):
+                completed_steps += 1
+                step_label = (
+                    f"{completed_steps}/"
+                    f"{'todo' if _has_active_todo_plan(plan_state) else max_steps}"
+                )
                 if _run_should_stop(run_id):
                     _run_set_status(run_id, "stopped", finished=True)
                     return
@@ -2605,7 +2638,7 @@ def _run_worker_impl(
                 start_at = time.time()
                 _ai_debug_stage(
                     "TURN",
-                    f"{_ai_short_run_id(run_id)} #{step_index + 1}/{max_steps} "
+                    f"{_ai_short_run_id(run_id)} #{step_label} "
                     f"start msgs={len(convo)} tools={len(step_tools)} "
                     f"reply={'y' if pending_ai_reply_message_id else 'n'}",
                     "33",
@@ -2660,7 +2693,7 @@ def _run_worker_impl(
                     error_text = _extract_mcp_error(ai_exc)
                     _ai_debug_stage(
                         "ERR",
-                        f"{_ai_short_run_id(run_id)} #{step_index + 1}/{max_steps} "
+                        f"{_ai_short_run_id(run_id)} #{step_label} "
                         f"x{consecutive_ai_errors} {_ai_short(error_text, 140)}",
                         "31",
                     )
@@ -2786,7 +2819,7 @@ def _run_worker_impl(
                 )
                 _ai_debug_stage(
                     "DONE",
-                    f"{_ai_short_run_id(run_id)} #{step_index + 1}/{max_steps} "
+                    f"{_ai_short_run_id(run_id)} #{step_label} "
                     f"{finish_reason or 'stop'} {int(latency * 1000)}ms tok={token_triplet} "
                     f"tc={'native:' if _has_native_tc else ''}"
                     f"{_ai_short(', '.join(c['tool'] for c in turn_calls) or '-', 48)}",
@@ -3052,19 +3085,6 @@ def _run_worker_impl(
                             )
                             convo.append({"role": "user", "content": warning})
                             continue
-                    # In plan mode, a task runtime should not end by "talking".
-                    # Steer it back to the active plan flow. ``flow_nudges``
-                    # bounds this so a stubborn model degrades to a normal
-                    # finish instead of burning the whole step budget.
-                    if is_task_runtime and plan_state is not None and flow_nudges < 3:
-                        if flow_awaiting_finish:
-                            _nudge_text = phase_context.render_finish_required_notice(plan_state.goal)
-                        else:
-                            _nudge_text = phase_context.render_continue_phase_notice()
-                        flow_nudges += 1
-                        convo.append({"role": "user", "content": _nudge_text})
-                        _set_run_live_phase(run_id, "generating")
-                        continue
                     # 收尾前最后一次排空：用户可能正是在 AI 输出这段最终回答时
                     # 插入了新消息。此时不要结束本轮，直接把消息接上继续处理，
                     # 兑现"一个深度思考/一次工具调用后就插入"的即时性。
@@ -3101,6 +3121,26 @@ def _run_worker_impl(
                             logger.exception("auto AI message reply failed")
                         finally:
                             pending_ai_reply_message_id = ""
+                    # A model-side natural stop must not terminate an unfinished
+                    # todo. Refresh from DB in case another process changed the
+                    # plan, then invoke the model again without appending any
+                    # user/system nudge to the conversation.
+                    if ai_config_id is not None:
+                        try:
+                            plan_state = plan_service.get_active_plan(
+                                bg, user_id, int(ai_config_id), session_id
+                            )
+                            flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
+                        except Exception:
+                            logger.exception("plan reload after natural model stop failed")
+                    if _has_active_todo_plan(plan_state):
+                        if flow_awaiting_finish:
+                            _auto_finalize_plan(phase_started_at)
+                            _set_run_live_phase(run_id, "idle")
+                            _run_set_status(run_id, "completed", finished=True)
+                            return
+                        _set_run_live_phase(run_id, "generating")
+                        continue
                     # Auto-finalize simple (non-plan) task jobs when the run ends naturally.
                     # If a todo plan exists, the AI must keep working until its current
                     # phase is updated through todo.manage(action=edit).
