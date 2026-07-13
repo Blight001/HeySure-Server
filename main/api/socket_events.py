@@ -336,17 +336,21 @@ def register_agent_socket_events():
 
     @sio.on('task:result')
     async def task_result(sid, data):
-        await handle_task_result(data if isinstance(data, dict) else {})
+        payload = data if isinstance(data, dict) else {}
+        processed = await handle_task_result(payload)
         owner_user_id = (agents.get(sid) or {}).get('userId')
         if owner_user_id is not None:
             await emit_agent_list_for_user(owner_user_id)
+        return {"received": True, "taskId": payload.get("taskId"), "duplicate": not processed}
 
     @sio.on('task:error')
     async def task_error(sid, data):
-        await handle_task_error(data if isinstance(data, dict) else {})
+        payload = data if isinstance(data, dict) else {}
+        processed = await handle_task_error(payload)
         owner_user_id = (agents.get(sid) or {}).get('userId')
         if owner_user_id is not None:
             await emit_agent_list_for_user(owner_user_id)
+        return {"received": True, "taskId": payload.get("taskId"), "duplicate": not processed}
 
     @sio.on('disconnect')
     async def disconnect(sid):

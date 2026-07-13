@@ -260,6 +260,28 @@ _PENDING_DISPATCH_WAITERS: Dict[str, Dict[str, Any]] = {}
 _DISPATCH_TTL_SECONDS = 1800
 
 
+def dispatch_has_recorded_outcome(task_id: str) -> bool:
+    """Return whether a real agent outcome for ``task_id`` is already stored.
+
+    Result delivery is ACK/retry based. If the server committed a result but
+    its Socket.IO ACK was lost, the agent sends the same task again. Treat that
+    retry as an idempotent acknowledgement instead of writing a duplicate chat
+    message or advancing the device queue twice. A timeout is intentionally not
+    terminal here: a late real outcome is still allowed to replace it.
+    """
+    if not task_id:
+        return False
+    try:
+        with Session(engine) as session:
+            row = session.exec(
+                select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
+            ).first()
+            return bool(row and row.status in {"completed", "error"})
+    except Exception as exc:
+        logger.exception(f"recorded outcome lookup failed task={task_id}: {exc}")
+        return False
+
+
 def purge_stale_dispatches(now: Optional[float] = None) -> int:
     now = now if now is not None else time.time()
     stale = [
@@ -754,9 +776,11 @@ async def handle_task_progress(data: Dict[str, Any]) -> None:
     })
 
 
-async def handle_task_result(data: Dict[str, Any]) -> None:
-    ctx = _resolve_result_context(data)
+async def handle_task_result(data: Dict[str, Any]) -> bool:
     task_id = str(data.get("taskId") or "")
+    if dispatch_has_recorded_outcome(task_id):
+        return False
+    ctx = _resolve_result_context(data)
     device_id = str(ctx.get("device_id") or data.get("deviceId") or "unknown")
     success = bool(data.get("success", True))
     tool = str(data.get("tool") or ctx.get("tool") or "")
@@ -839,11 +863,14 @@ async def handle_task_result(data: Dict[str, Any]) -> None:
     })
     _PENDING_DISPATCHES.pop(task_id, None)
     await resume_device_dispatch_queue(device_id)
+    return True
 
 
-async def handle_task_error(data: Dict[str, Any]) -> None:
-    ctx = _resolve_result_context(data)
+async def handle_task_error(data: Dict[str, Any]) -> bool:
     task_id = str(data.get("taskId") or "")
+    if dispatch_has_recorded_outcome(task_id):
+        return False
+    ctx = _resolve_result_context(data)
     device_id = str(ctx.get("device_id") or data.get("deviceId") or "unknown")
     error = str(data.get("error") or "Unknown agent error")
     agent_label = _device_kind_label(device_id)
@@ -883,6 +910,7 @@ async def handle_task_error(data: Dict[str, Any]) -> None:
     })
     _PENDING_DISPATCHES.pop(task_id, None)
     await resume_device_dispatch_queue(device_id)
+    return True
 
 
 def _safe_dump(value: Any) -> str:
