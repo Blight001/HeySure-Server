@@ -350,6 +350,25 @@ def update_ai_task_job(
     existing_payload = decode_task_payload(job.task_payload)
     if any(key in payload_body for key in schedule_keys):
         schedule_source = dict(payload_body)
+        # 编辑循环任务时保留系统维护的已完成轮数。前端只编辑规则，不能把
+        # runs_done 意外重置为 0；从单次任务切换为循环任务时则从 0 开始。
+        existing_schedule = existing_payload.get("schedule") if isinstance(existing_payload, dict) else {}
+        existing_schedule = existing_schedule if isinstance(existing_schedule, dict) else {}
+        incoming_nested = schedule_source.get("schedule")
+        incoming_nested = dict(incoming_nested) if isinstance(incoming_nested, dict) else {}
+        requested_loop_raw = incoming_nested.get(
+            "loop_enabled",
+            schedule_source.get("schedule_loop_enabled"),
+        )
+        requested_loop = (
+            requested_loop_raw is True
+            or str(requested_loop_raw or "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        if str(schedule_source.get("mode") or "").strip().lower() == "recurring":
+            requested_loop = True
+        if bool(existing_schedule.get("loop_enabled")) and requested_loop:
+            incoming_nested.setdefault("runs_done", int(existing_schedule.get("runs_done") or 0))
+        schedule_source["schedule"] = incoming_nested
         mode = str(schedule_source.get("mode") or "").strip().lower()
         if mode == "immediate":
             schedule_source["schedule_enabled"] = False
@@ -367,6 +386,17 @@ def update_ai_task_job(
         # 解析 + schedule_at 补全统一由 extract_task_payload 完成
         patch_payload = extract_task_payload(schedule_source)
         existing_payload["schedule"] = patch_payload.get("schedule", {})
+
+    override_keys = {
+        "override_token_limit_enabled",
+        "token_limit_override",
+        "override_mcp_tools_enabled",
+        "mcp_tools_override",
+    }
+    if any(key in payload_body for key in override_keys):
+        patch_payload = extract_task_payload(payload_body)
+        existing_payload["override_token_limit"] = patch_payload.get("override_token_limit", {})
+        existing_payload["override_mcp_tools"] = patch_payload.get("override_mcp_tools", {})
     job.task_payload = json.dumps(existing_payload, ensure_ascii=False)
     schedule = existing_payload.get("schedule") if isinstance(existing_payload, dict) else {}
     job.trigger_type = "schedule" if isinstance(schedule, dict) and bool(schedule.get("enabled")) else "manual"

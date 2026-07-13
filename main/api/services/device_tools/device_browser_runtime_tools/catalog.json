@@ -88,7 +88,7 @@
   },
   {
     "name": "browser_screenshot",
-    "description": "对当前标签页截图：可截可视区、整页、某个 CSS/文本匹配的元素，或一块矩形区域，默认返回完整 base64 图片 dataUrl，并保存到服务器用于发送给用户；传 send_to_user:false 可只给 AI 使用（截图被禁用或无权限时返回可读的错误说明）。用途：让 AI「看见」页面。场景：核对页面状态、在无法读取文本时改用视觉理解。",
+    "description": "对当前标签页截图：普通前台可视区截图使用 captureVisibleTab，不会显示浏览器调试提示条；整页、元素/区域精确截图及后台标签截图需要 CDP，会短暂显示“正在调试/操控”提示条。默认返回完整 base64 图片 dataUrl，并保存到服务器用于发送给用户；传 send_to_user:false 可只给 AI 使用。页面观察优先用 browser_observe，需要视觉核对时优先使用无 selector/full_page 的普通可视区截图。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -222,7 +222,7 @@
   },
   {
     "name": "browser_action",
-    "description": "页面交互聚合工具：用 action 指定要做的动作——点击 click（单击）、双击 double_click、右键 right_click、滚动 scroll、输入文本 type、键盘按键 press_key。各动作的参数与原 browser_click/double_click/right_click/scroll/type/press_key 一致，按 action 取用对应字段即可。\n· click：派发完整指针+鼠标事件序列，兼容自定义组件；定位优先级 ref（browser_observe 编号，最稳）> selector > text > 坐标；非坐标点击会先做遮挡检测，被弹窗/遮罩盖住时返回 occluded 诊断（需穿透点击传 force:true）。\n· double_click / right_click：双击、右键（上下文菜单），用 selector / text / 坐标定位。\n· scroll：滚动页面，返回滚动后的位置、移动像素数与进入视野的小节/标题。\n· type：向 input/textarea 输入文本（单字段；多字段请多次 type 或配合 observe 逐字段操作）。\n· press_key：在焦点元素或指定 selector 上按键，可带 Ctrl/Shift/Alt/Meta 修饰键。\n· 自动 observe：click/double_click/right_click/type/press_key 执行后会自动检测页面是否变化并等待加载完毕；若变化，结果里附带增量 observe（observe.delta=true），只返回相对上一次 observe 新增/变化/消失的元素，完整快照不再重复返回；未变化则 page_changed:false。不需要时传 observe_after:false 关闭。\n用途：统一的点击/滚动/输入/键盘入口。场景：先 browser_observe 拿到编号，再 browser_action {action:\"click\", ref:id} 点击；点击后若页面变了，直接读 observe.items / addedItems / changedItems / removedItems 里的变化元素继续操作；需要全量时再调用 browser_observe。",
+    "description": "页面交互聚合工具：用 action 指定要做的动作——点击 click（单击）、双击 double_click、右键 right_click、滚动 scroll、输入文本 type、键盘按键 press_key。各动作的参数与原 browser_click/double_click/right_click/scroll/type/press_key 一致，按 action 取用对应字段即可。\n· click：无需选择点击模式；默认自动递归穿透开放的 Shadow DOM 定位控件，完成可见性/遮挡校验后只派发一次完整 pointer+mouse 事件，不启用 chrome.debugger，因此不会触发浏览器“正在调试/操控”提示条。定位优先级 ref（browser_observe 编号，最稳）> selector > text > 坐标；被弹窗/遮罩盖住时返回 occluded 诊断。\n· double_click / right_click：双击、右键（上下文菜单），用 selector / text / 坐标定位。\n· scroll：滚动页面，返回滚动后的位置、移动像素数与进入视野的小节/标题。\n· type：向 input/textarea 输入文本（单字段；多字段请多次 type 或配合 observe 逐字段操作）。\n· press_key：在焦点元素或指定 selector 上按键，可带 Ctrl/Shift/Alt/Meta 修饰键。\n· 自动 observe：click/double_click/right_click/type/press_key 执行后会自动检测页面是否变化并等待加载完毕；若变化，结果里附带增量 observe（observe.delta=true），只返回相对上一次 observe 新增/变化/消失的元素，完整快照不再重复返回；未变化则 page_changed:false。不需要时传 observe_after:false 关闭。\n用途：统一的点击/滚动/输入/键盘入口。场景：先 browser_observe 拿到编号，再 browser_action {action:\"click\", ref:id} 点击；点击后若页面变了，直接读 observe.items / addedItems / changedItems / removedItems 里的变化元素继续操作；需要全量时再调用 browser_observe。",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -247,7 +247,7 @@
         },
         "selector": {
           "type": "string",
-          "description": "目标元素的 CSS selector（click/double_click/right_click 定位；type 指定输入框；press_key 指定先聚焦的元素；scroll 可指定滚动进视口的元素）。"
+          "description": "目标元素的 CSS selector（click 会自动在页面及开放的 Shadow DOM 中递归查找；type 指定输入框；press_key 指定先聚焦的元素；scroll 可指定滚动进视口的元素）。"
         },
         "text": {
           "type": "string",
@@ -393,7 +393,7 @@
   },
   {
     "name": "browser_evaluate",
-    "description": "在页面上下文中执行任意 JavaScript 并返回结果；可用时走 Chrome DevTools Protocol，因此在 CSP 受限页面上也能运行。用途：高级取数/操作的兜底手段。场景：内置工具无法满足时读取复杂数据或触发特殊行为（请谨慎使用）。",
+    "description": "在页面上下文中执行任意 JavaScript 并返回结果；使用 Chrome DevTools Protocol 以兼容 CSP 受限页面，因此调用时 Chrome 会短暂显示“正在调试/操控”提示条。仅作为内置工具无法满足时的高级兜底，普通观察、点击和按键不要使用。",
     "input_schema": {
       "type": "object",
       "properties": {
