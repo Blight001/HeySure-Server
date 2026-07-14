@@ -63,6 +63,36 @@ def test_loop_job_is_renewed_in_place_and_stays_editable():
     assert schedule["schedule_at"] == 1_300.0
 
 
+def test_loop_job_renews_even_after_supervision_overwrote_trigger_type():
+    # 调度器 supervision/preempt 派发会覆写 job.trigger_type；循环与否由
+    # payload["schedule"] 决定，覆写后循环任务仍必须正常续期（历史 bug：
+    # 被监督续跑过的循环任务在本轮结束时被直接标记 completed，循环断掉，
+    # schedule_at 停留在旧值）。
+    for overwritten in ("supervision", "preempt", "resume"):
+        session = _Session()
+        job = _loop_job()
+        job.trigger_type = overwritten
+
+        renewed = _renew_loop_scheduled_job(session, job, 1_000.0)
+
+        assert renewed is job, overwritten
+        assert renewed.status == "queued"
+        assert renewed.trigger_type == "schedule"
+        schedule = json.loads(renewed.task_payload)["schedule"]
+        assert schedule["runs_done"] == 1
+        assert schedule["schedule_at"] == 1_300.0
+
+
+def test_non_loop_job_is_not_renewed_regardless_of_trigger_type():
+    session = _Session()
+    job = _loop_job(loop_enabled=False)
+    job.trigger_type = "manual"
+
+    assert _renew_loop_scheduled_job(session, job, 1_000.0) is None
+    assert job.status == "running"
+    assert session.added == []
+
+
 def test_loop_job_only_completes_after_run_limit():
     session = _Session()
     job = _loop_job(max_runs=1)

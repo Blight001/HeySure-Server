@@ -470,8 +470,10 @@ def _renew_loop_scheduled_job(
     """
     if not job:
         return None
-    if str(job.trigger_type or "").strip().lower() != "schedule":
-        return None
+    # 是否循环由 payload["schedule"]（enabled+loop_enabled）唯一决定，不看
+    # trigger_type：调度器每次派发都会把 trigger_type 覆写成本轮触发方式
+    # （supervision/preempt/resume），拿它做门槛会让被监督续跑过的循环任务
+    # 在本轮结束时被误判为非循环而直接 completed，循环就此断掉。
     try:
         payload = json.loads(job.task_payload) if job.task_payload else {}
     except Exception:
@@ -487,6 +489,8 @@ def _renew_loop_scheduled_job(
     payload["schedule"] = next_schedule
     job.task_payload = json.dumps(payload, ensure_ascii=False)
     job.status = "queued"
+    # 本轮可能是 supervision/preempt 触发的，归位成 schedule，下一轮按定时派发
+    job.trigger_type = "schedule"
     job.finished_at = None
     job.started_at = None
     job.last_supervised_at = None
