@@ -8,7 +8,7 @@
   不会串话。
 * 发送方阻塞等待回复时走 ``_PendingReplyRegistry``：一个进程内的
   ``concurrent.futures.Future`` 表。对方从同一通信 session 里发回的
-  ``message.send+to+ai`` 会立即 resolve 对应 Future。
+  ``message.send+to`` 会立即 resolve 对应 Future。
 * worker 线程跑 MCP 工具时是临时 asyncio loop，跨线程用
   ``asyncio.wrap_future`` 把 ``concurrent.futures.Future`` 转成可 await
   的对象，``set_result`` 的回调会通过 ``call_soon_threadsafe`` 安全派
@@ -221,7 +221,7 @@ def complete_inbound_with_assistant_reply(
     """Use the receiver's final assistant text as the reply for an AI message.
 
     Models sometimes answer the injected AI-to-AI message as normal assistant
-    text instead of calling ``message.send+to+ai``. This keeps the mail semantics
+    text instead of calling ``message.send+to``. This keeps the mail semantics
     reliable: a final answer in the bound receiver session still wakes the
     original sender.
     """
@@ -474,7 +474,7 @@ def _send_inquiry_reply_reminder(*, message_id: str, user_id: int, elapsed_secon
         if not content.strip():
             content = (
                 f"[系统提示] 消息 {row.message_id} 已等待 {int(elapsed_seconds or 0)} 秒仍未回复。"
-                f"请立即调用 message.send+to+ai 回复发送方 AI-{row.from_ai_config_id}。"
+                f"请立即调用 message.send+to 回复发送方 AI-{row.from_ai_config_id}。"
             )
 
         existing_chat_session = session.exec(
@@ -698,11 +698,11 @@ def find_return_route(
     target_ai_config_id: int,
     current_session_id: str,
 ) -> Dict[str, Any]:
-    """Find the original sender session when replying with message.send+to+ai.
+    """Find the original sender session when replying with message.send+to.
 
     If AI B is currently processing a message from AI A in session S2, the
     original AIMessage stores A's session as ``from_session_id``. A later
-    ``message.send+to+ai(to_ai_config_id=A)`` from S2 should route back there.
+    ``message.send+to(to_ai_config_id=A)`` from S2 should route back there.
     """
     current_session_id = (current_session_id or "").strip()
     if not current_session_id:
@@ -754,7 +754,7 @@ def resolve_waiting_reply_to_message_id_from_send_message(
     message_id: str,
     content: str,
 ) -> Optional[Dict[str, Any]]:
-    """Treat ``message.send+to+ai`` as a reply to an explicit AI message id."""
+    """Treat ``message.send+to`` as a reply to an explicit AI message id."""
     message_id = (message_id or "").strip()
     content = (content or "").strip()
     if not message_id or not content:
@@ -794,9 +794,9 @@ def resolve_waiting_reply_from_send_message(
     current_session_id: str,
     content: str,
 ) -> Optional[Dict[str, Any]]:
-    """Treat a return ``message.send+to+ai`` as the reply for a waiting sender.
+    """Treat a return ``message.send+to`` as the reply for a waiting sender.
 
-    Prompts now tell AIs to use ``message.send+to+ai`` in both directions. This
+    Prompts now tell AIs to use ``message.send+to`` in both directions. This
     bridges that behavior with the older synchronous ``require_reply=true``
     wait path so the sender does not block until timeout.
     """

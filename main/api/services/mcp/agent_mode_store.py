@@ -123,8 +123,7 @@ _LEGACY_REMOVED_BUILTIN_KEYS = {"chat", "fix"}
 CHAT_MODE_TOOL_WHITELIST = {
     "mode.manage",
     "mcp.describe+tool",
-    "message.send+to+user",
-    "message.send+to+ai",
+    "message.send+to",
 }
 
 

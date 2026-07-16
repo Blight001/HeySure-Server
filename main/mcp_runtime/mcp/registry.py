@@ -23,8 +23,7 @@ from tools.agent_mode import (
     MODE_MANAGE_SCHEMA,
 )
 from tools.communication import (
-    _ai_send_message,
-    _user_send_message,
+    _send_to,
 )
 from tools.conversation import (
     _conversation_manage,
@@ -179,18 +178,36 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         handler=_todo_manage,
         destructive=True,
     ))
-    # 与用户通信：把底层机器人投递封装为业务语义上的"给用户发消息"。
+    # 统一发消息工具：用 to 选择收件方（真人用户 / 数字社会里的另一个 AI）。
     registry.register(MCPTool(
-        name="message.send+to+user",
+        name="message.send+to",
         description=(
-            "通过该 AI 已绑定的机器人渠道（飞书或 QQ）给真人用户发送通知。"
+            "统一发消息工具，用 to 指定收件方。\n"
+            "to=\"user\"：通过该 AI 已绑定的机器人渠道（飞书或 QQ）给真人用户发送通知。"
             "正常调用只需提供 text 或媒体；不要向用户询问会话 id、openid、target_id 等寻址参数。"
             "QQ 会自动使用当前会话绑定、配置的默认接收目标或最近一次已绑定 QQ 会话；"
-            "尚未绑定时工具会返回 delivered=false 和明确原因。"
+            "尚未绑定时工具会返回 delivered=false 和明确原因。\n"
+            "to=成员 ID 或名字：给同一数字社会中的另一个 AI 发消息，"
+            "成员名单见系统提示的 [数字社会成员名单] 段。消息会作为强制系统提示送达；"
+            "若目标 AI 正在运行，会中断它当前的运行，并以这条消息打头开启新一轮。"
+            "发给 AI 时正文用 content，且必须指定 message_type，请按语义谨慎选择：\n"
+            "- inquiry  ：询问。你在向对方提问、要状态或要结果，通常期望对方答复。\n"
+            "- reply    ：回复。你在答复对方先前发来的 inquiry；应带 reply_to_message_id。\n"
+            "- notify   ：通知。单向状态、结果或提醒，不期待对方回复。\n"
+            "- chitchat ：闲聊，可双向多轮。\n"
+            "默认排队后即返回；只有调用方确实需要同步等待答复时才设 require_reply=true。"
         ),
         input_schema={
             "type": "object",
             "properties": {
+                "to": {
+                    "type": "string",
+                    "description": (
+                        "收件方：\"user\" 发给真人用户；填目标 AI 的 ai_config_id（数字）"
+                        "或成员名字则发给该 AI。"
+                    ),
+                },
+                # ---- to="user"（发给真人用户）时 ----
                 "text": {"type": "string", "description": "发给当前已绑定用户的文本；只发媒体时可省略。"},
                 "channel": {
                     "type": "string",
@@ -208,10 +225,47 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
                 "media_type": {"type": "string", "enum": ["image", "video"], "description": "可选，显式指定媒体类型；省略时按 url/path 推断。"},
                 "file_name": {"type": "string", "description": "可选，上传媒体时使用的文件名。"},
                 "duration": {"type": "integer", "description": "可选，飞书视频上传时的时长（毫秒）。"},
+                # ---- to=AI（发给另一个 AI）时 ----
+                "content": {"type": "string", "description": "发给 AI 的消息正文。"},
+                "message_type": {
+                    "type": "string",
+                    "enum": ["inquiry", "reply", "chitchat", "notify"],
+                    "description": (
+                        "发给 AI 时必填，决定送达提示里的语义：inquiry=询问/需要答复，"
+                        "reply=回复上一条 inquiry，notify=单向通知/不期待回复，chitchat=闲聊。"
+                    ),
+                },
+                "require_reply": {
+                    "type": "boolean",
+                    "description": (
+                        "默认 false，仅控制本次调用是否同步等待，不能替代必填的 message_type。"
+                        "常规 AI 协作请保持 false，对方的答复会作为新的 message.send+to 调用回来。"
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "可选，require_reply=true 时的最长等待秒数。省略则用默认长等待（86400 秒/24 小时）；确实想等更久才调大。",
+                },
+                "reply_to_message_id": {
+                    "type": "string",
+                    "description": "可选，当本次是回复时，传入对方原消息 id（mai_...），便于服务端维持消息线程上下文。",
+                },
+                "current_session_id": {
+                    "type": "string",
+                    "description": "可选，当前对话/会话 id；省略时运行时会自动补上。",
+                },
+                "to_ai_config_id": {
+                    "type": "integer",
+                    "description": "兼容写法：目标 AI 的 ai_config_id；推荐直接用 to。",
+                },
+                "to_ai_name": {
+                    "type": "string",
+                    "description": "兼容写法：目标 AI 的名字；推荐直接用 to。",
+                },
             },
-            "required": [],
+            "required": ["to"],
         },
-        handler=_user_send_message,
+        handler=_send_to,
         destructive=True,
     ))
 
@@ -249,67 +303,6 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         ),
         input_schema=KNOWLEDGE_SEARCH_SCHEMA,
         handler=_knowledge_search,
-    ))
-
-    # ---------- AI 间通信 ----------
-    registry.register(MCPTool(
-        name="message.send+to+ai",
-        description=(
-            "给同一数字社会中的另一个 AI 发消息。目标用 to_ai_config_id（成员 ID）"
-            "或 to_ai_name（成员名字）指定，成员名单见系统提示的 [数字社会成员名单] 段。"
-            "消息会作为强制系统提示送达；"
-            "若目标 AI 正在运行，会中断它当前的运行，并以这条消息打头开启新一轮。"
-            "必须指定 message_type，请按语义谨慎选择：\n"
-            "- inquiry  ：询问。你在向对方提问、要状态或要结果，通常期望对方答复。\n"
-            "- reply    ：回复。你在答复对方先前发来的 inquiry；应带 reply_to_message_id。\n"
-            "- notify   ：通知。单向状态、结果或提醒，不期待对方回复。\n"
-            "- chitchat ：闲聊，可双向多轮。\n"
-            "默认排队后即返回；只有调用方确实需要同步等待答复时才设 require_reply=true。"
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "to_ai_config_id": {
-                    "type": "integer",
-                    "description": "目标 AI 的 ai_config_id（与 to_ai_name 二选一，见系统提示 [数字社会成员名单]）。",
-                },
-                "to_ai_name": {
-                    "type": "string",
-                    "description": "目标 AI 的名字（与 to_ai_config_id 二选一）；服务端按名字精确匹配解析。",
-                },
-                "content": {"type": "string", "description": "消息正文。"},
-                "message_type": {
-                    "type": "string",
-                    "enum": ["inquiry", "reply", "chitchat", "notify"],
-                    "description": (
-                        "必填，决定送达提示里的语义：inquiry=询问/需要答复，"
-                        "reply=回复上一条 inquiry，notify=单向通知/不期待回复，chitchat=闲聊。"
-                    ),
-                },
-                "require_reply": {
-                    "type": "boolean",
-                    "description": (
-                        "默认 false，仅控制本次调用是否同步等待，不能替代必填的 message_type。"
-                        "常规 AI 协作请保持 false，对方的答复会作为新的 message.send+to+ai 调用回来。"
-                    ),
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "description": "可选，require_reply=true 时的最长等待秒数。省略则用默认长等待（86400 秒/24 小时）；确实想等更久才调大。",
-                },
-                "reply_to_message_id": {
-                    "type": "string",
-                    "description": "可选，当本次是回复时，传入对方原消息 id（mai_...），便于服务端维持消息线程上下文。",
-                },
-                "current_session_id": {
-                    "type": "string",
-                    "description": "可选，当前对话/会话 id；省略时运行时会自动补上。",
-                },
-            },
-            "required": ["content", "message_type"],
-        },
-        handler=_ai_send_message,
-        destructive=True,
     ))
 
     registry.register(MCPTool(

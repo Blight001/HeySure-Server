@@ -9,7 +9,7 @@ class AIMessage(SQLModel, table=True):
 
     生命周期：
       pending   → 已入库等待目标 AI 工作循环捕获
-      delivered → 已作为系统提示注入目标 AI 对话，等待 message.send+to+ai 回信或自动回信
+      delivered → 已作为系统提示注入目标 AI 对话，等待 message.send+to 回信或自动回信
       replied   → 目标 AI 已回复，发送方可拿到结果
       timeout   → 超时未回复
       failed    → 目标不存在/不可达

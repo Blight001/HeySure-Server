@@ -82,7 +82,7 @@ def _build_qq_runtime_prompt(base_prompt: str, event: Dict[str, str]) -> str:
         "[QQ机器人通知前置模板]\n"
         "本轮消息来自 QQ 机器人事件回调。请直接生成要回复给 QQ 用户或群聊的内容，保持清晰、可直接发送。\n"
         "服务端只会把实际回复内容发回来源会话，不需要输出处理状态或工具调用状态。\n"
-        "除非用户明确要求额外通知其他机器人会话，否则不要调用 MCP 工具 `message.send+to+user`，避免重复回复。\n"
+        "除非用户明确要求额外通知其他机器人会话，否则不要调用 MCP 工具 `message.send+to` 给用户发消息，避免重复回复。\n"
         "如果用户要求忘掉/清除/重置/忽略此前对话或上下文，请先调用 MCP 工具 "
         "`conversation.manage`，使用 `action=clear`；默认只删除当前用户消息之前的内容。\n"
         "当用户想要 列出/读取/切换/新开 对话或会话时，调用 MCP 工具 "

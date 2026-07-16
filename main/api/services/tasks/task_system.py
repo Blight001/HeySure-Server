@@ -35,7 +35,7 @@ TASK_RUNTIME_REQUIRED_TOOLS = {
     # ``task.list`` was folded into the unified ``task.manage`` tool; the runtime
     # needs it for action=list; every action is open to a library-bound AI.
     "task.manage",
-    "message.send+to+ai",
+    "message.send+to",
     # Planned task flow: create/get/edit/delete all use one MCP. Editing the
     # final phase automatically closes the plan.
     # Small/non-plan tasks no longer require an explicit completion MCP call.

@@ -84,8 +84,8 @@ DEFAULT_AI_MESSAGE_INQUIRY_REMINDER = """[系统提示 · AI 间询问待回复]
 - 询问内容:
 {content}
 
-请立即先答复这条询问。回复方式：调用 MCP 工具 `message.send+to+ai`，参数必须包含：
-{{"to_ai_config_id": {from_ai_config_id}, "content": "<你的答复>", "message_type": "reply", "require_reply": false, "reply_to_message_id": "{message_id}", "current_session_id": "{current_session_id}"}}"""
+请立即先答复这条询问。回复方式：调用 MCP 工具 `message.send+to`，参数必须包含：
+{{"to": "{from_ai_config_id}", "content": "<你的答复>", "message_type": "reply", "require_reply": false, "reply_to_message_id": "{message_id}", "current_session_id": "{current_session_id}"}}"""
 
 DEFAULT_AI_MESSAGE_NOTIFY_TEMPLATE = """[系统通知 · AI 间通信 · 单向]
 你收到一条单向通知消息。系统已为你自动签收，**无需调用任何工具回应**，请继续你原本的工作。
@@ -110,10 +110,10 @@ DEFAULT_AI_MESSAGE_INQUIRY_TEMPLATE = """[AI 间通信 · 询问]
 - 询问内容:
 {content}
 
-回复方式：调用 MCP 工具 `message.send+to+ai`，参数如下：
-  {{"to_ai_config_id": {from_ai_config_id}, "content": "<你的答复>", "message_type": "reply", "require_reply": false, "reply_to_message_id": "{message_id}", "current_session_id": "{current_session_id}"}}
+回复方式：调用 MCP 工具 `message.send+to`，参数如下：
+  {{"to": "{from_ai_config_id}", "content": "<你的答复>", "message_type": "reply", "require_reply": false, "reply_to_message_id": "{message_id}", "current_session_id": "{current_session_id}"}}
 
-回复后如仍需沟通，可以继续使用 `message.send+to+ai`。"""
+回复后如仍需沟通，可以继续使用 `message.send+to`。"""
 
 DEFAULT_AI_MESSAGE_REPLY_TEMPLATE = """[AI 间通信 · 收到答复]
 这是对你之前发出的 AI 间消息的答复。

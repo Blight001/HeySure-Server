@@ -59,8 +59,8 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     "knowledge.manage": ROLE_MEMBER,
     # Read-only semantic recall for the knowledge base.
     "knowledge.search": ROLE_MEMBER,
-    # Send message — outbound to the human user; every tier by default.
-    "message.send+to+user": ROLE_MEMBER,
+    # Send message — outbound to the human user or another AI; every tier by default.
+    "message.send+to": ROLE_MEMBER,
     # Unified conversation tool (list/detail/create/delete/rename/clear/compress/
     # switch/new) — every tier can manage its own scoped sessions.
     "conversation.manage": ROLE_MEMBER,

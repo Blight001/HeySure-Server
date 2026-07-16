@@ -1,8 +1,14 @@
 """通信类 MCP 工具：
-- message.send+to+user → 向用户发送消息（按 AI 配置选择对应机器人插件）
-- message.send+to+ai   → 向另一个 AI 发送消息。所有"回信"都走它本身：带
-                       message_type="reply" 与 reply_to_message_id。
-                       系统按 (target_session_id, status) 严格匹配。
+
+- message.send+to → 统一发消息工具，按 ``to`` 参数分发收件方：
+    - to="user"（或省略且不带 AI 寻址参数）→ 向用户发送消息
+      （按 AI 配置选择对应机器人插件）；
+    - to=成员 ID 或名字（或带 to_ai_config_id / to_ai_name）→ 向另一个 AI
+      发送消息。所有"回信"都走它本身：带 message_type="reply" 与
+      reply_to_message_id。系统按 (target_session_id, status) 严格匹配。
+
+历史上是 message.send+to+user / message.send+to+ai 两个工具，2026-07 合并；
+旧名经 mcp_tool_aliases.LEGACY_TOOL_RENAMES 归一到本工具。
 """
 
 import os
@@ -165,7 +171,7 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     media_type = str(args.get("media_type") or ("image" if (args.get("image_url") or args.get("image_path")) else "") or ("video" if (args.get("video_url") or args.get("video_path")) else "")).strip()
     file_name = str(args.get("file_name") or args.get("filename") or "").strip()
     if not text and not media_url and not media_path:
-        raise HTTPException(status_code=400, detail="text or media_url/media_path is required for message.send+to+user")
+        raise HTTPException(status_code=400, detail="text or media_url/media_path is required when message.send+to targets the user")
     channel = str(args.get("channel") or "").strip().lower()
     resolved_channel = dispatcher.resolve_channel(channel or None, ai_config_id, user_id)
     recipient: Optional[Recipient] = None
@@ -327,7 +333,7 @@ def _resolve_target_ai_id_by_name(user_id: int, name: str) -> int:
 
 async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     if ai_config_id is None:
-        raise HTTPException(status_code=400, detail="message.send+to+ai must be called by an AI runtime")
+        raise HTTPException(status_code=400, detail="message.send+to targeting an AI must be called by an AI runtime")
     to_raw = args.get("to_ai_config_id") or args.get("target_ai_config_id") or args.get("target")
     to_name = str(args.get("to_ai_name") or args.get("target_ai_name") or args.get("to_name") or "").strip()
     if to_raw is None and not to_name:
@@ -532,3 +538,38 @@ async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Opt
     else:
         base_out["note"] = "未能拿到回复，详见 status / failure_reason。"
     return base_out
+
+
+# ---------- 统一入口：message.send+to ----------
+
+_USER_TARGET_ALIASES = {"user", "human", "owner", "用户", "主人", "真人"}
+
+# 旧 message.send+to+ai 调用形态里的显式 AI 寻址参数；出现任意一个即走 AI 分支。
+_AI_ADDRESSING_KEYS = (
+    "to_ai_config_id",
+    "target_ai_config_id",
+    "target",
+    "to_ai_name",
+    "target_ai_name",
+    "to_name",
+)
+
+
+async def _send_to(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+    """message.send+to 统一入口：按 ``to`` 分发给真人用户或另一个 AI。
+
+    - 带 to_ai_config_id / to_ai_name 等旧寻址参数 → AI 分支（兼容旧模板与旧调用习惯）；
+    - to 为 "user" 等用户别名，或完全没有寻址参数（旧 send+to+user 形态）→ 用户分支；
+    - to 为纯数字 → 按 ai_config_id 发给 AI；其余 → 按成员名字发给 AI。
+    """
+    if any(args.get(key) not in (None, "") for key in _AI_ADDRESSING_KEYS):
+        return await _ai_send_message(user_id, args, ai_config_id)
+    to_text = str(args.get("to") or "").strip()
+    if not to_text or to_text.lower() in _USER_TARGET_ALIASES:
+        return _user_send_message(user_id, args, ai_config_id)
+    forwarded = dict(args)
+    if to_text.isdigit():
+        forwarded["to_ai_config_id"] = int(to_text)
+    else:
+        forwarded["to_ai_name"] = to_text
+    return await _ai_send_message(user_id, forwarded, ai_config_id)

@@ -60,12 +60,17 @@ def test_send_to_ai_can_resolve_peer_by_name(monkeypatch):
 
 
 def test_mcp_native_name_variants_resolve_to_the_same_registered_tool():
-    candidates = {"mcp.describe+tool", "workspace.run+command", "message.send+to+ai"}
+    candidates = {"mcp.describe+tool", "workspace.run+command", "message.send+to"}
 
     assert resolve_tool_name("mcp_describe-tool", candidates) == "mcp.describe+tool"
     assert resolve_tool_name("mcp_describe_tool", candidates) == "mcp.describe+tool"
     assert resolve_tool_name("mcp.describe_tool", candidates) == "mcp.describe+tool"
     assert resolve_tool_name("workspace_run-command", candidates) == "workspace.run+command"
+    # 合并前的两个旧工具名（含底线旧写法）都应归一到统一的 message.send+to。
+    assert resolve_tool_name("message.send+to+user", candidates) == "message.send+to"
+    assert resolve_tool_name("message.send+to+ai", candidates) == "message.send+to"
+    assert resolve_tool_name("message.send_to_user", candidates) == "message.send+to"
+    assert resolve_tool_name("message_send-to", candidates) == "message.send+to"
 
 
 def test_registered_mcp_names_do_not_contain_internal_underscores():

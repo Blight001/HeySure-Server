@@ -189,8 +189,8 @@ def _render_ai_message_system_prompt(
         "- chitchat（闲聊）：非任务型闲聊，可自然继续多轮。"
     )
     reply_rule = (
-        "这条消息需要你回复。回复时调用 MCP 工具 `message.send+to+ai`，"
-        f"参数必须包含 `to_ai_config_id={from_ai_config_id}`、`message_type=\"reply\"`、"
+        "这条消息需要你回复。回复时调用 MCP 工具 `message.send+to`，"
+        f"参数必须包含 `to=\"{from_ai_config_id}\"`、`message_type=\"reply\"`、"
         "`require_reply=false`、"
         f"`reply_to_message_id=\"{message_id}\"`、`current_session_id=\"{current_session_id}\"`。"
         if should_reply
@@ -211,7 +211,7 @@ def _render_ai_message_system_prompt(
         "[发送类型说明]\n"
         f"{message_type_guide}\n\n"
         "[处理规则]\n"
-        "你以后调用 MCP 工具 `message.send+to+ai` 时，`message_type` 是必填字段，不能省略。\n"
+        "你以后调用 MCP 工具 `message.send+to` 给其他 AI 发消息时，`message_type` 是必填字段，不能省略。\n"
         f"{reply_rule}"
     )
 

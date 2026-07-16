@@ -53,9 +53,12 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
     "mcp.describe_tool": "mcp.describe+tool",
     "workspace.run_command": "workspace.run+command",
     "plan.phase_complete": "todo.manage",
-    "message.send_to_user": "message.send+to+user",
-    "message.send_to_ai": "message.send+to+ai",
+    "message.send_to_user": "message.send+to",
+    "message.send_to_ai": "message.send+to",
     "device_mcp.manage": "device+mcp.manage",
+    # 2026-07 send+to+user / send+to+ai 合并成统一的 message.send+to（to 参数选收件方）。
+    "message.send+to+user": "message.send+to",
+    "message.send+to+ai": "message.send+to",
 }
 
 
