@@ -190,22 +190,11 @@ def _parse_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-def _parse_int(value: Any, default: int, minimum: int, maximum: int) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        parsed = default
-    return max(minimum, min(maximum, parsed))
-
-
 def extract_task_payload(body: Dict[str, Any]) -> Dict[str, Any]:
     # schedule 的解析/校验/补全统一走 task_schedule 模块（唯一权威实现）
     from .task_schedule import extract_schedule, finalize_schedule
 
     schedule = finalize_schedule(extract_schedule(body))
-
-    override_token_limit_enabled = _parse_bool(body.get("override_token_limit_enabled"), False)
-    token_limit_override = _parse_int(body.get("token_limit_override"), 10000, 1, 10**9)
 
     override_mcp_tools_enabled = _parse_bool(body.get("override_mcp_tools_enabled"), False)
     mcp_tools_raw = body.get("mcp_tools_override")
@@ -226,10 +215,6 @@ def extract_task_payload(body: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "schedule": schedule,
-        "override_token_limit": {
-            "enabled": override_token_limit_enabled,
-            "value": token_limit_override,
-        },
         "override_mcp_tools": {
             "enabled": override_mcp_tools_enabled,
             "tools": mcp_tools_override,

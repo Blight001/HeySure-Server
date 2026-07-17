@@ -254,12 +254,6 @@ def get_ai_task_jobs(
         live = live if isinstance(live, dict) else {}
         task_payload = decode_task_payload(job.task_payload)
         token_limit = int(cfg.token_limit or 0)
-        override_token = task_payload.get("override_token_limit") if isinstance(task_payload, dict) else {}
-        if isinstance(override_token, dict) and override_token.get("enabled"):
-            try:
-                token_limit = max(1, int(override_token.get("value") or token_limit or 1))
-            except Exception:
-                token_limit = int(cfg.token_limit or 0)
         out.append(
             {
                 "job_id": job.job_id,
@@ -388,14 +382,11 @@ def update_ai_task_job(
         existing_payload["schedule"] = patch_payload.get("schedule", {})
 
     override_keys = {
-        "override_token_limit_enabled",
-        "token_limit_override",
         "override_mcp_tools_enabled",
         "mcp_tools_override",
     }
     if any(key in payload_body for key in override_keys):
         patch_payload = extract_task_payload(payload_body)
-        existing_payload["override_token_limit"] = patch_payload.get("override_token_limit", {})
         existing_payload["override_mcp_tools"] = patch_payload.get("override_mcp_tools", {})
     job.task_payload = json.dumps(existing_payload, ensure_ascii=False)
     schedule = existing_payload.get("schedule") if isinstance(existing_payload, dict) else {}

@@ -76,9 +76,6 @@ def _start_task_run(
             from api.services.tasks.task_schedule import format_schedule_ts
 
             payload_lines.append(f"- 定时日期: {format_schedule_ts(schedule_at)}")
-    token_override = payload.get("override_token_limit") if isinstance(payload, dict) else {}
-    if isinstance(token_override, dict) and token_override.get("enabled"):
-        payload_lines.append(f"- Token范围覆盖: {int(token_override.get('value') or 0)}")
     mcp_override = payload.get("override_mcp_tools") if isinstance(payload, dict) else {}
     if isinstance(mcp_override, dict) and mcp_override.get("enabled"):
         tools = mcp_override.get("tools")

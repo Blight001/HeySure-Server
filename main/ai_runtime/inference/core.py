@@ -1468,16 +1468,6 @@ def _run_worker_impl(
             task_payload = _load_task_payload_by_session(bg, user_id, ai_config_id, session_id)
             task_job = _load_task_job_by_session(bg, user_id, ai_config_id, session_id)
             is_task_runtime = bool(task_payload) or str(session_id or "").startswith("session_task_")
-            # Token-limit override is independent of the tool allow-list / prompt
-            # assembly below, so it is resolved here and left out of the shared builder.
-            token_threshold_override = None
-            if task_payload:
-                override_token = task_payload.get("override_token_limit")
-                if isinstance(override_token, dict) and bool(override_token.get("enabled")):
-                    try:
-                        token_threshold_override = max(1, int(override_token.get("value") or 1))
-                    except Exception:
-                        token_threshold_override = None
 
             # Single source of truth shared with the live /system-prompt-preview
             # endpoint: identical MCP discovery hint + task sections, so the prompt
@@ -2995,7 +2985,7 @@ def _run_worker_impl(
                     and not compression_failed
                     and not any(call["tool"] == "todo.manage" for call in turn_calls)
                 ):
-                    threshold = token_threshold_override if token_threshold_override is not None else max(1, int(cfg.token_limit or 1))
+                    threshold = max(1, int(cfg.token_limit or 1))
                     session_tokens = _session_total_tokens(bg, user_id, ai_kind, session_id, ai_config_id)
                     if session_tokens >= threshold:
                         rebuilt_convo = None
