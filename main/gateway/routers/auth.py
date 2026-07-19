@@ -55,7 +55,7 @@ def _user_payload(user: User) -> dict:
         "admin_model": getattr(user, "admin_model", ""),
         "mcp_max_steps": getattr(user, "mcp_max_steps", 0),
         "mcp_history_compaction_enabled": getattr(user, "mcp_history_compaction_enabled", True),
-        "mcp_history_result_max_chars": getattr(user, "mcp_history_result_max_chars", 100),
+        "mcp_history_result_max_chars": getattr(user, "mcp_history_result_max_chars", 8000),
         "conversation_auto_compress_enabled": getattr(user, "conversation_auto_compress_enabled", True),
         "role_mcp_permissions": getattr(user, "role_mcp_permissions", ""),
         "tavily_api_key": getattr(user, "tavily_api_key", ""),
@@ -371,10 +371,10 @@ def update_profile(
     if "mcp_history_result_max_chars" in update_data:
         try:
             update_data["mcp_history_result_max_chars"] = max(
-                20, min(10000, int(update_data.get("mcp_history_result_max_chars") or 100))
+                20, min(10000, int(update_data.get("mcp_history_result_max_chars") or 8000))
             )
         except Exception:
-            update_data["mcp_history_result_max_chars"] = 100
+            update_data["mcp_history_result_max_chars"] = 8000
     if "ai_message_inquiry_reminder_seconds" in update_data:
         try:
             update_data["ai_message_inquiry_reminder_seconds"] = max(

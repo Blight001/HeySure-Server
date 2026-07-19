@@ -1530,7 +1530,7 @@ def _run_worker_impl(
             compact_mcp_history = bool(getattr(user, "mcp_history_compaction_enabled", True))
             mcp_history_result_max_chars = max(
                 20,
-                min(10000, int(getattr(user, "mcp_history_result_max_chars", 100) or 100)),
+                min(10000, int(getattr(user, "mcp_history_result_max_chars", 8000) or 8000)),
             )
             for m in history:
                 tags = str(getattr(m, "tags", "") or "")

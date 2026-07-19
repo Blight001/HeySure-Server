@@ -40,8 +40,13 @@ class User(SQLModel, table=True):
     # Model-context policy for MCP records from earlier runs in the same chat.
     # The original ChatMessage rows stay untouched; only the replayed tool-result
     # body is shortened to this limit.
+    # Compaction is kept as a safety valve for pathologically large single tool
+    # results (e.g. a full-page browser_observe dump); the default cap is generous
+    # so ordinary tool outputs (read file / search / command) replay in full across
+    # turns — mainstream full-fidelity behaviour. Prefix stays deterministic, so
+    # server-side automatic prefix caching (DeepSeek/OpenAI/Grok) still hits.
     mcp_history_compaction_enabled: bool = Field(default=True)
-    mcp_history_result_max_chars: int = Field(default=100)
+    mcp_history_result_max_chars: int = Field(default=8000)
     conversation_auto_compress_enabled: bool = Field(default=True)
     # Per-role MCP allow-list configured by the admin. JSON object mapping a role
     # tier (assistant_admin / digital_member_manager / digital_member_member) to a
@@ -94,7 +99,7 @@ class UserRead(SQLModel):
     mcp_format_error_hint: str
     mcp_max_steps: int
     mcp_history_compaction_enabled: bool = True
-    mcp_history_result_max_chars: int = 100
+    mcp_history_result_max_chars: int = 8000
     conversation_auto_compress_enabled: bool = True
     role_mcp_permissions: str
     tavily_api_key: str
