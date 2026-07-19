@@ -1,10 +1,30 @@
 """Model preset helpers: normalize, serialize, and resolve the per-user list of
-``(model, api_key, base_url)`` presets used to configure AI inference."""
+``(model, api_key, base_url)`` presets used to configure AI inference.
+
+Besides the credential triple, a preset may carry two optional capability
+fields so gateways that hide the real provider (e.g. a local CLI wrapped as an
+OpenAI-compatible endpoint) can be configured explicitly instead of sniffed:
+
+- ``provider``: ``auto`` (default, detect from base_url) / ``anthropic`` /
+  ``openai`` — which wire protocol to speak.
+- ``tool_protocol``: ``auto`` (default, native tools payload when MCP is on) /
+  ``native`` / ``text`` — ``text`` skips the native ``tools`` payload entirely
+  and relies on the prompt-taught ``<mcp-call>`` text protocol.
+"""
 
 import json
 from typing import Any, Optional
 
 from api.models import AssistantAIConfig, User
+
+PRESET_PROVIDERS = ("auto", "anthropic", "openai")
+PRESET_TOOL_PROTOCOLS = ("auto", "native", "text")
+
+
+def _normalize_choice(value: Any, allowed: tuple[str, ...]) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in allowed else allowed[0]
+
 
 def normalize_model_presets(raw: Any, user: Optional[User] = None) -> list[dict[str, str]]:
     try:
@@ -35,6 +55,8 @@ def normalize_model_presets(raw: Any, user: Optional[User] = None) -> list[dict[
                 "api_key": api_key,
                 "base_url": base_url,
                 "model": model,
+                "provider": _normalize_choice(item.get("provider"), PRESET_PROVIDERS),
+                "tool_protocol": _normalize_choice(item.get("tool_protocol"), PRESET_TOOL_PROTOCOLS),
             }
         )
 
@@ -50,6 +72,8 @@ def normalize_model_presets(raw: Any, user: Optional[User] = None) -> list[dict[
                     "api_key": api_key,
                     "base_url": base_url,
                     "model": model,
+                    "provider": "auto",
+                    "tool_protocol": "auto",
                 }
             )
     return presets
@@ -59,10 +83,12 @@ def model_presets_json(raw: Any, user: Optional[User] = None) -> str:
     return json.dumps(normalize_model_presets(raw, user), ensure_ascii=False)
 
 
-def resolve_model_preset(
+def resolve_model_preset_entry(
     user: User,
     cfg: Optional[AssistantAIConfig] = None,
-) -> tuple[str, str, str]:
+) -> Optional[dict[str, str]]:
+    """Return the preset dict the given config resolves to, or None when the
+    config falls through to its own literal (api_key, base_url, model) fields."""
     presets = normalize_model_presets(getattr(user, "model_presets", ""), user)
     preset_id = str(getattr(cfg, "model_preset_id", "") or "").strip() if cfg else ""
     model_name = str(getattr(cfg, "model", "") or "").strip() if cfg else str(getattr(user, "admin_model", "") or "").strip()
@@ -81,7 +107,14 @@ def resolve_model_preset(
     # its own credentials, or surfaces a clear "not configured" error.
     if selected is None and presets and not preset_id and not model_name:
         selected = presets[0]
+    return selected
 
+
+def resolve_model_preset(
+    user: User,
+    cfg: Optional[AssistantAIConfig] = None,
+) -> tuple[str, str, str]:
+    selected = resolve_model_preset_entry(user, cfg)
     if selected is not None:
         return selected["api_key"], selected["base_url"], selected["model"]
 

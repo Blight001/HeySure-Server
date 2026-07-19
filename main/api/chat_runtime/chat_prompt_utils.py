@@ -580,14 +580,46 @@ def _render_mcp_warning_text(template: str, details: List[str], values: Dict[str
         "请使用标准格式: <mcp-call>{\"tool\":\"...\",\"arguments\":{...}}</mcp-call>"
     )
 
+# Tool-call-looking markup that the parser nevertheless failed to turn into a
+# call (e.g. grok's ``<xai:function_call``, an unclosed ``<mcp-call>``, or a
+# home-grown ``<tool_call`` variant). ``parameter`` is deliberately excluded:
+# a bare parameter tag without any call tag is far more likely to be prose.
+_UNPARSED_TOOL_MARKUP_RE = re.compile(
+    r"<[^<>\n]{0,80}?\b(?:mcp[-_]call|tool[_-]?calls?|function[_-]?calls?|invoke)\b",
+    re.IGNORECASE,
+)
+
+
 def _build_mcp_stream_warning(
     assistant_text: str,
     cfg: Optional[AssistantAIConfig],
     warning_template: str = "",
+    markup_fallback: bool = True,
 ) -> Optional[str]:
     matches = list(MCP_CALL_BLOCK_RE.finditer(assistant_text or ""))
     if not matches:
-        return None
+        # No <mcp-call> block at all — but if the text still carries tool-call
+        # markup the parser could not interpret, ending the run here would
+        # silently drop the model's intended action (the frontend strips that
+        # markup, so the user just sees the reply stop mid-plan). Feed a format
+        # warning back instead so the model can reissue the call. The caller
+        # allows this fallback once per run: prose that merely *discusses*
+        # tool-call syntax would otherwise warn on every step.
+        if not markup_fallback:
+            return None
+        if not _UNPARSED_TOOL_MARKUP_RE.search(assistant_text or ""):
+            return None
+        hints = [
+            "检测到疑似工具调用语法，但未能解析出任何有效调用（可能使用了模型自带的私有格式）。",
+        ]
+        values = {
+            "format_error_count": 1,
+            "xml_arguments_tag_count": 0,
+            "unknown_tools": "",
+            "unauthorized_tools": "",
+            "mcp_call_count": 0,
+        }
+        return _render_mcp_warning_text(warning_template, hints, values)
 
     parsed_calls = []
     format_error_count = 0

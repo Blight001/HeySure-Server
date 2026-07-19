@@ -64,6 +64,7 @@ from api.chat_runtime.chat_prompt_utils import (
     _strip_task_runtime_sections,
 )
 from api.services.chat.chat_persistence import _save_message
+from api.services.model_presets import resolve_model_preset_entry
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
 from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
@@ -1461,6 +1462,9 @@ def _run_worker_impl(
             mcp_warning_template = kb_store.effective_system_value(
                 user_id, "mcp_format_error_hint", getattr(user, "mcp_format_error_hint", "")
             ).strip()
+            # 「文本含工具类标记但一个调用都没解析出来」的兜底警告每个 run 只允许
+            # 一次：真格式错误一次提醒就够，纯讨论工具语法的正文则不该反复触发。
+            markup_fallback_available = True
             auto_ctl = normalize_system_auto_control(
                 kb_store.effective_auto_control_json(user_id, cfg) if cfg else None
             )
@@ -1631,9 +1635,20 @@ def _run_worker_impl(
                 # plan, advance phases and finish without a describe_tool detour.
                 exposed_tool_allowlist |= set(TASK_RUNTIME_REQUIRED_TOOLS) & set(effective_tool_allowlist)
             provider = _detect_provider(base_url)
+            # Explicit preset capability fields beat base_url sniffing: a local
+            # CLI gateway (grok-cli 等) looks like a generic OpenAI endpoint, so
+            # the preset is the only place that knows the wire/tool protocol.
+            preset_entry = resolve_model_preset_entry(user, cfg) or {}
+            preset_provider = str(preset_entry.get("provider") or "auto")
+            if preset_provider == "anthropic":
+                provider = "anthropic"
+            elif preset_provider == "openai":
+                provider = "openai_compat"
+            tool_protocol = str(preset_entry.get("tool_protocol") or "auto")
             _ai_debug_stage(
                 "INIT",
-                f"{_ai_short_run_id(run_id)} {provider} {model} host={_ai_short_base_url(base_url)} "
+                f"{_ai_short_run_id(run_id)} {provider} {model} tc_proto={tool_protocol} "
+                f"host={_ai_short_base_url(base_url)} "
                 f"hist={len(history)} tools={len(effective_tool_allowlist)}/{len(exposed_tool_allowlist)} "
                 f"mcp={'on' if mcp_active else 'off'}",
                 "34",
@@ -2621,7 +2636,13 @@ def _run_worker_impl(
                         ) & set(effective_tool_allowlist)
                     elif is_task_runtime and flow_awaiting_finish:
                         current_exposed_tools = set(MCP_INTROSPECTION_TOOLS) & set(effective_tool_allowlist)
-                    step_tools, native_tool_name_map = _build_native_tools_payload(current_exposed_tools)
+                    if tool_protocol == "text":
+                        # Preset says the endpoint ignores / rejects the native
+                        # tools payload (text-protocol gateway): rely purely on
+                        # the prompt-taught <mcp-call> blocks.
+                        step_tools, native_tool_name_map = [], {}
+                    else:
+                        step_tools, native_tool_name_map = _build_native_tools_payload(current_exposed_tools)
                 else:
                     current_exposed_tools = set()
                     step_tools, native_tool_name_map = [], {}
@@ -3056,8 +3077,14 @@ def _run_worker_impl(
                 if not turn_calls:
                     # Only check for text-format MCP warnings when not using native tool_calls.
                     if not _has_native_tc:
-                        warning = _build_mcp_stream_warning(assistant_text, cfg, mcp_warning_template)
+                        warning = _build_mcp_stream_warning(
+                            assistant_text,
+                            cfg,
+                            mcp_warning_template,
+                            markup_fallback=markup_fallback_available,
+                        )
                         if warning:
+                            markup_fallback_available = False
                             _save_message(
                                 bg,
                                 user_id,

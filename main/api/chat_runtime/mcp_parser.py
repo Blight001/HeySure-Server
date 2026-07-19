@@ -18,6 +18,10 @@ normalise every one of them to ``{"tool": str, "arguments": dict}``:
 
         <tool_call>{"name":"tool","arguments":{...}}</tool_call>
 
+  * Grok / xAI style::
+
+        <xai:function_call name="tool"><parameter name="x">v</parameter></xai:function_call>
+
   * Bare JSON inside a ``` fenced ``` block.
 
 The JSON payloads also accept aliased keys (``name`` for ``tool``;
@@ -56,6 +60,17 @@ INVOKE_PARAM_RE = re.compile(
 # plural ``<tool_calls>`` wrapper from matching here.
 TOOL_CALL_JSON_RE = re.compile(
     r"<[^<>]*?\btool[_-]?call\b[^<>]*?>\s*([\s\S]*?)\s*</[^<>]*?\btool[_-]?call\b[^<>]*?>",
+    re.IGNORECASE,
+)
+
+# Grok / xAI style ``<xai:function_call name="tool"> <parameter name="x">v</parameter>
+# </xai:function_call>``. Requiring a ``name`` attribute on the opening tag (and the
+# singular ``call``) keeps the attribute-less plural ``<function_calls>`` wrapper in
+# _WRAPPER_TAG_RE territory instead of this branch.
+FUNCTION_CALL_BLOCK_RE = re.compile(
+    r"<[^<>]*?\bfunction[_-]?call\b[^<>]*?\bname\s*=\s*[\"']?([^\"'>\s]+)[\"']?[^<>]*?>"
+    r"([\s\S]*?)"
+    r"</[^<>]*?\bfunction[_-]?call\b[^<>]*?>",
     re.IGNORECASE,
 )
 
@@ -236,6 +251,12 @@ def extract_first_complete_mcp_call(assistant_text: str) -> Tuple[Optional[Dict[
         if payload:
             candidates.append((tc_match.start(), payload, tc_match))
 
+    fc_match = FUNCTION_CALL_BLOCK_RE.search(text)
+    if fc_match:
+        payload = _parse_invoke_block(fc_match.group(1), fc_match.group(2))
+        if payload:
+            candidates.append((fc_match.start(), payload, fc_match))
+
     if candidates:
         candidates.sort(key=lambda item: item[0])
         _, payload, match = candidates[0]
@@ -286,6 +307,11 @@ def extract_all_complete_mcp_calls(
         if payload:
             candidates.append((match.start(), payload, match))
 
+    for match in FUNCTION_CALL_BLOCK_RE.finditer(text):
+        payload = _parse_invoke_block(match.group(1), match.group(2))
+        if payload:
+            candidates.append((match.start(), payload, match))
+
     if candidates:
         candidates.sort(key=lambda item: item[0])
         calls: List[Tuple[Dict[str, Any], re.Match]] = []
@@ -318,6 +344,7 @@ def strip_tool_call_blocks(text: str) -> str:
     out = MCP_CALL_BLOCK_RE.sub("", out)
     out = INVOKE_BLOCK_RE.sub("", out)
     out = TOOL_CALL_JSON_RE.sub("", out)
+    out = FUNCTION_CALL_BLOCK_RE.sub("", out)
     out = _WRAPPER_TAG_RE.sub("", out)
     out = _PARTIAL_TAIL_RE.sub("", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
