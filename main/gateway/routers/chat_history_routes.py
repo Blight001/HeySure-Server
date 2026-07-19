@@ -181,6 +181,7 @@ def get_sessions(
             "name": row.session_name,
             "total_tokens": token_by_session.get(row.session_id, 0),
             "forward_to_bot": bool(getattr(row, "forward_to_bot", False)),
+            "model_preset_id": str(getattr(row, "model_preset_id", "") or ""),
         }
         for row in results
     ]

@@ -101,8 +101,9 @@ def _bare_stream_session():
     stream._failed = False
     stream._last_sent_text = ""
     stream._last_text = ""
+    stream._completed_text = ""
+    stream._current_text = ""
     stream._done = False
-    stream._finalize_queue = []
     return stream
 
 
@@ -163,7 +164,7 @@ def test_stream_fallback_uses_next_sequence_after_partial_stream(monkeypatch):
     assert bumped == [3]
 
 
-def test_finalize_bubble_resets_stream_without_thinking_or_mcp_prefix(monkeypatch):
+def test_finalize_bubble_closes_the_existing_run_stream(monkeypatch):
     stream = _bare_stream_session()
     stream._started = True
     stream._last_sent_text = "answer"
@@ -179,23 +180,15 @@ def test_finalize_bubble_resets_stream_without_thinking_or_mcp_prefix(monkeypatc
     assert calls[0]["text"] == "answer"
     assert calls[0]["stream_state"] == stream_sender._STREAM_STATE_FINISHED
     assert calls[0]["reset"] is True
-    # Rolling to a fresh bubble: per-bubble send state is reset and the
-    # passive-reply sequence advances for the next turn's message.
-    assert stream._started is False
-    assert stream._stream_id == ""
-    assert stream._index == 0
-    assert stream._last_sent_text == ""
-    assert stream._seq == 2
+    assert stream._started is True
+    assert stream._stream_id == "stream-1"
+    assert stream._index == 1
+    assert stream._last_sent_text == "answer"
+    assert stream._seq == 1
 
 
-def test_update_queues_each_turn_so_intermediate_text_is_not_lost(monkeypatch):
-    """Multi-turn (tool-using) runs must deliver every turn's visible text.
-
-    The inference loop streams each turn's text then pushes an empty snapshot
-    as a turn boundary. Previously the empty snapshot was ignored and the next
-    turn overwrote ``_last_text``, so only the final turn ("结尾的信息") reached
-    the user. Each turn must now become its own delivered bubble.
-    """
+def test_update_merges_replayed_prefix_across_tool_turns(monkeypatch):
+    """A tool boundary must not split a repeated sentence into two bubbles."""
     stream = _bare_stream_session()
     delivered = []
 
@@ -208,16 +201,24 @@ def test_update_queues_each_turn_so_intermediate_text_is_not_lost(monkeypatch):
     monkeypatch.setattr(stream, "_send_packet", _capture_final)
     monkeypatch.setattr(stream, "_fallback_full_send", lambda text: delivered.append(text))
 
-    # Turn 1: visible text accompanying a tool call, then a boundary.
-    stream.update("Let me check the weather…")
+    stream.update("阶段 4：先查询知识库与 Shadow 发布相关工具，")
     stream.update("")
-    # Turn 2: the final answer, then the closing boundary from the loop.
-    stream.update("It is sunny today.")
+    # The next model turn replays the prefix, then completes it.
+    stream.update("阶段 4：先查询知识库与 Shadow 发布相关工具")
+    assert stream._last_text == "阶段 4：先查询知识库与 Shadow 发布相关工具，"
+    stream.update("阶段 4：先查询知识库与 Shadow 发布相关工具，再确认当前页面状态。")
     stream.update("")
 
-    # Both turns are queued for delivery (no text dropped).
-    assert stream._finalize_queue == ["Let me check the weather…", "It is sunny today."]
-
-    # Draining (as the flush thread does on close) delivers both, in order.
+    assert stream._last_text == "阶段 4：先查询知识库与 Shadow 发布相关工具，再确认当前页面状态。"
     stream._drain_on_close()
-    assert delivered == ["Let me check the weather…", "It is sunny today."]
+    assert delivered == ["阶段 4：先查询知识库与 Shadow 发布相关工具，再确认当前页面状态。"]
+
+
+def test_update_keeps_distinct_tool_turns_in_one_bubble():
+    stream = _bare_stream_session()
+
+    stream.update("我先检查当前状态。")
+    stream.update("")
+    stream.update("检查完成，可以继续发布。")
+
+    assert stream._last_text == "我先检查当前状态。\n\n检查完成，可以继续发布。"

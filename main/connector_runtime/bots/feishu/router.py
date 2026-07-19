@@ -18,6 +18,7 @@ from ._config import read_feishu_config
 from .routes_store import register_feishu_session_route
 from .service import parse_feishu_text_event, send_feishu_text_message
 from connector_runtime.bots.session_cursor import get_active_session_id
+from connector_runtime.bots.commands import handle_bot_command
 import logging
 
 
@@ -277,7 +278,34 @@ def handle_feishu_event_payload(config_id: int, payload: Dict[str, Any], verify_
         user = session.get(User, cfg.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        _, _, _, _, system_prompt = _resolve_ai_runtime(session, user, ai_kind, cfg.id)
+        command_result = handle_bot_command(
+            session,
+            text=event["text"],
+            channel="feishu",
+            user=user,
+            cfg=cfg,
+            ai_kind=ai_kind,
+            identity_key=receive_id,
+            current_session_id=session_id,
+            current_session_name=session_name,
+            home_session_id=home_session_id,
+        )
+        if command_result is not None:
+            _send_feishu_text(
+                user_id=int(cfg.user_id),
+                ai_config_id=int(cfg.id or config_id),
+                receive_id=receive_id,
+                receive_id_type=receive_id_type,
+                text=command_result.text,
+            )
+            return {
+                "success": True,
+                "command": command_result.command,
+                "command_handled": True,
+            }
+        _, _, _, _, system_prompt = _resolve_ai_runtime(
+            session, user, ai_kind, cfg.id, session_id
+        )
         merged_system_prompt = _build_feishu_runtime_prompt(system_prompt, event)
         inbound_tag = f"feishu_inbound:{feishu_message_id}" if feishu_message_id else "feishu_inbound"
 

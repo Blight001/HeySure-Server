@@ -15,7 +15,7 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatRun, User
 from api.common.value_utils import safe_json_obj
-from api.services.model_presets import resolve_model_preset
+from api.services.model_presets import resolve_model_preset, session_model_preset_entry
 from api.services.tasks.task_system import with_workspace_read_by_name_compat
 from .run_state import _RUN_LIVE_STATE, _RUN_STATE_LOCK
 from .chat_prompt_utils import (
@@ -73,7 +73,13 @@ def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_
     return header + "\n" + "\n".join(lines[:100])
 
 
-def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id: Optional[int]):
+def _resolve_ai_runtime(
+    session: Session,
+    user: User,
+    ai_kind: str,
+    ai_config_id: Optional[int],
+    session_id: Optional[str] = None,
+):
     # KnowledgeBase 文件为真相源：建目录 + 首次把现有内容导出成文件（幂等）。
     # 运行时直接读文件（见下方 effective_* 调用），不再回写数据库。
     from api.services.knowledge import kb_store
@@ -96,7 +102,13 @@ def _resolve_ai_runtime(session: Session, user: User, ai_kind: str, ai_config_id
             ).first()
         if not cfg:
             raise HTTPException(status_code=400, detail="No available assistant AI config")
-        api_key, base_url, model = resolve_model_preset(user, cfg)
+        selected = session_model_preset_entry(
+            session, user, cfg, str(session_id or ""), ai_kind
+        )
+        if selected is not None:
+            api_key, base_url, model = selected["api_key"], selected["base_url"], selected["model"]
+        else:
+            api_key, base_url, model = resolve_model_preset(user, cfg)
         # 方案 A：人格 Prompt 直接读 KnowledgeBase/personas/*.md（文件缺失回退 DB）。
         system_prompt = _strip_runtime_injected_sections(kb_store.effective_ai_prompt(user.id, cfg))
         if cfg.database_uri:
@@ -191,7 +203,9 @@ def build_runtime_system_prompt_and_tools(
 
     uid = user.id
     if cfg is None or base_system_prompt is None:
-        cfg, _, _, _, base_system_prompt = _resolve_ai_runtime(session, user, ai_kind, ai_config_id)
+        cfg, _, _, _, base_system_prompt = _resolve_ai_runtime(
+            session, user, ai_kind, ai_config_id, session_id
+        )
     system_prompt = base_system_prompt
     sid = str(session_id or "").strip()
     if task_payload is None:

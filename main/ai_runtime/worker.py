@@ -140,7 +140,7 @@ def _load_worker_kwargs(run: ChatRun) -> Dict[str, Any]:
         if not user:
             raise RuntimeError(f"user {run.user_id} not found for run {run.run_id}")
         _, _, _, _, default_system_prompt = _resolve_ai_runtime(
-            session, user, run.ai_kind, run.ai_config_id
+            session, user, run.ai_kind, run.ai_config_id, run.session_id
         )
         last_user_msg = session.exec(
             select(ChatMessage)

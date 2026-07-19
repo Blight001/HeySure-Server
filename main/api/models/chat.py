@@ -84,6 +84,9 @@ class ChatSession(SQLModel, table=True):
     # originated conversations (qq/feishu) reply through their own routes and do
     # not depend on this flag.
     forward_to_bot: bool = Field(default=False)
+    # Optional per-conversation model preset. Empty means "follow the AI's
+    # configured default"; bot /models commands set only this conversation.
+    model_preset_id: str = Field(default="", index=True)
     # JSON map: tool name -> {schema_version, described_at}. This is deliberately
     # session-scoped so a clarification reply can continue with tools whose
     # schemas were already loaded in an earlier inference run.

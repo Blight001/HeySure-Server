@@ -110,6 +110,45 @@ def resolve_model_preset_entry(
     return selected
 
 
+def find_model_preset(user: User, preset_id: str) -> Optional[dict[str, str]]:
+    """Resolve an explicit user preset id without applying config fallbacks."""
+    wanted = str(preset_id or "").strip()
+    if not wanted:
+        return None
+    return next(
+        (item for item in normalize_model_presets(getattr(user, "model_presets", ""), user) if item["id"] == wanted),
+        None,
+    )
+
+
+def session_model_preset_entry(
+    session: Any,
+    user: User,
+    cfg: Optional[AssistantAIConfig],
+    session_id: str,
+    ai_kind: str = "",
+) -> Optional[dict[str, str]]:
+    """Return a valid per-session override, otherwise the config default."""
+    sid = str(session_id or "").strip()
+    if sid:
+        from sqlmodel import select
+        from api.models import ChatSession
+
+        stmt = select(ChatSession).where(
+            ChatSession.user_id == int(user.id or 0),
+            ChatSession.session_id == sid,
+        )
+        if cfg is not None:
+            stmt = stmt.where(ChatSession.ai_config_id == cfg.id)
+        if str(ai_kind or "").strip():
+            stmt = stmt.where(ChatSession.ai_kind == str(ai_kind).strip())
+        row = session.exec(stmt.order_by(ChatSession.updated_at.desc())).first()
+        override = find_model_preset(user, getattr(row, "model_preset_id", "") if row else "")
+        if override is not None:
+            return override
+    return resolve_model_preset_entry(user, cfg)
+
+
 def resolve_model_preset(
     user: User,
     cfg: Optional[AssistantAIConfig] = None,

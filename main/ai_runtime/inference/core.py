@@ -64,7 +64,7 @@ from api.chat_runtime.chat_prompt_utils import (
     _strip_task_runtime_sections,
 )
 from api.services.chat.chat_persistence import _save_message
-from api.services.model_presets import resolve_model_preset_entry
+from api.services.model_presets import session_model_preset_entry
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
 from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
@@ -1465,7 +1465,9 @@ def _run_worker_impl(
             )
             from api.services.knowledge import kb_store
 
-            cfg, api_key, base_url, model, system_prompt = _resolve_ai_runtime(bg, user, ai_kind, ai_config_id)
+            cfg, api_key, base_url, model, system_prompt = _resolve_ai_runtime(
+                bg, user, ai_kind, ai_config_id, session_id
+            )
             # 方案 A：系统提示 / 人格自动控制直接读 KnowledgeBase 文件（缺失回退 DB）。
             mcp_warning_template = kb_store.effective_system_value(
                 user_id, "mcp_format_error_hint", getattr(user, "mcp_format_error_hint", "")
@@ -1629,7 +1631,9 @@ def _run_worker_impl(
             # Explicit preset capability fields beat base_url sniffing: a local
             # CLI gateway (grok-cli 等) looks like a generic OpenAI endpoint, so
             # the preset is the only place that knows the wire/tool protocol.
-            preset_entry = resolve_model_preset_entry(user, cfg) or {}
+            preset_entry = session_model_preset_entry(
+                bg, user, cfg, session_id, ai_kind
+            ) or {}
             preset_provider = str(preset_entry.get("provider") or "auto")
             if preset_provider == "anthropic":
                 provider = "anthropic"

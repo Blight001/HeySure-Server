@@ -161,7 +161,9 @@ def start_chat_run(
     incoming_system_messages = req.get("system_messages") or []
     if not isinstance(incoming_system_messages, list):
         incoming_system_messages = []
-    _, _, _, _, system_prompt = _resolve_ai_runtime(session, user, ai_kind, ai_config_id)
+    _, _, _, _, system_prompt = _resolve_ai_runtime(
+        session, user, ai_kind, ai_config_id, session_id
+    )
     trimmed_system = [str(v).strip() for v in incoming_system_messages if str(v).strip()]
     merged_system_prompt = system_prompt
     if trimmed_system:

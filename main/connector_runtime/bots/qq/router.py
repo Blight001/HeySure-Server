@@ -23,6 +23,7 @@ from .long_connection import get_qq_long_connection_state
 from .routes_store import register_qq_session_route
 from .service import diagnose_qq_config, parse_qq_text_event, send_qq_text_message
 from connector_runtime.bots.session_cursor import get_active_session_id
+from connector_runtime.bots.commands import handle_bot_command
 import logging
 
 
@@ -122,6 +123,38 @@ def _send_qq_text(
     except Exception as exc:
         logger.exception(f"send failed config_id={ai_config_id}: {exc}")
         return False
+
+
+def _send_qq_command_text(
+    *,
+    user_id: int,
+    ai_config_id: int,
+    target_id: str,
+    target_type: str,
+    text: str,
+    msg_id: str = "",
+    event_id: str = "",
+) -> int:
+    """Send a potentially long command response in ordered QQ chunks."""
+    body = str(text or "").strip()
+    if not body:
+        return 0
+    chunks = [body[start:start + 1800] for start in range(0, len(body), 1800)]
+    sent = 0
+    for index, chunk in enumerate(chunks, 1):
+        if not _send_qq_text(
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            target_id=target_id,
+            target_type=target_type,
+            text=chunk,
+            msg_id=msg_id,
+            event_id=event_id,
+            msg_seq=index if msg_id else None,
+        ):
+            break
+        sent += 1
+    return sent
 
 
 def _start_qq_worker(worker_kwargs: Dict[str, Any]) -> str:
@@ -366,7 +399,49 @@ def handle_qq_event_payload(
         user = session.get(User, cfg.user_id)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        _, _, _, _, system_prompt = _resolve_ai_runtime(session, user, ai_kind, cfg.id)
+        command_result = handle_bot_command(
+            session,
+            text=event["text"],
+            channel="qq",
+            user=user,
+            cfg=cfg,
+            ai_kind=ai_kind,
+            identity_key=target_id,
+            current_session_id=session_id,
+            current_session_name=session_name,
+            home_session_id=home_session_id,
+        )
+        if command_result is not None:
+            sent = _send_qq_command_text(
+                user_id=int(cfg.user_id),
+                ai_config_id=int(cfg.id or config_id),
+                target_id=target_id,
+                target_type=target_type,
+                text=command_result.text,
+                msg_id=qq_message_id,
+                event_id=qq_event_id,
+            )
+            register_qq_session_route(
+                session,
+                user_id=int(cfg.user_id),
+                ai_config_id=int(cfg.id or config_id),
+                ai_kind=ai_kind,
+                session_id=session_id,
+                target_id=target_id,
+                target_type=target_type,
+                source_message_id=qq_message_id,
+                source_event_id=qq_event_id,
+                next_msg_seq=max(1, sent + 1),
+            )
+            return {
+                "op": 12,
+                "d": 0,
+                "command": command_result.command,
+                "command_handled": True,
+            }
+        _, _, _, _, system_prompt = _resolve_ai_runtime(
+            session, user, ai_kind, cfg.id, session_id
+        )
         merged_system_prompt = _build_qq_runtime_prompt(system_prompt, event)
         inbound_tag = f"qq_inbound:{qq_message_id or qq_event_id}" if (qq_message_id or qq_event_id) else "qq_inbound"
 

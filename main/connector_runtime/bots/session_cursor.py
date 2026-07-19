@@ -248,9 +248,11 @@ def list_ai_sessions(
         sid = str(row.session_id)
         out.append(
             {
+                "id": row.id,
                 "session_id": sid,
                 "name": row.session_name,
                 "source": channel_by_sid.get(sid, "web"),
+                "model_preset_id": str(getattr(row, "model_preset_id", "") or ""),
                 "created_at": row.created_at,
                 "updated_at": row.updated_at,
                 "is_active": bool(active_session_id) and sid == str(active_session_id),
