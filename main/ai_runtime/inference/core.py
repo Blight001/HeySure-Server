@@ -660,6 +660,31 @@ def _tool_result_failed(tool_result: Dict[str, object]) -> tuple[bool, str]:
     return False, ""
 
 
+def _duplicate_call_flags(turn_calls: List[Dict[str, Any]]) -> List[bool]:
+    """Flag each call that exactly repeats an earlier call in the same turn.
+
+    A duplicate has the same tool name and the same arguments (compared as
+    canonical, key-sorted JSON). The first occurrence of a signature is
+    ``False``; every later identical one is ``True``.
+
+    Models occasionally emit several identical tool calls in a single turn.
+    The worker executes only the first and answers the rest without re-running
+    them, so a side-effecting tool (send message, click, submit) does not fire
+    twice off one hiccup. Order is preserved so callers can align the flags
+    with ``turn_calls`` by index.
+    """
+    seen: set[str] = set()
+    flags: List[bool] = []
+    for call in turn_calls:
+        sig = (
+            f"{call.get('tool') or ''}|"
+            f"{json.dumps(call.get('arguments') or {}, ensure_ascii=False, sort_keys=True)}"
+        )
+        flags.append(sig in seen)
+        seen.add(sig)
+    return flags
+
+
 def _append_missing_tool_responses(convo: List[Dict], error_text: str) -> List[str]:
     """Repair OpenAI-style history in-place.
 
@@ -762,6 +787,7 @@ def _save_mcp_tool_bubble(
     image_url: str = "",
     image_data_url: str = "",
     tool_result: Optional[Dict[str, object]] = None,
+    latency: Optional[float] = None,
 ) -> None:
     bot_delivery: Dict[str, object] = {}
     saved = _save_message(
@@ -777,6 +803,8 @@ def _save_mcp_tool_bubble(
             session_name=session_name,
             model=model,
             total_tokens=0,
+            # 实测的单个工具执行时长（秒），持久化到消息上，重开对话仍可显示。
+            latency=latency,
         ),
     )
     if image_data_url and saved.id:
@@ -1601,6 +1629,10 @@ def _run_worker_impl(
             rejected_repeat = 0
             consecutive_ai_errors = 0
             image_input_disabled = False
+            # 跨步「原地重放」检测：连续若干步产出完全相同的工具批次（同名同参数）
+            # 说明模型卡住了——同一查询不会给出不同结果，继续执行只是空烧步数。
+            last_batch_sig = ""
+            consecutive_same_batch = 0
 
             # Native tool schemas are exposed progressively. Keep the full
             # allowlist as the execution boundary, but initially show only MCP
@@ -1997,6 +2029,7 @@ def _run_worker_impl(
                             _run_set_status(run_id, "stopped", finished=True)
                             return "stop_run"
                         item_failed = False
+                        _split_started_at = time.perf_counter()
                         item_error = _joined_tool_skip_reason(split_tool, arguments, effective_tool_allowlist)
                         if item_error:
                             item_failed = True
@@ -2045,6 +2078,7 @@ def _run_worker_impl(
                                     ok=False,
                                     error_message=item_error,
                                 )
+                        _split_latency = time.perf_counter() - _split_started_at
                         _record_mcp_call(
                             tool=split_tool, user_id=user_id, ai_config_id=ai_config_id,
                             session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
@@ -2076,6 +2110,7 @@ def _run_worker_impl(
                             image_url=item_screenshot_ref.get("url", ""),
                             image_data_url=item_screenshot_ref.get("data_url", ""),
                             tool_result=item_result if isinstance(item_result, dict) else None,
+                            latency=_split_latency,
                         )
                         compound_results.append({
                             "tool": split_tool,
@@ -2164,6 +2199,7 @@ def _run_worker_impl(
                 _set_run_live_phase(run_id, "waiting_mcp", tool)
                 tool_failed = False
                 tool_error = ""
+                _tool_started_at = time.perf_counter()
                 try:
                     # The async bridge caps every tool call at _DEFAULT_TIMEOUT (120s)
                     # and, when it fires, raises a bare concurrent.futures.TimeoutError
@@ -2191,6 +2227,7 @@ def _run_worker_impl(
                     tool_error = _extract_mcp_error(mcp_exc)
                     tool_result = {"result": {"success": False, "error": tool_error}}
                     result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
+                _tool_latency = time.perf_counter() - _tool_started_at
                 _record_mcp_call(
                     tool=tool, user_id=user_id, ai_config_id=ai_config_id,
                     session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
@@ -2229,6 +2266,7 @@ def _run_worker_impl(
                     image_url=screenshot_ref.get("url", ""),
                     image_data_url=screenshot_ref.get("data_url", ""),
                     tool_result=tool_result if isinstance(tool_result, dict) else None,
+                    latency=_tool_latency,
                 )
 
                 if (not tool_failed) and tool == "mcp.describe+tool":
@@ -3198,12 +3236,98 @@ def _run_worker_impl(
                     _run_set_status(run_id, "completed", finished=True)
                     return
 
+                # ---- cross-step no-progress guard -----------------------------
+                # 模型（尤其 grok 经无状态网关驱动时）有概率连续多步原样重放上一步
+                # 的整批工具调用：同样的查询、同样的参数，却期待不同结果。相同调用不
+                # 会有不同结果，继续执行只会重复副作用、把剩余步数全烧在原地。用批次
+                # 签名（工具名+参数，忽略顺序）识别连续重复：命中就不再执行本批，改为
+                # 强提示打断；仍不改则收尾，避免死循环。
+                _batch_sig = "\n".join(sorted(
+                    f"{c.get('tool') or ''}|"
+                    f"{json.dumps(c.get('arguments') or {}, ensure_ascii=False, sort_keys=True)}"
+                    for c in turn_calls
+                ))
+                if _batch_sig and _batch_sig == last_batch_sig:
+                    consecutive_same_batch += 1
+                else:
+                    consecutive_same_batch = 1
+                last_batch_sig = _batch_sig
+                if consecutive_same_batch >= 2:
+                    _ai_debug_stage(
+                        "LOOP",
+                        f"{_ai_short_run_id(run_id)} #{step_label} x{consecutive_same_batch} "
+                        f"{_ai_short(', '.join(c['tool'] for c in turn_calls), 48)}",
+                        "31",
+                    )
+                    _loop_note = (
+                        "[系统提示] 检测到你连续多步发出了完全相同的工具调用（相同工具名与参数），"
+                        "但没有产生新进展。相同的调用不会返回不同的结果——请直接基于上方已有的"
+                        "工具结果继续推进，或明确给出结论，不要再重复相同的调用与相同的思考。"
+                    )
+                    if _has_native_tc:
+                        _answer_pending_calls(
+                            turn_calls,
+                            {"success": False, "error": "no_progress_loop", "note": _loop_note},
+                            native=True,
+                        )
+                    else:
+                        convo.append({"role": "user", "content": _loop_note})
+                    if consecutive_same_batch >= 3:
+                        # 已提示过仍在原地重放：收尾，避免把剩余步数全烧在同一循环上。
+                        _save_message(
+                            bg,
+                            user_id,
+                            ChatMessageCreate(
+                                role="system",
+                                content=(
+                                    "[系统提示]\n"
+                                    "检测到连续多步重复相同的工具调用且无新进展，已自动结束本轮以避免死循环。"
+                                    "如需继续，请发送新消息或调整需求。"
+                                ),
+                                tags="system_notice_no_progress_loop",
+                                ai_config_id=ai_config_id,
+                                ai_kind=ai_kind,
+                                session_id=session_id,
+                                session_name=session_name,
+                                model=model,
+                                total_tokens=0,
+                            ),
+                        )
+                        _set_run_live_phase(run_id, "idle")
+                        _run_set_status(run_id, "completed", finished=True)
+                        return
+                    _set_run_live_phase(run_id, "generating")
+                    continue
+
                 # ---- run this turn's tool calls as a batch --------------------
                 # Each call is answered before the next request goes out. A
                 # control-flow tool ends the batch early and closes out the
                 # remaining ids itself.
+                #
+                # 同一轮里模型偶尔会一口气发出多个完全相同（同工具名 + 同参数）的
+                # 调用。批处理会逐个执行，对有副作用的工具（发消息、点击、提交）就
+                # 是重复动作。这里对本轮内的精确重复只执行第一次，其余直接以“已合并”
+                # 结果答复——既保住原生 tool_call_id 必须逐个答复的契约，又避免重复副作用。
                 batch_action = "next_call"
+                _dup_flags = _duplicate_call_flags(turn_calls)
                 for call_index, turn_call in enumerate(turn_calls):
+                    if _dup_flags[call_index]:
+                        _ai_debug_stage(
+                            "DEDUP",
+                            f"{_ai_short_run_id(run_id)} #{step_label} "
+                            f"{_ai_short(str(turn_call.get('tool') or '?'), 40)}",
+                            "33",
+                        )
+                        _answer_pending_calls(
+                            [turn_call],
+                            {
+                                "success": True,
+                                "note": "duplicate_call_merged",
+                                "detail": "本轮已执行过完全相同的工具调用（同名同参数），此重复调用未再次执行，结果同上。",
+                            },
+                            native=_has_native_tc,
+                        )
+                        continue
                     batch_action = _execute_turn_call(turn_call, turn_calls[call_index + 1:])
                     if batch_action != "next_call":
                         break
