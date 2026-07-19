@@ -431,21 +431,32 @@ async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Opt
 
     # 提前确定目标 AI 应该在哪个 session 处理本消息：
     #   - 回信场景   → 优先投回原始发送方 session（from_session_id）
+    #   - 点对点信道 → 没有同会话回信路由时，投回“目标 AI 上次与本 AI 交流的那条会话”，
+    #                   让 B 事后主动找回 A（哪怕换了上下文）也落在 A 的原始对话里，
+    #                   而不是新开一条孤立会话——这才是成员间“一条线”的点对点。
     #   - 普通信件   → 复用“发信方当前会话 ↔ 目标 AI”绑定的目标侧 session
     #   - 新信件     → 生成稳定 session_id，稍后由 wake_idle_target_for_message
     #                   按同一 id 创建会话，pop 时严格匹配。
     if return_session_id:
         prebound_session_id = return_session_id
-    elif from_session_id:
-        prebound_session_id = ai_message_service.find_corresponding_target_session_id(
-            user_id=user_id,
-            from_ai_config_id=int(ai_config_id),
-            to_ai_config_id=to_id,
-            from_session_id=from_session_id,
-        )
     else:
-        import uuid as _uuid
-        prebound_session_id = f"ai_message_{_uuid.uuid4().hex[:14]}"
+        reverse_session_id = ai_message_service.find_reverse_inbound_session(
+            user_id=user_id,
+            current_ai_config_id=int(ai_config_id),
+            target_ai_config_id=to_id,
+        )
+        if reverse_session_id:
+            prebound_session_id = reverse_session_id
+        elif from_session_id:
+            prebound_session_id = ai_message_service.find_corresponding_target_session_id(
+                user_id=user_id,
+                from_ai_config_id=int(ai_config_id),
+                to_ai_config_id=to_id,
+                from_session_id=from_session_id,
+            )
+        else:
+            import uuid as _uuid
+            prebound_session_id = f"ai_message_{_uuid.uuid4().hex[:14]}"
 
     # 保留 cascade_depth 仅用于历史记录兼容，不再作为发送限制。
     parent_depth: Optional[int] = None

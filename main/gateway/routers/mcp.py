@@ -189,22 +189,6 @@ async def list_mcp_tools(
         allowed_tools=allowed_tools,
     )
 
-    # 当前工作模式的类型：不允许设备端 MCP 的模式下，前端要把设备工具组置灰、
-    # 禁止勾选，也不随消息附带（与 chat_runtime 的运行时门禁一致）。
-    mode_key = ""
-    mode_allows_device = True
-    if ai_config_id is not None:
-        try:
-            from api.services.mcp.agent_mode_store import (
-                mode_allows_device_mcp_by_key,
-                resolve_current_mode_key,
-            )
-
-            mode_key = resolve_current_mode_key(user.id, ai_config_id)
-            mode_allows_device = mode_allows_device_mcp_by_key(user.id, mode_key, ai_config_id)
-        except Exception:
-            pass
-
     return {
         "tools": tools,
         # Endpoint (desktop / browser) tools currently advertised by connected
@@ -218,8 +202,6 @@ async def list_mcp_tools(
         "promptToolsScope": "current_ai" if ai_config_id is not None else "all_current",
         "promptToolsAiConfigId": ai_config_id,
         "promptToolsMcpEnabled": True if cfg is None else bool(cfg.mcp_enabled),
-        "promptToolsModeKey": mode_key,
-        "promptToolsAllowDeviceMcp": mode_allows_device,
         "userId": user.id,
         "roleOrder": CONFIGURABLE_ROLES,
         "roleLabels": ROLE_LABELS_ZH,

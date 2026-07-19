@@ -118,7 +118,6 @@ from .librarian_builtins import (
     _intrinsic_personas_payload,
     _render_intrinsic_personas_body,
     save_intrinsic_persona,
-    save_intrinsic_mode_prompt,
     _SYSTEM_PROMPT_SECTIONS,
     _system_prompts_payload,
     save_system_prompts,

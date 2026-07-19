@@ -21,7 +21,6 @@ from .ai_config import (
     AssistantAIConfigCreate,
     AssistantAIConfigUpdate,
 )
-from .agent_mode import AgentMode
 from .ai_runtime import (
     AgentDispatchTask,
     AIRuntimeStatus,
@@ -130,7 +129,6 @@ __all__ = [
     "AssistantAIConfig",
     "AssistantAIConfigCreate",
     "AssistantAIConfigUpdate",
-    "AgentMode",
     "AgentDispatchTask",
     "AIRuntimeStatus",
     "AITaskJob",

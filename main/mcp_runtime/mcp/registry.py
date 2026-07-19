@@ -18,10 +18,6 @@ from tools.prompts import (
     _prompt_manage,
     PROMPT_MANAGE_SCHEMA,
 )
-from tools.agent_mode import (
-    _mode_manage,
-    MODE_MANAGE_SCHEMA,
-)
 from tools.communication import (
     _send_to,
 )
@@ -314,24 +310,6 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         ),
         input_schema=PROMPT_MANAGE_SCHEMA,
         handler=_prompt_manage,
-        destructive=True,
-    ))
-
-    registry.register(MCPTool(
-        name="mode.manage",
-        description=(
-            "工作模式统一工具：AI 对话前先判断当前工作环境，再切换到对应模式。"
-            "默认的 initial 初始对话模式「不在工作房间」——只有基础对话工具，看不到设备 / 工作 MCP；"
-            "切到 task / learning 等工作模式，系统才把设备 MCP 交回。切换只在工具结果里返回该模式说明，"
-            "不改写人格 / 系统提示。用 action 选择 list 列出所有模式 / get 读取某模式 prompt / create 创建自定义模式 / "
-            "update 修改模式 / delete 删除自定义模式 / use 切换当前 AI 到某模式。"
-            "模式清单按 AI 隔离：你增删改查到的是自己的模式，不影响其他 AI。"
-            "每个模式带类型 allow_device_mcp：false 的模式收走设备端（桌面/浏览器/安卓）MCP；"
-            "切到 true 的模式时，use 结果结尾会自动附带当前可用的设备端 MCP 工具说明。"
-            "内置 3 种：initial 初始对话（默认，只聊天、无设备工具）/ task 任务 / learning 学习（可改 prompt，不可删）。"
-        ),
-        input_schema=MODE_MANAGE_SCHEMA,
-        handler=_mode_manage,
         destructive=True,
     ))
 

@@ -38,11 +38,6 @@ class SystemPromptsBody(BaseModel):
     prompts: List[SystemPromptBody] = []
 
 
-class ModePromptBody(BaseModel):
-    mode_key: str = "initial"
-    prompt: str = ""
-
-
 class ClawHubInstallBody(BaseModel):
     version: Optional[str] = None
     force: bool = False
@@ -225,23 +220,6 @@ def save_system_prompts(
         prompts = [item.model_dump() for item in body.prompts]
         return librarian_service.save_system_prompts(user_id=user.id, prompts=prompts)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@router.post("/mode-prompt")
-def save_mode_prompt(
-    body: ModePromptBody,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None),
-):
-    user = get_current_user(authorization, session)
-    try:
-        return librarian_service.save_intrinsic_mode_prompt(
-            user_id=user.id,
-            mode_key=body.mode_key,
-            prompt=body.prompt,
-        )
-    except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 

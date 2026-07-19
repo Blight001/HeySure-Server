@@ -141,47 +141,6 @@ async def get_chat_history(
     rows = session.exec(statement).all()
     rows.reverse()
     out = [_history_row_to_dict(row) for row in rows]
-
-    # 到达记录起点时：如果整个历史里没有任何 mode.manage 记录（极老的会话），
-    # 则在最前面补一条合成记录（id=0，不落库），显示该 AI 当前选中的工作模式。
-    # 如果已有切换记录（即使不是第一条），则不再重复注入，避免重复信息。
-    # 注意不要按 ai_kind 过滤：主控台里普通 AI 成员的对话是 ai_kind='core'
-    # （只有辅助管理员是 'assistant'），模式体系按 ai_config_id 区分即可。
-    reached_start = limit is None or int(limit) <= 0 or len(rows) < int(limit)
-    if reached_start and ai_config_id is not None:
-        has_mode_mcp = any(
-            getattr(r, "role", None) == "system"
-            and "mcp_tool_call" in (getattr(r, "tags", "") or "")
-            and "工具: mode.manage" in (getattr(r, "content", "") or "")
-            for r in rows
-        )
-        if not has_mode_mcp:
-            earliest = rows[0] if rows else None
-            try:
-                out.insert(0, {
-                    "id": 0,
-                    "user_id": user.id,
-                    "ai_config_id": int(ai_config_id),
-                    "ai_kind": ai_kind,
-                    "session_id": session_id,
-                    "session_name": getattr(earliest, "session_name", None) if earliest else None,
-                    "role": "system",
-                    "content": _initial_mode_bubble_content(
-                        _initial_mode_use_result(user.id, int(ai_config_id), backfill=True)
-                    ),
-                    "think": None,
-                    "tags": "mcp_tool_call",
-                    "model": None,
-                    "prompt_tokens": None,
-                    "completion_tokens": None,
-                    "total_tokens": 0,
-                    "cache_read_tokens": None,
-                    "finish_reason": None,
-                    "latency": None,
-                    "created_at": (getattr(earliest, "created_at", None) - 1.0) if earliest and hasattr(earliest, "created_at") else time.time(),
-                })
-            except Exception:
-                logger.warning("virtual mode record failed for session %s", session_id, exc_info=True)
     return out
 
 @router.get("/sessions")
@@ -226,94 +185,6 @@ def get_sessions(
         for row in results
     ]
 
-def _initial_mode_bubble_content(result: dict) -> str:
-    """把一次 ``mode.manage use <mode>`` 的结果渲染成标准 ``[MCP工具]`` 气泡文本
-    （与推理循环持久化工具调用的格式一致，前端按 mcp_tool_call 原样渲染）。
-    使用 result 中的 current_mode_key（若无则回退 initial）。"""
-    from api.services.mcp import agent_mode_store as mode_store
-    key = str(result.get("current_mode_key") or mode_store.DEFAULT_MODE_KEY)
-    arguments = {"action": "use", "mode_key": key}
-    result_text = _build_mcp_display_result("mode.manage", {"result": result}, ok=True)
-    return (
-        "[MCP工具]\n"
-        "工具: mode.manage\n"
-        "状态: 成功\n\n"
-        "[参数]\n"
-        f"{_safe_json(arguments)}\n\n"
-        "[结果]\n"
-        f"{result_text}"
-    )
-
-
-def _initial_mode_use_result(user_id: int, ai_config_id: int, *, backfill: bool = False, mode_key: Optional[str] = None) -> dict:
-    """开场/起始记录用的模式说明。
-    - 若提供 mode_key 则使用它；否则读取该 AI 当前选中的模式（resolve_current_mode_key）。
-    - backfill=True 时仅用于展示，不改变 AI 当前模式。
-    - 回退到 initial（DEFAULT_MODE_KEY）。
-    """
-    from api.services.mcp import agent_mode_store as mode_store
-
-    key = (mode_key or mode_store.resolve_current_mode_key(user_id, ai_config_id) or mode_store.DEFAULT_MODE_KEY)
-    if key == "chat":
-        key = mode_store.DEFAULT_MODE_KEY
-    mode = mode_store.get_mode(user_id, key, ai_config_id)
-    if not mode:
-        mode_store.ensure_builtin_modes(user_id, ai_config_id)
-        mode = mode_store.get_mode(user_id, key, ai_config_id) or {}
-    name = mode.get("name") or ("初始对话模式" if key == mode_store.DEFAULT_MODE_KEY else key)
-    note_default = (
-        f"对话开场处于「{name}」。该模式下"
-        + ("只有基础对话工具，无法调用设备端（桌面 / 浏览器 / 安卓）MCP；需要干活时先用 mode.manage(action=use) 切换到对应工作模式。"
-           if key == mode_store.DEFAULT_MODE_KEY else
-           "可使用该模式对应的工具集。")
-    )
-    return {
-        "success": True,
-        "ai_config_id": ai_config_id,
-        "current_mode_key": key,
-        "name": name,
-        "description": mode.get("description", ""),
-        "prompt": mode.get("prompt", ""),
-        "allow_device_mcp": bool(mode.get("allow_device_mcp", key != mode_store.DEFAULT_MODE_KEY)),
-        "note": note_default + ("（历史会话补记，仅作展示，不改变当前模式。）" if backfill else ""),
-    }
-
-
-def _seed_initial_mode_record(
-    session: Session,
-    *,
-    user_id: int,
-    ai_config_id: int,
-    session_id: str,
-    session_name: str,
-    ai_kind: str,
-) -> None:
-    """新会话开场：使用该 AI 当前选中的工作模式（用户上次通过 mode.manage 选择的模式）
-    记录一条起始 mode 气泡（role=system + mcp_tool_call，仅 UI 渲染为工具结果）。
-    推理层会把匹配的 mode mcp 记录回放为上下文消息 + 兜底合成注入，确保 LLM 收到模式 prompt。
-    不会强制切回 initial，从而让用户选择的模式在对话初始显示。
-    失败不阻塞会话创建。"""
-    from api.services.mcp import agent_mode_store as mode_store
-
-    current_key = mode_store.resolve_current_mode_key(user_id, ai_config_id)
-    result = _initial_mode_use_result(user_id, ai_config_id, backfill=False, mode_key=current_key)
-    content = _initial_mode_bubble_content(result)
-    _save_message(
-        session,
-        user_id,
-        ChatMessageCreate(
-            role="system",
-            content=content,
-            tags="mcp_tool_call",
-            ai_config_id=ai_config_id,
-            ai_kind=ai_kind,
-            session_id=session_id,
-            session_name=session_name,
-            total_tokens=0,
-        ),
-    )
-
-
 @router.post("/sessions")
 def create_session(
     req: dict,
@@ -334,22 +205,6 @@ def create_session(
     )
     session.add(row)
     session.commit()
-    # 新会话使用该 AI 当前选中的工作模式（由用户在对话弹窗中通过模式切换选择）来显示
-    # 开场记录，而不是强制 initial。保留用户选择的模式在对话初始显示。
-    # 不按 ai_kind 过滤：普通 AI 成员的对话是 ai_kind='core'，只有辅助管理员
-    # 是 'assistant'；模式体系按 ai_config_id 区分。
-    if ai_config_id is not None:
-        try:
-            _seed_initial_mode_record(
-                session,
-                user_id=user.id,
-                ai_config_id=int(ai_config_id),
-                session_id=sid,
-                session_name=session_name,
-                ai_kind=ai_kind,
-            )
-        except Exception:
-            logger.warning("seed mode record failed for session %s", sid, exc_info=True)
     return {"id": sid, "name": session_name}
 
 @router.delete("/sessions/{session_id}")

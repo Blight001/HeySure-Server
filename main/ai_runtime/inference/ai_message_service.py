@@ -691,6 +691,41 @@ def find_corresponding_target_session_id(
     )
 
 
+def find_reverse_inbound_session(
+    *,
+    user_id: int,
+    current_ai_config_id: int,
+    target_ai_config_id: int,
+) -> str:
+    """Pick the target AI's own conversation to route a fresh outbound message into.
+
+    When the current AI reaches out to ``target_ai_config_id`` *outside* any live
+    same-session reply route — e.g. B independently found the cause of A's failed
+    task and now wants to notify A, from a different session than the one where B
+    received A's original notice — we still want the message to land back in A's
+    original conversation instead of minting a brand-new isolated session on A's
+    side.
+
+    Look up the most recent message in the REVERSE direction (one the target A
+    previously sent to the current AI B) and reuse *its* ``from_session_id`` —
+    A's own conversation at that time. Returns "" when the two AIs have never
+    talked, so genuinely-new conversations fall through to the normal path.
+    """
+    with Session(engine) as session:
+        row = session.exec(
+            select(AIMessage).where(
+                AIMessage.user_id == user_id,
+                AIMessage.from_ai_config_id == target_ai_config_id,
+                AIMessage.to_ai_config_id == current_ai_config_id,
+                AIMessage.from_session_id != "",
+                AIMessage.status != "failed",
+            ).order_by(AIMessage.created_at.desc())
+        ).first()
+        if row:
+            return str(row.from_session_id or "").strip()
+    return ""
+
+
 def find_return_route(
     *,
     user_id: int,

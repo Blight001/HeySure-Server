@@ -39,13 +39,12 @@ class User(SQLModel, table=True):
     mcp_max_steps: int = Field(default=48)
     # Model-context policy for MCP records from earlier runs in the same chat.
     # The original ChatMessage rows stay untouched; only the replayed tool-result
-    # body is shortened to this limit.
-    # Compaction is kept as a safety valve for pathologically large single tool
-    # results (e.g. a full-page browser_observe dump); the default cap is generous
-    # so ordinary tool outputs (read file / search / command) replay in full across
-    # turns — mainstream full-fidelity behaviour. Prefix stays deterministic, so
-    # server-side automatic prefix caching (DeepSeek/OpenAI/Grok) still hits.
-    mcp_history_compaction_enabled: bool = Field(default=True)
+    # body is shortened, and only when it exceeds this cap. The cap is a permanent
+    # safety valve against pathologically large single results (e.g. a full-page
+    # browser_observe dump); the generous default lets ordinary tool outputs
+    # (read file / search / command) replay in full across turns — mainstream
+    # full-fidelity behaviour. Truncation is deterministic, so server-side
+    # automatic prefix caching (DeepSeek/OpenAI/Grok) still hits.
     mcp_history_result_max_chars: int = Field(default=8000)
     conversation_auto_compress_enabled: bool = Field(default=True)
     # Per-role MCP allow-list configured by the admin. JSON object mapping a role
@@ -98,7 +97,6 @@ class UserRead(SQLModel):
     mcp_dynamic_rule: str
     mcp_format_error_hint: str
     mcp_max_steps: int
-    mcp_history_compaction_enabled: bool = True
     mcp_history_result_max_chars: int = 8000
     conversation_auto_compress_enabled: bool = True
     role_mcp_permissions: str
@@ -135,7 +133,6 @@ class UserUpdate(SQLModel):
     mcp_dynamic_rule: Optional[str] = None
     mcp_format_error_hint: Optional[str] = None
     mcp_max_steps: Optional[int] = None
-    mcp_history_compaction_enabled: Optional[bool] = None
     mcp_history_result_max_chars: Optional[int] = None
     conversation_auto_compress_enabled: Optional[bool] = None
     role_mcp_permissions: Optional[str] = None

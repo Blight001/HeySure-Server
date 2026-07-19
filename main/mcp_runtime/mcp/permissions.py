@@ -89,13 +89,9 @@ def requires_library_binding(tool_name: str) -> bool:
     return str(tool_name or "").strip() in LIBRARY_BOUND_TOOLS
 
 
-# 基础对话控制工具：与 ``mcp.describe+tool`` 同类，是模式系统赖以运转的底座。
-# 每个 AI 无论角色策略如何都必须能切换 / 管理自己的工作模式（``mode.manage``）——
-# 否则既没法从初始模式进工作间拿到设备 MCP，用户也无法在对话「+」面板里切换模式
-# （前端切换走同一条 /api/mcp/call）。因此这些工具始终放行，不受「按档位的工具箱
-# 白名单」收敛（与 ``mcp.describe+tool`` 的豁免一致，见 agent_mode_store 的
-# CHAT_MODE_TOOL_WHITELIST）。
-ALWAYS_ALLOWED_BASIC_TOOLS: Set[str] = {"mcp.describe+tool", "mode.manage"}
+# 基础工具自省：``mcp.describe+tool`` 是所有 AI 读取工具 schema 的底座，无论角色策略
+# 如何都始终放行，不受「按档位的工具箱白名单」收敛。
+ALWAYS_ALLOWED_BASIC_TOOLS: Set[str] = {"mcp.describe+tool"}
 
 
 # 「工具箱」设备（多绑、按绑定门禁放行的服务端固定工具集）整体迁出到独立模块
@@ -182,10 +178,9 @@ def effective_allowed_for_tier(user, tier: str, all_tool_names: Iterable[str]) -
     policy = parse_role_permissions(user)
     if tier in policy:
         allowed = {tool for tool in policy[tier] if tool in ceiling}
-        # 图书馆治理类工具、自省工具与基础模式控制工具不受「按档位的工具箱白名单」
-        # 约束：图书馆工具仅由绑定门槛管控；基础对话控制工具
-        # （mcp.describe+tool / mode.manage）是系统底座，始终放行，避免运行时天花板把
-        # 它们误挡掉——与 clamp_tools_json 的同类豁免保持一致。
+        # 图书馆治理类工具与自省工具不受「按档位的工具箱白名单」约束：图书馆工具仅由
+        # 绑定门槛管控；自省工具（mcp.describe+tool）是系统底座，始终放行，避免运行时
+        # 天花板把它们误挡掉——与 clamp_tools_json 的同类豁免保持一致。
         allowed |= (LIBRARY_BOUND_TOOLS | ALWAYS_ALLOWED_BASIC_TOOLS) & ceiling
         return allowed
     return ceiling

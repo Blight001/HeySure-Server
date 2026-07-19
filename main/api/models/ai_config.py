@@ -7,7 +7,7 @@ _DEFAULT_MCP_TOOLS = (
     '["mcp.describe+tool","workspace.search","workspace.run+command",'
     '"admin.manage","device+mcp.manage",'
     '"task.manage","todo.manage",'
-    '"prompt.manage","knowledge.manage","mode.manage",'
+    '"prompt.manage","knowledge.manage",'
     '"message.send+to","conversation.manage"]'
 )
 
@@ -71,10 +71,6 @@ class AssistantAIConfig(SQLModel, table=True):
     switch_key: str = Field(default="assistant_default")
     mcp_tools: str = Field(default=_DEFAULT_MCP_TOOLS)
     system_auto_control: str = Field(default=_DEFAULT_SYSTEM_AUTO_CONTROL)
-    # 当前工作模式（对应 AgentMode.mode_key）。默认 "initial" 初始模式（不存在「无模式」，
-    # 空值在运行时按初始模式处理）。由 mode.manage(action=use) 切换。
-    # 运行时会把模式 prompt 作为初始上下文消息传递给模型（用于行为指引），同时用它做工具门禁。
-    current_mode_key: str = Field(default="initial")
 
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)
@@ -114,7 +110,6 @@ class AssistantAIConfigCreate(SQLModel):
     switch_key: Optional[str] = ""
     mcp_tools: Optional[str] = ""
     system_auto_control: Optional[str] = ""
-    current_mode_key: Optional[str] = ""
 
 
 class AssistantAIConfigUpdate(SQLModel):
@@ -149,4 +144,3 @@ class AssistantAIConfigUpdate(SQLModel):
     switch_key: Optional[str] = None
     mcp_tools: Optional[str] = None
     system_auto_control: Optional[str] = None
-    current_mode_key: Optional[str] = None

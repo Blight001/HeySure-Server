@@ -323,40 +323,8 @@ def build_runtime_system_prompt_and_tools(
             task_plan_flow_text,
         )
 
-    # 当前工作模式：不改写系统提示（切换模式只在工具结果里返回模式说明），但**决定工具门禁**。
-    # 初始对话时，推理会把当前模式的说明作为一条上下文消息注入（等效初始 mode.use 结果），
-    # 保证模型从第一轮就看到模式 prompt。默认「初始对话模式」视为「不在工作房间」：
-    # 只保留系统自带的基础对话工具（切换模式 / 工具自省 / 收发消息），收走全部设备 / 工作 MCP；
-    # 切到 task / learning 等工作模式，系统才把设备 MCP 交回。DB 为准（gateway 预览与 ai-runtime 两进程一致）。
-    if ai_config_id is not None:
-        try:
-            from api.services.mcp.agent_mode_store import (
-                is_chat_only_mode,
-                mode_allows_device_mcp,
-                CHAT_MODE_TOOL_WHITELIST,
-            )
-
-            if is_chat_only_mode(uid, ai_config_id):
-                keep = set(CHAT_MODE_TOOL_WHITELIST) | set(MCP_INTROSPECTION_TOOLS)
-                effective_tool_allowlist = {
-                    tool for tool in effective_tool_allowlist if tool in keep
-                }
-            elif not mode_allows_device_mcp(uid, ai_config_id):
-                # 模式类型不允许设备端 MCP：收走桌面 / 浏览器 / 安卓端执行器工具，
-                # 服务端工作工具（含真正的 workshop endpoint 工具如 evolution.*）保持不变。
-                # 图书馆治理工具 (knowledge.manage 等) 由绑定 + filter 控制，不受此影响。
-                from connector_runtime.dispatch.desktop_device_tools import (
-                    is_endpoint_agent_tool,
-                    is_workshop_tool,
-                )
-
-                effective_tool_allowlist = {
-                    tool for tool in effective_tool_allowlist
-                    if not (is_endpoint_agent_tool(tool) and not is_workshop_tool(tool))
-                }
-        except Exception:
-            pass
-    # 剥离历史可能残留的 [当前工作模式] 段（旧设计曾尝试 section 注入，现已统一走工具结果/上下文消息）。
+    # 「工作模式」系统已移除：AI 默认可使用其全部 MCP 工具，不再按模式收走设备端工具。
+    # 剥离历史可能残留的 [当前工作模式] 段（旧设计曾尝试 section 注入），让存量人格就地自愈。
     system_prompt = _strip_prompt_section(system_prompt, "当前工作模式")
 
     # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。

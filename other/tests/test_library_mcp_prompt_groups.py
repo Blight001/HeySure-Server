@@ -80,10 +80,9 @@ def test_unbound_ai_loses_task_manage_but_keeps_todo_tool(monkeypatch):
     assert "todo.manage" in filtered
 
 
-def test_mode_manage_allowed_despite_restrictive_role_policy():
-    """基础对话控制工具 mode.manage 不受角色策略白名单收敛：即使管理员保存的
-    per-role 策略里没有它，运行时天花板也必须放行——否则用户无法在对话「+」面板
-    切换模式（前端走同一条 /api/mcp/call 的角色天花板校验）。"""
+def test_describe_tool_allowed_despite_restrictive_role_policy():
+    """自省工具 mcp.describe+tool 不受角色策略白名单收敛：即使管理员保存的
+    per-role 策略里没有它，运行时天花板也必须放行。"""
     from mcp_runtime.mcp import registry
 
     names = {
@@ -91,9 +90,7 @@ def test_mode_manage_allowed_despite_restrictive_role_policy():
         for t in registry.list_tools()
         if str(t.get("name") or "").strip()
     }
-    assert "mode.manage" in names  # 前提：确是已注册工具
     allowed = effective_allowed_for_tier(_User(), "digital_member_member", names)
-    assert "mode.manage" in allowed
     assert "mcp.describe+tool" in allowed
 
 

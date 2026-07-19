@@ -54,7 +54,6 @@ def _user_payload(user: User) -> dict:
         "admin_base_url": getattr(user, "admin_base_url", ""),
         "admin_model": getattr(user, "admin_model", ""),
         "mcp_max_steps": getattr(user, "mcp_max_steps", 0),
-        "mcp_history_compaction_enabled": getattr(user, "mcp_history_compaction_enabled", True),
         "mcp_history_result_max_chars": getattr(user, "mcp_history_result_max_chars", 8000),
         "conversation_auto_compress_enabled": getattr(user, "conversation_auto_compress_enabled", True),
         "role_mcp_permissions": getattr(user, "role_mcp_permissions", ""),
