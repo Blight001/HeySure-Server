@@ -1093,28 +1093,16 @@ def _tool_image_message(tool: str, tool_result: Dict[str, object]) -> Optional[D
         if not public_image_url.startswith(("http://", "https://")):
             return None
     meta_payload = result_payload if isinstance(result_payload, dict) else {}
-    if tool == "mouse.click":
-        confirmation = meta_payload.get("confirmation") if isinstance(meta_payload, dict) else {}
-        if not isinstance(confirmation, dict):
-            confirmation = {}
-        target = confirmation.get("target") if isinstance(confirmation.get("target"), dict) else {}
-        detail = "\n".join(
-            part for part in [
-                "鼠标点击前确认图已捕获。注意：本次 mouse.click 尚未执行点击，只返回了红点/十字标注的目标点局部截图。请直接检查红点是否落在目标可点击中心。",
-                f"Target: x={target.get('x')}, y={target.get('y')}".strip(),
-                "如果红点偏离目标，请估算目标中心相对红点的像素偏差 correction_dx/correction_dy，并再次调用 mouse.click 使用修正后的 x/y 获取新的确认图；如果红点正确，必须再次调用 mouse.click 并传 confirmed:true 才真正点击。",
-            ]
-            if part and "None" not in part
-        )
-    else:
-        detail = "\n".join(
-            part for part in [
-                "工具截图已捕获。你已经收到这张图片，请直接查看视觉内容并继续，不要让用户打开本地路径。",
-                f"URL: {meta_payload.get('url') or ''}".strip(),
-                f"Method: {meta_payload.get('method') or ''}".strip(),
-            ]
-            if part and not part.endswith(":")
-        )
+    # 7×24 全自动项目：mouse.click 的两段式"红点确认图 + confirmed:true"流程已移除，
+    # 所有截图类工具结果统一按普通截图处理，点击一次到位。
+    detail = "\n".join(
+        part for part in [
+            "工具截图已捕获。你已经收到这张图片，请直接查看视觉内容并继续，不要让用户打开本地路径。",
+            f"URL: {meta_payload.get('url') or ''}".strip(),
+            f"Method: {meta_payload.get('method') or ''}".strip(),
+        ]
+        if part and not part.endswith(":")
+    )
     return {
         "role": "user",
         "content": [
@@ -1286,15 +1274,7 @@ def _model_visible_tool_result(
             "Continue from non-image tool data, use a non-visual tool, or explain the limitation."
         )
         return cleaned
-    if tool == "mouse.click":
-        cleaned["instruction"] = (
-            "The pre-click confirmation image is attached in a following user message. "
-            "The click has not been executed yet. Inspect the red marker. If it is not on the intended clickable target center, "
-            "estimate correction_dx/correction_dy in pixels and call mouse.click again with corrected x/y to get a new confirmation image. "
-            "If the marker is correct, call mouse.click again with confirmed:true to execute the click."
-        )
-    else:
-        cleaned["instruction"] = "The screenshot image is attached in a following user message. Analyze the image directly; do not ask the user to open a local path."
+    cleaned["instruction"] = "The screenshot image is attached in a following user message. Analyze the image directly; do not ask the user to open a local path."
     return cleaned
 
 
