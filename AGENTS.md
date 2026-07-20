@@ -1,7 +1,7 @@
-# CLAUDE.md — server/ 后端 (HeySure-Server)
+# AGENTS.md — server/ 后端 (HeySure-Server)
 
-> 详细中文说明见 [`README.md`](README.md)。本文件是给 Claude 的快速导航与约定补充。
-> 同内容的 Agent 版见 [`AGENTS.md`](AGENTS.md)。
+> 详细中文说明见 [`README.md`](README.md)。本文件是给 Codex / 通用 coding agent 的快速导航与约定补充。
+> 同内容的 Claude 版见 [`CLAUDE.md`](CLAUDE.md)。
 
 **本目录是独立仓库** `HeySure-Server`。多仓库工作区通过根目录 git submodule（见工作区 `.gitmodules`）拉取。
 

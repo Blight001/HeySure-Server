@@ -393,26 +393,52 @@ def device_payload(user_id: int, device_type: str) -> Dict[str, Any]:
 
 def seed_defaults(user_id: int, device_type: str = "desktop") -> int:
     """Seed factory-default tools into the user's workspace (idempotent: never
-    clobbers an existing file). Desktop → powershell/shell runtime tools;
-    browser → program wrappers for the plugin-advertised browser tools."""
+    clobbers an existing user-edited file). Desktop → powershell/shell runtime
+    tools; browser → program wrappers for the plugin-advertised browser tools.
+
+    Untouched Python factory defaults from the pre-PowerShell release are
+    upgraded in place. Their exact revisions are known, so a custom Python tool
+    with the same name remains untouched.
+    """
     dtype = normalize_device_type(device_type)
     if dtype == "desktop":
-        from api.services.device_tools.device_runtime_tools import load_default_tools as _load
+        from api.services.device_tools.device_runtime_tools import (
+            LEGACY_PYTHON_DEFAULT_REVISIONS as _legacy_python_revisions,
+            load_default_tools as _load,
+        )
     elif dtype == "browser":
         from api.services.device_tools.device_browser_runtime_tools import (
             load_default_tools as _load,
             sync_workspace_after_catalog_change,
         )
+        _legacy_python_revisions = {}
     else:
         return 0
     d = _tools_dir(user_id, dtype)
     _migrate_db_once(user_id, dtype, d)
     created = 0
     for spec in _load():
-        if os.path.isfile(_meta_path(d, spec["name"])):
+        name = spec["name"]
+        if os.path.isfile(_meta_path(d, name)):
+            current = _read_tool(d, name)
+            legacy_revision = _legacy_python_revisions.get(name)
+            if not current or not legacy_revision or current.get("revision") != legacy_revision:
+                continue
+            # This is byte-for-byte an old factory default, not a user edit.
+            # Preserve governance state while replacing the obsolete runtime.
+            clean = validate_definition(spec)
+            status = str(current.get("status") or "active")
+            if status not in VALID_STATUSES:
+                status = "active"
+            _write_files(d, clean, enabled=bool(current.get("enabled", True)), status=status)
+            try:
+                os.remove(os.path.join(d, f"{name}.py"))
+            except OSError:
+                pass
+            created += 1
             continue
         # Respect an explicit deletion: don't resurrect a tombstoned default.
-        if _is_tombstoned(d, spec["name"]):
+        if _is_tombstoned(d, name):
             continue
         clean = validate_definition(spec)
         _write_files(d, clean, enabled=True, status="active")
