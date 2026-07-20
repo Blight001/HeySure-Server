@@ -48,7 +48,7 @@ class DynamicToolRestore(BaseModel):
 
 class PermissionPolicyUpdate(BaseModel):
     device_type: str
-    policy: Dict[str, str] = Field(default_factory=dict, description="{permission_tag: allow|confirm|deny}")
+    policy: Dict[str, str] = Field(default_factory=dict, description="{permission_tag: allow|deny}")
 
 
 def _available_call_targets(user_id: int, device_type: str) -> List[Dict[str, str]]:

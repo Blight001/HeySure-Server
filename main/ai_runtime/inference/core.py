@@ -882,7 +882,7 @@ def _reset_convo_after_clear(
 ) -> None:
     result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else tool_result
     follow_up = (
-        "[MCP执行确认]\n"
+        "[MCP执行结果]\n"
         "系统已执行工具：conversation.manage（action=clear）\n"
         "执行状态：成功\n\n"
         "[工具执行结果]\n"
@@ -2325,7 +2325,7 @@ def _run_worker_impl(
                         convo.append({
                             "role": "user",
                             "content": (
-                                f"[MCP执行确认]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
+                                f"[MCP执行结果]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
                                 "[工具执行结果]\n"
                                 f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
                             ),
@@ -2455,7 +2455,7 @@ def _run_worker_impl(
                         convo.append({
                             "role": "user",
                             "content": (
-                                f"[MCP执行确认]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
+                                f"[MCP执行结果]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
                                 "[工具执行结果]\n"
                                 f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
                             ),

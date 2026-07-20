@@ -2,8 +2,8 @@
 
 工坊按账号自动上线（无需用户运行独立程序），本路由只管"哪个 AI 绑定了
 工坊"：当前提供传承思想列表、带行号详情、安装、按行编辑和删除 MCP。
-工坊与 AI 是 **1:1 绑定**——同一时间只能绑定一个 AI 数字成员，
-绑定新成员会替换旧绑定（存 ``WorkshopAiBinding``）。
+工坊与 AI 是 **1:1 绑定**——同一时间只能绑定一个 AI 数字成员；
+已被占用的工坊必须先解绑，不能由新成员直接替换。
 
 工具执行不走 REST：调度层（device_dispatch 的 workshop 分支）直接进程内
 调用 ``library.engine.execute_tool``，其中完成白名单/归属/绑定复核。
@@ -19,6 +19,7 @@ from api.database import get_session
 from api.models import AssistantAIConfig
 from api.devices.workshop_bindings import (
     bound_config_id_for_agent,
+    bound_config_ids_for_agent,
     set_workshop_binding,
     workshop_device_ids_for_config,
 )
@@ -127,20 +128,22 @@ def update_workshop_binding(
     from tools import engine as toolbox_engine
 
     is_toolbox = device_id == toolbox_engine.toolbox_device_id_for_user(user.id)
-    # 工具箱多绑、可绑任意 AI；图书馆 1:1。图书馆绑定是其中所有 MCP 的唯一
-    # 权限门槛，数字成员与辅助管理员绑定后均可读写。
+    # 图书馆绑定是其中所有 MCP 的唯一权限门槛。
     if (
         not is_toolbox
         and bool(payload.bound)
         and str(cfg.ai_role or "") not in ("digital_member", "assistant_admin")
     ):
         raise HTTPException(status_code=400, detail="图书馆只能绑定数字成员或辅助管理员")
-    # 1:1（图书馆）：绑定会替换原有绑定，把被替换的成员返回给前端提示；工具箱多绑无替换。
-    replaced_id = None if is_toolbox else bound_config_id_for_agent(user.id, device_id)
-    if replaced_id == int(cfg.id):
-        replaced_id = None
+    occupied_by = bound_config_ids_for_agent(user.id, device_id) - {int(cfg.id)}
+    if bool(payload.bound) and occupied_by:
+        occupied_id = sorted(occupied_by)[0]
+        raise HTTPException(
+            status_code=409,
+            detail=f"该作坊已被 {_config_name(session, user.id, occupied_id)} 绑定，请先解绑",
+        )
     stored = set_workshop_binding(
-        user.id, device_id, cfg.id, bound=bool(payload.bound), single=not is_toolbox
+        user.id, device_id, cfg.id, bound=bool(payload.bound), single=True
     )
 
     # 解绑工具箱时，顺便把这个 AI 配置里残留的老 MCP 名字和 gated 工具清理干净
@@ -168,6 +171,6 @@ def update_workshop_binding(
         "ai_config_id": cfg.id,
         "device_id": device_id,
         "bound": stored,
-        "replaced_ai_config_id": replaced_id if bool(payload.bound) else None,
-        "replaced_ai_name": _config_name(session, user.id, replaced_id) if bool(payload.bound) else "",
+        "replaced_ai_config_id": None,
+        "replaced_ai_name": "",
     }

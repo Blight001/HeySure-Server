@@ -1,7 +1,7 @@
 """Read/write helpers for AI → workshop-agent bindings (知识与进化工坊).
 
-工坊与 AI 是 **1:1 绑定**：一个工坊同一时间只服务一个 AI 数字成员
-（绑定新 AI 会替换旧绑定）。与设备绑定（``api.devices.bindings``）的差异
+工坊与 AI 是 **1:1 绑定**：一个工坊同一时间只服务一个 AI 数字成员。
+已占用工坊由调用层拒绝直接替换。与设备绑定（``api.devices.bindings``）的差异
 仅在绑定方向：工坊绑定从 AI 侧声明、存 ``WorkshopAiBinding``。
 Shared by the dispatch path (which resolves the workshop agent for a
 calling AI) and the REST binding endpoints.
@@ -115,5 +115,4 @@ def config_bound_to_library(user_id, ai_config_id) -> bool:
     from library.engine import device_id_for_user
 
     return config_bound_to_device(user_id, ai_config_id, device_id_for_user(user_id))
-
 
