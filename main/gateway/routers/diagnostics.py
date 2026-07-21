@@ -2,9 +2,10 @@
 
 - ``GET  /api/diagnostics/selftest`` —— 一键自检：进程 / 数据库 / MCP / 文件存储，逐点返回结果
 - ``POST /api/diagnostics/models``   —— 逐个测试已配置模型（主脑 + 各 preset）的连通性
+- ``POST /api/diagnostics/model-probe`` —— 测试当前用户尚未保存的模型配置
 
 MCP 单工具的手动测试仍复用既有的 ``/api/mcp/tools`` 与 ``/api/mcp/call``。
-所有接口仅限房主/管理员调用。
+系统级诊断仅限房主/管理员；临时模型测试允许已登录用户调用。
 """
 
 import json
@@ -13,19 +14,20 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel
 from sqlalchemy import func, inspect, text
 from sqlmodel import Session, select
 
 from api.core.config import user_shared_knowledge_dir
 from api.core.settings import settings
-from api.database import engine
+from api.database import engine, get_session
 from api.runtime.http_client import ai_http_post
 from api.models import AssistantAIConfig, ChatMessage, ChatSession, User
 from api.runtime.internal_http import internal_headers
 from api.services.model_presets import normalize_model_presets, resolve_model_preset
 from .admin import require_admin_user
+from .auth import get_current_user
 
 router = APIRouter()
 PREFIX = "/api/diagnostics"
@@ -314,11 +316,66 @@ class ModelsTestRequest(BaseModel):
     ai_config_id: Optional[int] = None
 
 
-def _probe_model(name: str, model: str, base_url: str, api_key: str, prompt: str) -> Dict[str, Any]:
+class ModelProbeRequest(BaseModel):
+    name: str = "临时模型"
+    model: str
+    base_url: str
+    api_key: str
+    provider: str = "auto"
+    prompt: Optional[str] = None
+
+
+def _probe_model(
+    name: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    prompt: str,
+    provider: str = "openai",
+) -> Dict[str, Any]:
     if not (api_key and base_url and model):
         return {"name": name, "model": model, "ok": False, "detail": "配置不完整（缺少 API Key / Base URL / 模型名）"}
     started = time.perf_counter()
     try:
+        normalized_provider = str(provider or "auto").strip().lower()
+        if normalized_provider == "auto":
+            normalized_provider = "anthropic" if "api.anthropic.com" in base_url.lower() else "openai"
+        if normalized_provider == "anthropic":
+            endpoint = base_url.rstrip("/")
+            if not endpoint.endswith("/messages"):
+                endpoint = f"{endpoint}/messages" if endpoint.endswith("/v1") else f"{endpoint}/v1/messages"
+            resp = ai_http_post(
+                endpoint,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 16,
+                },
+                timeout=30,
+            )
+            latency = round((time.perf_counter() - started) * 1000, 1)
+            if resp.status_code != 200:
+                detail = (resp.text or "")[:200]
+                resp.close()
+                return {"name": name, "model": model, "base_url": base_url, "ok": False,
+                        "latency_ms": latency, "detail": f"HTTP {resp.status_code}：{detail}"}
+            try:
+                body = resp.json()
+            finally:
+                resp.close()
+            reply = "".join(
+                str(block.get("text") or "")
+                for block in body.get("content") or []
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+            return {"name": name, "model": model, "base_url": base_url, "ok": True,
+                    "latency_ms": latency, "reply": reply[:120], "detail": "Anthropic 响应正常"}
+
         # 与真实聊天完全一致的流式请求：很多「端口代理 / 中转」对非流式支持不一致，
         # 用流式探测才能真实反映聊天能否跑通。
         resp = ai_http_post(
@@ -381,6 +438,25 @@ def _probe_model(name: str, model: str, base_url: str, api_key: str, prompt: str
         return {"name": name, "model": model, "base_url": base_url, "ok": False,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "detail": f"请求失败：{exc}"}
+
+
+@router.post("/model-probe")
+def diagnostics_model_probe(
+    req: ModelProbeRequest,
+    authorization: str = Header(None),
+    session: Session = Depends(get_session),
+) -> Dict[str, Any]:
+    """测试页面中尚未保存的一组模型配置；API Key 只用于本次上游请求。"""
+    get_current_user(authorization, session)
+    prompt = (req.prompt or "回复一个字：好").strip() or "回复一个字：好"
+    return _probe_model(
+        req.name.strip() or "临时模型",
+        req.model.strip(),
+        req.base_url.strip(),
+        req.api_key.strip(),
+        prompt,
+        req.provider,
+    )
 
 
 @router.post("/models")
