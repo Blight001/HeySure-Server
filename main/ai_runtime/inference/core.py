@@ -3,6 +3,7 @@ IS_ROUTER_ENTRY = False
 import asyncio
 import base64
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -135,6 +136,17 @@ def _ai_short_base_url(base_url: str) -> str:
     if path:
         return f"{parsed.netloc}{path}"
     return parsed.netloc
+
+
+def _heysure_provider_session_id(
+    user_id: int,
+    ai_config_id: Optional[int],
+    ai_kind: str,
+    session_id: str,
+) -> str:
+    """Build an anonymous stable identifier for stateful local gateways."""
+    raw = f"{int(user_id)}\0{ai_config_id or 0}\0{ai_kind or ''}\0{session_id or ''}"
+    return "heysure-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _ai_debug_log(message: str) -> None:
@@ -1585,7 +1597,16 @@ def _run_worker_impl(
                         convo[i] = {"role": "user", "content": model_user_content}
                         break
 
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                # Unknown HTTP headers are ignored by ordinary providers, while
+                # HeySure's local CLI gateways use this anonymous value to map
+                # full OpenAI requests onto one provider-side conversation.
+                "X-HeySure-Session-ID": _heysure_provider_session_id(
+                    user_id, ai_config_id, ai_kind, session_id
+                ),
+            }
             last_rejected_tool_sig = ""
             rejected_repeat = 0
             consecutive_ai_errors = 0
