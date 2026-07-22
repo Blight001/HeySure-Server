@@ -33,7 +33,7 @@ DEFAULT_MODEL_PRESETS = """[{"id":"deepseek-chat","name":"DeepSeek Chat","api_ke
 
 DEFAULT_MCP_NAMESPACE_HINTS = """{"mcp":"MCP 自省入口。使用 mcp.describe+tool 发现工具并读取参数 schema。","task":"后台任务管理。task.manage(action=list/create/update/delete) 需要绑定图书馆；复杂任务的执行计划统一使用 todo.manage。","todo":"统一计划管理。todo.manage(action=create/get/edit/delete) 创建、查看、推进或删除计划；edit 更新当前阶段状态，最后阶段更新后系统自动收尾。","workspace":"工作区。workspace.run+command 执行命令和文件操作；联网查询用 workspace.search。","admin":"系统总览（图书馆工具，需绑定图书馆）。","prompt":"Prompt 管理（图书馆工具，需绑定图书馆）。","device_mcp":"设备 MCP 自迭代（图书馆工具，需绑定图书馆）。","conversation":"会话管理。","knowledge":"knowledge.search 检索知识；knowledge.manage 管理图书馆内容（需绑定图书馆）。","ai":"AI 间通信。","user":"用户通知。","web":"联网搜索。","memory":"长期记忆。","project":"项目管理。"}"""
 
-DEFAULT_MCP_DYNAMIC_RULE = """工具目录不再内置于系统提示：用户在前端勾选工坊/工具组后，当轮用户消息会附带[本轮可用 MCP 工具]目录（名称 + 简介），模型据此直接定位。未附带目录或需要参数时，用 mcp.describe+tool（支持 tool 单个、tools 批量或 query 关键词搜索）发现工具并取 schema；被加载的目标工具会在随后轮次直接可调用。
+DEFAULT_MCP_DYNAMIC_RULE = """工具目录不再内置于系统提示：用户在前端勾选工坊/工具组后，当轮用户消息会附带[本轮可用 MCP 工具]目录（名称 + 简介），模型据此直接定位。已暴露参数 schema 的工具应直接调用；只有目标工具未暴露 schema、目录未附带或参数确实不明确时，才用 mcp.describe+tool（支持 tool 单个、tools 批量或 query 关键词搜索）发现工具或补充 schema。不要在任务开始时枚举、摸底全部 MCP；被加载的目标工具会在随后轮次直接可调用。
 
 **反幻觉执行规则（最高优先级）**：凡用户请求包含查看、读取、搜索、创建、修改、删除、运行、点击、打开、发送、检查、确认状态等可由 MCP 完成的动作，你的下一步必须是输出 `<mcp-call>` 调用真实工具；不得只用普通文本编造执行过程或结果。没有成功的工具返回，就只能说“尚未执行/无法确认”，并继续调用合适工具或明确说明阻塞原因。
 
@@ -50,8 +50,8 @@ DEFAULT_MCP_CALL_METHOD = """When you want to call a tool, output one or more bl
 Rules:
 - Explain your intent in normal text first when helpful, then emit the MCP call block.
 - If the user asks for any real operation (inspect/read/search/create/update/delete/run/click/open/send/check/verify), the next assistant step must include an actual <mcp-call>. Plain text is allowed only for clarification, refusal, or final summary after tool results.
-- Never narrate an action as completed without a successful MCP result. If no suitable tool is known, call mcp.describe+tool with a tool/tools/query request first.
-- Do not assume tool arguments. The [本轮可用 MCP 工具] section attached to the current user message (when present) lists the callable tools; use mcp.describe+tool (tool / tools / query) to discover tools and load the schema for the ones you need, then call them.
+- Never narrate an action as completed without a successful MCP result. If no suitable tool is known, use mcp.describe+tool with a focused tool/tools/query request; do not enumerate the whole MCP catalog.
+- Do not assume tool arguments. The [本轮可用 MCP 工具] section attached to the current user message (when present) lists the callable tools. Call tools whose schema is already exposed directly; use mcp.describe+tool (tool / tools / query) only when the target schema is unavailable or genuinely unclear.
 - Use workspace.run+command for all workspace file operations (reading, listing, writing, editing, deleting) as well as command execution and diagnostics — run the appropriate shell commands (e.g. type/cat, dir/ls, redirection or scripts to write and edit files).
 - Use admin.* tools when managing connected agents.
 - Only fall back to legacy File/Create File/Delete File/Run Command formats if MCP is unavailable."""

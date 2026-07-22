@@ -771,6 +771,11 @@ async def handle_task_progress(data: Dict[str, Any]) -> None:
     await _emit_to_user(ctx, "device:task_progress", {
         "taskId": data.get("taskId"),
         "deviceId": ctx.get("device_id"),
+        "sessionId": ctx.get("session_id"),
+        "aiConfigId": ctx.get("ai_config_id"),
+        "aiKind": ctx.get("ai_kind") or "assistant",
+        "tool": ctx.get("tool") or data.get("tool") or "",
+        "progress": data.get("progress"),
         "message": str(data.get("message") or ""),
         "updatedAt": time.time(),
     })
@@ -855,6 +860,9 @@ async def handle_task_result(data: Dict[str, Any]) -> bool:
     await _emit_to_user(ctx, "device:task_result", {
         "taskId": task_id,
         "deviceId": device_id,
+        "sessionId": ctx.get("session_id"),
+        "aiConfigId": ctx.get("ai_config_id"),
+        "aiKind": ctx.get("ai_kind") or "assistant",
         "success": success,
         "tool": tool,
         "summary": summary,
@@ -905,6 +913,10 @@ async def handle_task_error(data: Dict[str, Any]) -> bool:
     await _emit_to_user(ctx, "device:task_error", {
         "taskId": task_id,
         "deviceId": device_id,
+        "sessionId": ctx.get("session_id"),
+        "aiConfigId": ctx.get("ai_config_id"),
+        "aiKind": ctx.get("ai_kind") or "assistant",
+        "tool": str(ctx.get("tool") or data.get("tool") or ""),
         "error": error,
         "updatedAt": time.time(),
     })
