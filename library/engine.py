@@ -104,8 +104,8 @@ def ensure_presence_for_user(user_id) -> None:
             online=True,
             tool_defs=tool_defs_map(),
         )
-        # Reconcile for workshop builtin (any device type policy): always sets
-        # full current caps so new MCPs auto-default checked/granted.
+        # Initialize first-time workshop scope to all tools; later ensures keep
+        # the operator's saved subset (including an explicit empty selection).
         reconcile_scope_with_capabilities(uid, device_id, caps, ai_config_id=None, device_type="workshop")
         # 工具箱：只在新建 AI 时默认绑定（见 ai_config_routes / ai_service），
         # 之后完全尊重用户在作坊/AI配置面板的绑定/解绑操作，不再做全量自愈补绑。

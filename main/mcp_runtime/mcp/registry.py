@@ -83,7 +83,8 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="workspace.run+command",
         description=(
-            "执行 shell 命令，用于开发或检查工作区。默认在当前 AI 可访问的工作区目录、使用正常进程环境运行。"
+            "执行 shell 命令，用于开发或检查 AI 工作区。此工具运行在工作区执行环境中，不等同于另行连接的服务器或设备；"
+            "操作受管服务器/设备路径时应改用对应端点的 shell 工具。默认在当前 AI 可访问的工作区目录、使用正常进程环境运行。"
             "普通成员只能在自己的 AI 工作区目录内选择 cwd；管理者可使用更宽的用户工作区。"
             "支持显式 shell=cmd/powershell/pwsh，或用 argv + shell=none 绕过 shell 转义。"
             "需要隔离环境时，设置 sandbox_env。"
@@ -104,7 +105,7 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "可选，工作目录。相对路径相对工作区解析；也允许绝对路径。",
+                    "description": "可选，工作区执行环境中的目录。相对路径相对 AI 工作区解析；绝对路径也必须存在于该执行环境，不能填写另一台服务器/设备上的主机路径。",
                 },
                 "timeout": {
                     "type": "integer",

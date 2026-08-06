@@ -60,12 +60,25 @@ def _resolve_command_cwd(project_root: str, cwd: Optional[str], *, strict_worksp
         if strict_workspace:
             resolved = _ensure_inside_workspace(project_root, resolved)
         if not os.path.isdir(resolved):
-            raise HTTPException(status_code=400, detail="cwd does not exist or is not a directory")
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"cwd does not exist in the workspace execution environment: {resolved}. "
+                    f"This tool runs in the AI workspace rooted at {os.path.abspath(project_root)}, "
+                    "not on a separately connected server/device; use that server/device's shell tool for host paths."
+                ),
+            )
         return resolved
 
     resolved = safe_join(project_root, cwd_text)
     if not os.path.isdir(resolved):
-        raise HTTPException(status_code=400, detail="cwd does not exist or is not a directory")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"cwd does not exist in the workspace execution environment: {resolved}. "
+                f"Workspace root: {os.path.abspath(project_root)}."
+            ),
+        )
     return _ensure_inside_workspace(project_root, resolved)
 
 

@@ -9,15 +9,13 @@ Scope is keyed by ``(user_id, device_id)`` — each individual connected agent h
 its own allow-list.
 
 A missing row means the agent has never had a scope initialized (treated as
-closed / no tools at runtime dispatch). On (re)connect / push of dynamic tools
-for a real endpoint device (any type), ``reconcile_scope_with_capabilities``
-(re)initializes the scope to the *full* current live capabilities. This makes
-newly connected devices (and devices after new MCPs are added) default to *all*
-MCPs checked/granted in the Workshop 作坊 (instead of missing new tools).
-Subsequent reconnects now expand to include any newly reported tools.
+closed / no tools at runtime dispatch). On first connect, ``reconcile_scope_with_capabilities`` initializes the scope
+to the full live capability set. On later reconnects it preserves the user's
+saved allow-list and only removes capabilities that no longer exist.
 
 ``get_scope`` returns ``None`` only for "no record ever"; a row with ``[]``
-means explicitly none allowed. User saves can narrow; next (re)connect re-defaults to full per current policy.
+means explicitly none allowed. User saves therefore survive refreshes and
+reconnects, including an explicit "全不选" selection.
 """
 
 import json
@@ -143,15 +141,12 @@ def reconcile_scope_with_capabilities(
     ai_config_id=None,
     device_type="",
 ) -> Optional[Set[str]]:
-    """(Re)initialize MCP scope to the full current live capabilities for the agent.
+    """Reconcile a saved scope with the agent's current capabilities.
 
-    Called on (re)connect and after dynamic tool pushes (from any device type:
-    desktop/browser/android/workshop/toolbox/custom). If no prior row, creates
-    full. For existing rows, *replaces* with full live set (instead of only
-    intersecting). This ensures:
-    - New devices default to all MCPs checked in 作坊.
-    - Adding new MCPs + reconnect (or dynamic push) auto-includes them.
-    User can still narrow via editor save; next (re)connect re-defaults to full.
+    A first-time device defaults to all reported tools. Existing rows preserve
+    the user's explicit selection (including an empty set) and only prune tools
+    the device no longer reports. This function is called on reconnect and after
+    dynamic tool pushes, so it must never widen an already-saved scope.
     """
     uid = _coerce_int(user_id)
     aid = _device_id(device_id)
@@ -175,9 +170,10 @@ def reconcile_scope_with_capabilities(
                 return set_scope(uid, aid, live_caps, ai_config_id=cfg, device_type=atype)
             return None
 
-        # Always expand to full current capabilities (new MCPs auto-included
-        # regardless of prior saved subset). Only prune tools no longer present.
-        reconciled = sorted(live_caps) if live_caps else []
+        # Preserve the operator's saved subset, including an explicit empty
+        # selection. Reconnect/refresh may prune stale tools but must not grant
+        # tools that the operator did not select.
+        reconciled = sorted(_decode_tools(row.tools_json) & live_caps)
         if set(reconciled) != _decode_tools(row.tools_json):
             row.tools_json = json.dumps(reconciled, ensure_ascii=False)
             row.updated_at = time.time()

@@ -15,6 +15,25 @@ class WorkspaceFileToolTests(unittest.TestCase):
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
 
+    def test_missing_absolute_cwd_explains_execution_environment(self):
+        missing = os.path.join(self.root, "missing-host-path")
+        with self.assertRaises(Exception) as raised:
+            workspace._resolve_command_cwd(self.root, missing)
+
+        detail = str(getattr(raised.exception, "detail", raised.exception))
+        self.assertIn(missing, detail)
+        self.assertIn(self.root, detail)
+        self.assertIn("workspace execution environment", detail)
+        self.assertIn("server/device", detail)
+
+    def test_missing_relative_cwd_reports_resolved_workspace_path(self):
+        with self.assertRaises(Exception) as raised:
+            workspace._resolve_command_cwd(self.root, "missing-relative")
+
+        detail = str(getattr(raised.exception, "detail", raised.exception))
+        self.assertIn(os.path.join(self.root, "missing-relative"), detail)
+        self.assertIn("Workspace root", detail)
+
     def test_run_command_returns_structured_stderr(self):
         result = workspace._run_command(1, {
             "command": "python -c \"import sys; sys.stderr.write('bad'); sys.exit(3)\"",
