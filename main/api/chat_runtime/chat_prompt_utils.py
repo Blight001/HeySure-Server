@@ -538,6 +538,12 @@ def _merge_global_mcp_method(
     base = _strip_legacy_global_mcp_block(system_prompt)
     method = _inject_mcp_placeholder_with_hints(str(global_mcp_method or "").strip(), cfg, namespace_hints)
     method = str(method or "").replace("\r\n", "\n").replace("\r", "\n")
+    # Persisted templates from the former client-catalog design must not claim
+    # that tool metadata is attached to the user message.
+    method = method.replace(
+        "The [本轮可用 MCP 工具] section attached to the current user message (when present) lists the callable tools.",
+        "The [动态 MCP 说明] section in the system prompt lists the callable tools.",
+    )
     if not method:
         return base
     # The batch-call rule is injected by build_runtime_system_prompt_and_tools,

@@ -61,6 +61,50 @@ def active_runs() -> Dict[str, Any]:
     }
 
 
+def wait_for_active_runs(timeout_seconds: float) -> list[str]:
+    """Drain in-flight runs during graceful shutdown.
+
+    The dispatcher has already stopped claiming new rows. Completed inference
+    and MCP boundaries remain uninterrupted; only runs still active after the
+    deadline are returned to the durable queue for the next process.
+    """
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        with _active_runs_lock:
+            if not _active_run_ids:
+                return []
+        time.sleep(0.25)
+    with _active_runs_lock:
+        return sorted(_active_run_ids)
+
+
+def requeue_runs(run_ids: list[str]) -> list[str]:
+    """Return this instance's unfinished runs to Postgres before process exit."""
+    wanted = {str(run_id) for run_id in run_ids if str(run_id)}
+    if not wanted:
+        return []
+    now = time.time()
+    recovered: list[str] = []
+    with Session(engine) as session:
+        rows = session.exec(
+            select(ChatRun).where(
+                ChatRun.run_id.in_(wanted),
+                ChatRun.status == "running",
+            )
+        ).all()
+        for row in rows:
+            row.status = "queued"
+            row.error_message = None
+            row.finished_at = None
+            row.heartbeat_at = None
+            row.updated_at = now
+            session.add(row)
+            recovered.append(row.run_id)
+        if recovered:
+            session.commit()
+    return recovered
+
+
 def notify_queue(run_id: str) -> None:
     """Best-effort Postgres NOTIFY after a queued run is committed.
 
@@ -308,7 +352,7 @@ def run_dispatcher_forever(stop_evt: Optional[threading.Event] = None) -> None:
     try:
         reaped = heartbeat.reap_stale_runs()
         if reaped:
-            logger.warning(f"boot watchdog reaped {len(reaped)} stale runs")
+            logger.warning(f"boot recovery requeued {len(reaped)} stale runs")
     except Exception:
         logger.exception("boot reap failed")
     _listen_postgres(evt)

@@ -4,8 +4,8 @@ When a worker is alive it must call :func:`tick` periodically (≤ every few
 seconds) on the run it is processing. The watchdog runs in api-gateway and
 periodically scans for rows that claim ``status='running'`` but have not
 been touched for longer than :data:`STALE_AFTER_SECONDS`. Those rows are
-marked ``error`` with ``runtime_lost`` so the UI stops waiting forever
-when the worker process crashed.
+returned to ``queued`` so another ai-runtime instance can resume them from
+persisted chat/MCP history after a process restart or crash.
 """
 
 from __future__ import annotations
@@ -38,10 +38,16 @@ def tick(run_id: str) -> None:
 
 
 def reap_stale_runs() -> List[str]:
-    """Find runs whose heartbeat has gone silent and mark them errored.
+    """Return runs with a silent heartbeat to the durable queue.
 
-    Returns the list of ``run_id`` strings that were just reaped (useful for
-    logging and for ``ai-runtime`` startup recovery sweeps).
+    The inference loop persists assistant tool calls and MCP results as chat
+    messages at every completed tool boundary. Re-running the same ``ChatRun``
+    therefore rebuilds context from the last durable boundary instead of losing
+    the conversation. A crash during an in-flight external side effect still
+    cannot provide exactly-once semantics; graceful shutdown draining minimizes
+    that narrow window.
+
+    Returns the run IDs that were requeued.
     """
     now = time.time()
     threshold = now - STALE_AFTER_SECONDS
@@ -53,9 +59,10 @@ def reap_stale_runs() -> List[str]:
         for row in rows:
             last = row.heartbeat_at or row.started_at or row.updated_at or row.created_at
             if last is None or last < threshold:
-                row.status = "error"
-                row.error_message = (row.error_message or "") or "runtime_lost"
-                row.finished_at = now
+                row.status = "queued"
+                row.error_message = None
+                row.finished_at = None
+                row.heartbeat_at = None
                 row.updated_at = now
                 session.add(row)
                 reaped.append(row.run_id)

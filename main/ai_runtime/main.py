@@ -39,7 +39,7 @@ register_restart_command([sys.executable, "-m", "ai_runtime.main"])
 logger = logging.getLogger(__name__)
 
 from api.database import create_db_and_tables  # noqa: E402
-from ai_runtime.worker import run_dispatcher_forever  # noqa: E402
+from ai_runtime.worker import requeue_runs, run_dispatcher_forever, wait_for_active_runs  # noqa: E402
 
 
 def main() -> int:
@@ -78,6 +78,20 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_signal)
 
     run_dispatcher_forever(stop_evt)
+
+    # Stop claiming first, then let current conversations finish naturally.
+    # Docker grants five minutes (see stop_grace_period); reserve the final
+    # minute to put unusually long runs back into Postgres before SIGKILL.
+    logger.info("dispatcher stopped; draining active conversations")
+    unfinished = wait_for_active_runs(240.0)
+    if unfinished:
+        recovered = requeue_runs(unfinished)
+        logger.warning(
+            "shutdown drain deadline reached; requeued %d unfinished runs: %s",
+            len(recovered), recovered,
+        )
+    else:
+        logger.info("all active conversations drained")
     return 0
 
 

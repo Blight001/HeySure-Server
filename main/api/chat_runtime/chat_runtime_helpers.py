@@ -22,6 +22,7 @@ from .chat_prompt_utils import (
     _append_prompt_section,
     _clear_run_live_text,
     _emit_run_done,
+    _build_dynamic_mcp_explanation,
     _filter_tools_for_current_bindings,
     _strip_prompt_section,
     _strip_runtime_injected_sections,
@@ -132,10 +133,8 @@ def _resolve_ai_runtime(
         )
     return cfg, api_key, base_url, model, system_prompt
 
-# Web 前端勾选工坊/工具组后，会把该组 MCP 工具目录以这个段标题追加进当轮用户
-# 消息（model_content），随消息动态携带。系统提示不再注入 [动态 MCP 说明]
-# 目录（见 build_runtime_system_prompt_and_tools 内的说明）；模型侧的工具发现
-# 依赖该段 + mcp.describe+tool（tool / tools / query）。
+# 历史客户端曾把工具目录附加到用户 model_content。保留标记常量仅供兼容旧消息；
+# 新版目录由 build_runtime_system_prompt_and_tools 注入系统 Prompt。
 CLIENT_MCP_CATALOG_MARKER = "[本轮可用 MCP 工具]"
 
 def build_runtime_system_prompt_and_tools(
@@ -157,9 +156,9 @@ def build_runtime_system_prompt_and_tools(
     endpoint (``gateway``) call this, so the prompt shown to the user is assembled by
     the exact same logic the model receives — same MCP discovery hint, same task
     sections. This prevents the two paths from drifting. Note: the full MCP tool
-    catalog ([动态 MCP 说明]) is no longer injected into the system prompt; the web
-    client attaches the checked tool groups' catalog to the current user message
-    instead (see ``CLIENT_MCP_CATALOG_MARKER``).
+    catalog ([动态 MCP 说明]) is injected here as a system section. The web client
+    does not append it to user ``model_content``; the same section is therefore
+    visible in the live front-prompt preview and in the real model input.
 
     ``cfg`` / ``base_system_prompt`` / ``task_payload`` may be passed in by a caller
     that already resolved them (the inference loop) to avoid recomputation; when
@@ -217,7 +216,8 @@ def build_runtime_system_prompt_and_tools(
     effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, uid))
     # Endpoint (desktop / browser) tools are governed by the per-(AI, agent-type)
     # permission scope, not cfg.mcp_tools.
-    effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, uid))
+    endpoint_allowed = set(endpoint_tools_for_config(ai_config_id, uid))
+    effective_tool_allowlist.update(endpoint_allowed)
     if ai_config_id is not None:
         # System-injected AI-to-AI messages must remain answerable even when a
         # task or config narrows the general MCP tool allowlist.
@@ -247,7 +247,8 @@ def build_runtime_system_prompt_and_tools(
                     with_workspace_read_by_name_compat(effective_tool_allowlist)
                 )
                 effective_tool_allowlist.update(endpoint_bridge_tools_for_config(ai_config_id, uid))
-                effective_tool_allowlist.update(endpoint_tools_for_config(ai_config_id, uid))
+                endpoint_allowed = set(endpoint_tools_for_config(ai_config_id, uid))
+                effective_tool_allowlist.update(endpoint_allowed)
                 if ai_config_id is not None:
                     effective_tool_allowlist.add("message.send+to")
             try:
@@ -341,9 +342,21 @@ def build_runtime_system_prompt_and_tools(
     # 剥离历史可能残留的 [当前工作模式] 段（旧设计曾尝试 section 注入），让存量人格就地自愈。
     system_prompt = _strip_prompt_section(system_prompt, "当前工作模式")
 
-    # 这里保留剥离逻辑，让历史注入过目录的存量 prompt / 人格文本就地自愈。
+    # 清除人格或旧运行时残留，再按本轮真实权限动态注入工具目录。该逻辑同时供
+    # AI Runtime 与 /system-prompt-preview 使用，保证下拉框所见即模型所得。
     system_prompt = _strip_prompt_section(system_prompt, "动态 MCP 说明")
     system_prompt = _strip_prompt_section(system_prompt, "可用MCP工具")
+    if cfg and getattr(cfg, "mcp_enabled", False) and effective_tool_allowlist:
+        mcp_catalog = _build_dynamic_mcp_explanation(
+            effective_tool_allowlist, endpoint_allowed, uid, ai_config_id
+        )
+        system_prompt = _append_prompt_section(
+            system_prompt, "动态 MCP 说明",
+            "以下是当前 AI 可调用的 MCP 工具目录（名称 + 简介，`!` 表示有副作用）。\n"
+            "已提供参数 schema 的工具应直接调用；仅当目标工具未暴露 schema 或参数确实不明确时，"
+            "才用 mcp.describe+tool（tool / tools / query）查询。不要在任务开始时枚举或摸底全部 MCP。\n\n"
+            + mcp_catalog,
+        )
 
     # 批量调用规则。人格文件只教了 <mcp-call> 的格式，没说一轮可以发多个块；
     # 而 worker 现在会把一轮里的全部调用当作一批顺序执行完再回模型。规则必须

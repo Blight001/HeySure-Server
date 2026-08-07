@@ -1496,10 +1496,8 @@ def _run_worker_impl(
             is_task_runtime = bool(task_payload) or str(session_id or "").startswith("session_task_")
 
             # Single source of truth shared with the live /system-prompt-preview
-            # endpoint: identical MCP discovery hint + task sections, so the prompt
-            # shown to the user is exactly the prompt the model receives. The MCP
-            # tool catalog itself is no longer injected here — the web client
-            # attaches it per-turn inside the user message (CLIENT_MCP_CATALOG_MARKER).
+            # endpoint: identical MCP catalog, discovery guidance and task sections,
+            # so the prompt shown to the user is exactly the prompt the model receives.
             system_prompt, effective_tool_allowlist = build_runtime_system_prompt_and_tools(
                 bg,
                 user,
