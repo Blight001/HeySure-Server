@@ -420,6 +420,43 @@ async def resume_device_dispatch_queue(device_id: str) -> Optional[str]:
     return task_id
 
 
+async def redeliver_dispatch(task_id: str) -> bool:
+    """Best-effort re-emit of one persisted active dispatch.
+
+    Workflow recovery uses this after a crash in the small window between the
+    dispatch-row commit and marking its step as waiting. Endpoint agents dedupe
+    by taskId, so sending the same payload is safe.
+    """
+    with Session(engine) as session:
+        row = session.exec(
+            select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
+        ).first()
+        if not row or row.status not in {"pending", "queued"}:
+            return False
+        if row.status == "queued":
+            return True
+        ctx = _context_from_dispatch_row(row)
+    target_sid = _find_agent_sid(str(ctx["device_id"]))
+    if not target_sid:
+        return False
+    _PENDING_DISPATCHES[task_id] = ctx
+    await sio.emit(
+        "task:dispatch",
+        {
+            "taskId": task_id,
+            "userId": ctx["user_id"],
+            "aiConfigId": ctx["ai_config_id"],
+            "sessionId": ctx["session_id"],
+            "instruction": ctx["instruction"],
+            "tool": ctx["tool"],
+            "args": ctx["args"],
+            "allowedTools": [ctx["tool"]] if ctx["tool"] else [],
+        },
+        to=target_sid,
+    )
+    return True
+
+
 async def dispatch_task_to_agent(
     *,
     device_id: str,
@@ -436,13 +473,14 @@ async def dispatch_task_to_agent(
     wait_for_result: bool = False,
     timeout_seconds: int = 120,
     suppress_session_message: bool = False,
+    task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     target_sid = _find_agent_sid(device_id)
     if not target_sid:
         return {"success": False, "error": f"Agent not connected: {device_id}"}
 
     purge_stale_dispatches()
-    task_id = f"atask_{uuid.uuid4().hex[:12]}"
+    task_id = str(task_id or f"atask_{uuid.uuid4().hex[:12]}")
     payload = {
         "taskId": task_id,
         "userId": user_id,
@@ -843,6 +881,22 @@ async def handle_task_result(data: Dict[str, Any]) -> bool:
         result=result,
         error=None if success else summary or "agent reported failure",
     )
+    try:
+        from api.core.settings import settings
+        if settings.workflow_scheduler_enabled:
+            from api.services.workflows.run_service import apply_step_result
+            with Session(engine) as session:
+                apply_step_result(
+                    session,
+                    dispatch_task_id=task_id,
+                    success=success,
+                    result=result,
+                    error=None if success else summary or "agent reported failure",
+                )
+    except Exception:
+        # The periodic reconciler is the durable fallback; never break the
+        # device ACK path because workflow advancement hit a transient error.
+        logger.exception("workflow result hook failed task=%s", task_id)
     waiter = _PENDING_DISPATCH_WAITERS.get(task_id)
     waiter_payload = {
         "success": success,
@@ -897,6 +951,19 @@ async def handle_task_error(data: Dict[str, Any]) -> bool:
         success=False,
         error=error,
     )
+    try:
+        from api.core.settings import settings
+        if settings.workflow_scheduler_enabled:
+            from api.services.workflows.run_service import apply_step_result
+            with Session(engine) as session:
+                apply_step_result(
+                    session,
+                    dispatch_task_id=task_id,
+                    success=False,
+                    error=error,
+                )
+    except Exception:
+        logger.exception("workflow error hook failed task=%s", task_id)
     waiter = _PENDING_DISPATCH_WAITERS.get(task_id)
     if waiter:
         loop = waiter.get("loop")

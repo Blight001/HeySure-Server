@@ -1,0 +1,109 @@
+"""Persistent workflow-card definitions and deterministic device runs."""
+
+import time
+from typing import Optional
+
+from sqlalchemy import Index, UniqueConstraint
+from sqlmodel import Field, SQLModel
+
+
+class WorkflowCard(SQLModel, table=True):
+    __table_args__ = (Index("ix_workflowcard_user_status", "user_id", "status"),)
+
+    id: str = Field(primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    name: str = Field(default="", index=True)
+    description: str = Field(default="")
+    status: str = Field(default="draft", index=True)
+    risk_level: str = Field(default="read_only")
+    tags_json: str = Field(default="[]")
+    draft_definition_json: str = Field(default="{}")
+    latest_version_id: Optional[str] = Field(default=None, index=True)
+    created_by: int = Field(foreign_key="user.id")
+    created_at: float = Field(default_factory=time.time)
+    updated_at: float = Field(default_factory=time.time, index=True)
+    deleted_at: Optional[float] = Field(default=None, index=True)
+
+
+class WorkflowCardVersion(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("card_id", "version_number", name="uq_workflowcardversion_card_number"),
+    )
+
+    id: str = Field(primary_key=True)
+    card_id: str = Field(foreign_key="workflowcard.id", index=True)
+    version_number: int = Field(index=True)
+    schema_version: int = Field(default=1)
+    definition_json: str
+    definition_digest: str = Field(index=True)
+    tool_contracts_json: str = Field(default="{}")
+    published_by: int = Field(foreign_key="user.id")
+    published_at: float = Field(default_factory=time.time)
+
+
+class WorkflowRun(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_workflowrun_user_idempotency"),
+        Index("ix_workflowrun_status_wakeup", "status", "next_wakeup_at"),
+        Index("ix_workflowrun_device_status", "device_id", "status"),
+    )
+
+    id: str = Field(primary_key=True)
+    card_id: str = Field(foreign_key="workflowcard.id", index=True)
+    card_version_id: str = Field(foreign_key="workflowcardversion.id", index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    actor_type: str = Field(default="user")
+    actor_id: str = Field(default="")
+    device_id: str = Field(index=True)
+    status: str = Field(default="pending", index=True)
+    current_step_id: str = Field(default="")
+    transition_count: int = Field(default=0)
+    input_json: str = Field(default="{}")
+    variables_json: str = Field(default="{}")
+    output_json: Optional[str] = None
+    error_json: Optional[str] = None
+    deadline_at: float = Field(index=True)
+    next_wakeup_at: Optional[float] = Field(default=None, index=True)
+    lock_version: int = Field(default=0)
+    idempotency_key: str = Field(index=True)
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    created_at: float = Field(default_factory=time.time, index=True)
+    updated_at: float = Field(default_factory=time.time)
+
+
+class WorkflowStepRun(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_id", "attempt", name="uq_workflowsteprun_attempt"),
+    )
+
+    id: str = Field(primary_key=True)
+    run_id: str = Field(foreign_key="workflowrun.id", index=True)
+    step_id: str = Field(index=True)
+    attempt: int = Field(default=1)
+    dispatch_task_id: str = Field(unique=True, index=True)
+    tool_name: str = Field(default="")
+    tool_schema_digest: str = Field(default="")
+    status: str = Field(default="dispatch_pending", index=True)
+    arguments_redacted_json: str = Field(default="{}")
+    arguments_json: str = Field(default="{}")
+    result_projection_json: Optional[str] = None
+    result_ref: Optional[str] = None
+    error_json: Optional[str] = None
+    started_at: Optional[float] = None
+    deadline_at: float = Field(index=True)
+    finished_at: Optional[float] = None
+
+
+class WorkflowConfirmation(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    run_id: str = Field(foreign_key="workflowrun.id", index=True)
+    step_id: str = Field(index=True)
+    status: str = Field(default="pending", index=True)
+    risk_summary: str = Field(default="")
+    requested_user_id: int = Field(foreign_key="user.id", index=True)
+    decided_by: Optional[int] = Field(default=None, foreign_key="user.id")
+    decision: Optional[str] = None
+    expires_at: float = Field(index=True)
+    created_at: float = Field(default_factory=time.time)
+    decided_at: Optional[float] = None

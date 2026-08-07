@@ -34,6 +34,7 @@ from api.models import AssistantAIConfig
 from api.sio import sio
 from api.socket_events import register_agent_socket_events
 from api.runtime.internal_http import require_internal_token
+from api.core.settings import settings
 
 
 logger = logging.getLogger(__name__)
@@ -111,13 +112,23 @@ async def _lifespan(app: FastAPI):
         for bot in iter_bots()
     ]
     sweep_task = asyncio.create_task(_orphan_sweeper())
+    workflow_task = None
+    if settings.workflow_scheduler_enabled:
+        from connector_runtime.dispatch.workflow_scheduler import run_workflow_scheduler
+
+        workflow_task = asyncio.create_task(
+            run_workflow_scheduler(stop_event), name="workflow-scheduler"
+        )
     bot_channels = ",".join(bot.channel for bot in iter_bots()) or "no bots"
     logger.info(f"ready (Socket.IO + /internal/* + bot keepalive: {bot_channels})")
     try:
         yield
     finally:
         stop_event.set()
-        for task in (*keepalive_tasks, sweep_task):
+        background_tasks = [*keepalive_tasks, sweep_task]
+        if workflow_task is not None:
+            background_tasks.append(workflow_task)
+        for task in background_tasks:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task

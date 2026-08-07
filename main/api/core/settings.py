@@ -182,6 +182,21 @@ class Settings(BaseSettings):
         default=10 * 1024 * 1024,
         description="Maximum size accepted by the temporary image upload endpoints.",
     )
+
+    # ---- Workflow cards -----------------------------------------------------
+
+    workflow_cards_enabled: bool = Field(
+        default=False,
+        description="Expose workflow-card mutation/run APIs. Read-only model imports remain safe when disabled.",
+    )
+    workflow_scheduler_enabled: bool = Field(
+        default=False,
+        description="Run the persistent workflow advancement loop in connector-runtime.",
+    )
+    workflow_scheduler_interval_seconds: float = Field(
+        default=1.0,
+        description="Compensation scan interval for ready workflow runs and device results.",
+    )
     # ---- Auth / Socket.IO ----------------------------------------------------
 
     jwt_secret: str = Field(

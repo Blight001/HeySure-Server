@@ -74,6 +74,13 @@ from .project import EvolutionProject, EvolutionProjectCreate, EvolutionProjectU
 from .system import EmailVerificationCode, SystemSetting
 from .user import Token, User, UserCreate, UserLogin, UserRead, UserUpdate
 from .world_meta import WorldActorMeta
+from .workflow import (
+    WorkflowCard,
+    WorkflowCardVersion,
+    WorkflowConfirmation,
+    WorkflowRun,
+    WorkflowStepRun,
+)
 
 __all__ = [
     # defaults
@@ -148,4 +155,10 @@ __all__ = [
     # bots (unified session route, channel-keyed)
     "BotSessionRoute",
     "BotUserCursor",
+    # deterministic workflow cards
+    "WorkflowCard",
+    "WorkflowCardVersion",
+    "WorkflowConfirmation",
+    "WorkflowRun",
+    "WorkflowStepRun",
 ]
