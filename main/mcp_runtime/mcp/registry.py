@@ -29,6 +29,20 @@ from tools.knowledge import _knowledge_manage, KNOWLEDGE_MANAGE_SCHEMA
 from tools.knowledge_search import _knowledge_search, KNOWLEDGE_SEARCH_SCHEMA
 from tools.web_search import _web_search
 from tools.device_mcp import _device_mcp_manage, DEVICE_MCP_MANAGE_SCHEMA
+from tools.automation import (
+    _automation_cancel,
+    _automation_get,
+    _automation_list,
+    _automation_manage,
+    _automation_run,
+    _automation_status,
+    AUTOMATION_CANCEL_SCHEMA,
+    AUTOMATION_GET_SCHEMA,
+    AUTOMATION_LIST_SCHEMA,
+    AUTOMATION_MANAGE_SCHEMA,
+    AUTOMATION_RUN_SCHEMA,
+    AUTOMATION_STATUS_SCHEMA,
+)
 
 def _register_builtin_tools(registry: MCPRegistry) -> None:
     """Populate ``registry`` with all builtin tools.
@@ -324,6 +338,46 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         ),
         input_schema=DEVICE_MCP_MANAGE_SCHEMA,
         handler=_device_mcp_manage,
+        destructive=True,
+    ))
+
+    registry.register(MCPTool(
+        name="automation.list",
+        description="按目标、标签或设备兼容性检索已发布的自动化卡片精简目录。",
+        input_schema=AUTOMATION_LIST_SCHEMA,
+        handler=_automation_list,
+    ))
+    registry.register(MCPTool(
+        name="automation.get",
+        description="读取自动化卡片的输入、风险、版本和设备兼容信息，不展开内部步骤。",
+        input_schema=AUTOMATION_GET_SCHEMA,
+        handler=_automation_get,
+    ))
+    registry.register(MCPTool(
+        name="automation.run",
+        description="在指定设备上启动已发布的自动化卡片；返回持久化运行 ID，不逐步调用模型。",
+        input_schema=AUTOMATION_RUN_SCHEMA,
+        handler=_automation_run,
+        destructive=True,
+    ))
+    registry.register(MCPTool(
+        name="automation.status",
+        description="查询一个自动化卡片运行的精简状态、输出或安全错误。",
+        input_schema=AUTOMATION_STATUS_SCHEMA,
+        handler=_automation_status,
+    ))
+    registry.register(MCPTool(
+        name="automation.cancel",
+        description="取消一个尚未结束的自动化卡片运行，晚到设备结果不会继续推进。",
+        input_schema=AUTOMATION_CANCEL_SCHEMA,
+        handler=_automation_cancel,
+        destructive=True,
+    ))
+    registry.register(MCPTool(
+        name="automation.manage",
+        description="创建、从结构化 MCP 轨迹生成草稿、修改、校验或发布自动化卡片；发布始终需要当前设备契约复核。",
+        input_schema=AUTOMATION_MANAGE_SCHEMA,
+        handler=_automation_manage,
         destructive=True,
     ))
 

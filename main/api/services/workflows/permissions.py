@@ -9,7 +9,9 @@ from jsonschema import Draft202012Validator
 from sqlmodel import Session, select
 
 from api.devices.mcp_permissions import get_scope
-from api.models import DevicePresence
+from api.core.settings import settings
+from api.models import DevicePresence, User, WorkflowCard, WorkflowCardVersion
+from api.services.device_tools.device_permission_policy import get_policy
 
 from .compiler import schema_digest
 
@@ -35,9 +37,23 @@ def validate_step_dispatch(
     user_id: int,
     device_id: str,
     tool_name: str,
+    expected_provider: str,
     expected_digest: str,
     arguments: Dict[str, Any],
+    confirmation_granted: bool = False,
+    card_id: str = "",
+    card_version_id: str = "",
 ) -> DevicePresence:
+    if not session.get(User, user_id):
+        raise WorkflowDispatchError("DEVICE_ACCESS_DENIED", "run user no longer exists")
+    if card_id or card_version_id:
+        card = session.get(WorkflowCard, card_id)
+        version = session.get(WorkflowCardVersion, card_version_id)
+        if (
+            not card or card.user_id != user_id or card.status not in {"published", "deprecated"}
+            or not version or version.card_id != card.id
+        ):
+            raise WorkflowDispatchError("CARD_VERSION_NOT_RUNNABLE", "card version is no longer runnable")
     device = session.exec(
         select(DevicePresence).where(
             DevicePresence.user_id == user_id,
@@ -48,21 +64,41 @@ def validate_step_dispatch(
         raise WorkflowDispatchError("DEVICE_ACCESS_DENIED", "device is not owned by the run user")
     if not device.online:
         raise WorkflowDispatchError("DEVICE_OFFLINE", "device is offline", retryable=True)
+    if expected_provider and str(device.device_type or "custom") != expected_provider:
+        raise WorkflowDispatchError(
+            "TOOL_SCHEMA_INCOMPATIBLE",
+            f"tool provider requires device type {expected_provider}, got {device.device_type or 'custom'}",
+        )
     definition = _tool_defs(device).get(tool_name)
     if not isinstance(definition, dict):
         raise WorkflowDispatchError("TOOL_NOT_AVAILABLE", f"tool is not currently reported: {tool_name}")
     scope = get_scope(user_id, device_id)
     if scope is None or tool_name not in scope:
         raise WorkflowDispatchError("TOOL_PERMISSION_DENIED", f"tool is not allowed on device: {tool_name}")
+    policy = get_policy(user_id, str(device.device_type or "custom"))
+    denied_tags = [
+        str(tag)
+        for tag in definition.get("permissions", [])
+        if policy.get(str(tag)) == "deny"
+    ]
+    if denied_tags:
+        raise WorkflowDispatchError(
+            "TOOL_PERMISSION_DENIED",
+            "device permission policy denies: " + ", ".join(sorted(denied_tags)),
+        )
     current_schema = definition.get("input_schema")
     current_schema = current_schema if isinstance(current_schema, dict) else {}
     if expected_digest and schema_digest(current_schema) != expected_digest:
         raise WorkflowDispatchError("TOOL_SCHEMA_INCOMPATIBLE", "tool input schema changed after card publication")
-    if bool(definition.get("destructive")):
+    if bool(definition.get("destructive")) and not confirmation_granted:
         raise WorkflowDispatchError(
             "CONFIRMATION_REQUIRED",
-            "destructive tools require the phase-three confirmation workflow",
+            "destructive tools require an approved workflow confirmation",
         )
+    if len(json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) > int(
+        settings.workflow_max_argument_bytes
+    ):
+        raise WorkflowDispatchError("ARGUMENT_VALIDATION_FAILED", "rendered arguments exceed size limit")
     errors = sorted(Draft202012Validator(current_schema).iter_errors(arguments), key=lambda item: list(item.path))
     if errors:
         message = errors[0].message

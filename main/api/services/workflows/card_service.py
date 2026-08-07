@@ -10,9 +10,11 @@ from typing import Any, Dict, Optional
 from sqlmodel import Session, select
 
 from api.devices.presence import tool_defs_for_agent
-from api.models import WorkflowCard, WorkflowCardVersion
+from api.models import DevicePresence, WorkflowCard, WorkflowCardVersion
 
 from .compiler import WorkflowValidationError, compile_definition, definition_digest, schema_digest
+
+
 
 
 def _json(value: Any) -> str:
@@ -112,13 +114,28 @@ def update_card(session: Session, row: WorkflowCard, body) -> WorkflowCard:
     return row
 
 
-def validate_card(row: WorkflowCard) -> Dict[str, Any]:
+def validate_card(row: WorkflowCard, session: Optional[Session] = None) -> Dict[str, Any]:
     compiled = compile_definition(_load(row.draft_definition_json, {}))
+    if session is not None and not row.latest_version_id and row.status != "validated":
+        row.status = "validated"
+        row.updated_at = time.time()
+        session.add(row)
+        session.commit()
     return {"valid": True, "digest": compiled["digest"], "warnings": compiled["warnings"]}
 
 
-def _snapshot_contracts(user_id: int, device_id: Optional[str], definition: Dict[str, Any]) -> Dict[str, Any]:
+def _snapshot_contracts(
+    session: Session, user_id: int, device_id: Optional[str], definition: Dict[str, Any]
+) -> Dict[str, Any]:
     live_defs = tool_defs_for_agent(user_id, device_id) if device_id else {}
+    device = session.exec(
+        select(DevicePresence).where(
+            DevicePresence.user_id == user_id,
+            DevicePresence.device_id == device_id,
+        )
+    ).first() if device_id else None
+    if device_id and not device:
+        raise WorkflowValidationError(["publish device is not owned by the current user"])
     contracts: Dict[str, Any] = {}
     errors = []
     for step_id, step in definition["steps"].items():
@@ -140,12 +157,16 @@ def _snapshot_contracts(user_id: int, device_id: Optional[str], definition: Dict
             errors.append(f"step {step_id}: publish requires device_id or toolRef.schemaDigest")
             continue
         ref["schemaDigest"] = supplied_digest or digest
+        if device:
+            ref["provider"] = str(device.device_type or "custom")
         contracts[name] = {
             "namespace": "device",
             "name": name,
             "schemaDigest": ref["schemaDigest"],
             "inputSchema": input_schema,
             "destructive": bool(live.get("destructive")) if live else False,
+            "provider": str(device.device_type or "custom") if device else str(ref.get("provider") or ""),
+            "publishedDeviceId": str(device_id or ""),
         }
     if errors:
         raise WorkflowValidationError(errors)
@@ -157,7 +178,7 @@ def publish_card(
 ) -> WorkflowCardVersion:
     compiled = compile_definition(_load(row.draft_definition_json, {}))
     definition = compiled["definition"]
-    contracts = _snapshot_contracts(user_id, device_id, definition)
+    contracts = _snapshot_contracts(session, user_id, device_id, definition)
     latest = session.exec(
         select(WorkflowCardVersion)
         .where(WorkflowCardVersion.card_id == row.id)

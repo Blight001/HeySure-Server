@@ -18,7 +18,7 @@ class WorkflowCard(SQLModel, table=True):
     risk_level: str = Field(default="read_only")
     tags_json: str = Field(default="[]")
     draft_definition_json: str = Field(default="{}")
-    latest_version_id: Optional[str] = Field(default=None, index=True)
+    latest_version_id: Optional[str] = Field(default=None, foreign_key="workflowcardversion.id", index=True)
     created_by: int = Field(foreign_key="user.id")
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time, index=True)
@@ -83,8 +83,11 @@ class WorkflowStepRun(SQLModel, table=True):
     attempt: int = Field(default=1)
     dispatch_task_id: str = Field(unique=True, index=True)
     tool_name: str = Field(default="")
+    tool_provider: str = Field(default="")
     tool_schema_digest: str = Field(default="")
     status: str = Field(default="dispatch_pending", index=True)
+    claim_owner: str = Field(default="", index=True)
+    claimed_at: Optional[float] = Field(default=None, index=True)
     arguments_redacted_json: str = Field(default="{}")
     arguments_json: str = Field(default="{}")
     result_projection_json: Optional[str] = None
@@ -99,11 +102,41 @@ class WorkflowConfirmation(SQLModel, table=True):
     id: str = Field(primary_key=True)
     run_id: str = Field(foreign_key="workflowrun.id", index=True)
     step_id: str = Field(index=True)
+    confirmation_type: str = Field(default="explicit")
     status: str = Field(default="pending", index=True)
     risk_summary: str = Field(default="")
+    next_step_id: str = Field(default="")
+    on_denied_step_id: str = Field(default="")
     requested_user_id: int = Field(foreign_key="user.id", index=True)
     decided_by: Optional[int] = Field(default=None, foreign_key="user.id")
     decision: Optional[str] = None
     expires_at: float = Field(index=True)
     created_at: float = Field(default_factory=time.time)
     decided_at: Optional[float] = None
+
+
+class WorkflowAuditEvent(SQLModel, table=True):
+    __table_args__ = (
+        Index("ix_workflowauditevent_run_created", "run_id", "created_at"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    run_id: Optional[str] = Field(default=None, foreign_key="workflowrun.id", index=True)
+    card_id: Optional[str] = Field(default=None, foreign_key="workflowcard.id", index=True)
+    card_version_id: Optional[str] = Field(default=None, foreign_key="workflowcardversion.id", index=True)
+    step_id: str = Field(default="", index=True)
+    dispatch_task_id: str = Field(default="", index=True)
+    device_id: str = Field(default="", index=True)
+    event_type: str = Field(index=True)
+    status_from: str = Field(default="")
+    status_to: str = Field(default="")
+    detail_json: str = Field(default="{}")
+    created_at: float = Field(default_factory=time.time, index=True)
+
+
+class WorkflowSchedulerHeartbeat(SQLModel, table=True):
+    instance_id: str = Field(primary_key=True)
+    heartbeat_at: float = Field(default_factory=time.time, index=True)
+    last_tick_duration_ms: int = Field(default=0)
+    last_error: str = Field(default="")

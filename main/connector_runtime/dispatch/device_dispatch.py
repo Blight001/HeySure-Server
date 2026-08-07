@@ -822,6 +822,12 @@ async def handle_task_progress(data: Dict[str, Any]) -> None:
 async def handle_task_result(data: Dict[str, Any]) -> bool:
     task_id = str(data.get("taskId") or "")
     if dispatch_has_recorded_outcome(task_id):
+        try:
+            from api.services.workflows.run_service import record_ignored_step_result
+            with Session(engine) as session:
+                record_ignored_step_result(session, task_id, reason="duplicate_terminal_result")
+        except Exception:
+            logger.exception("failed to audit duplicate workflow result task=%s", task_id)
         return False
     ctx = _resolve_result_context(data)
     device_id = str(ctx.get("device_id") or data.get("deviceId") or "unknown")
@@ -931,6 +937,12 @@ async def handle_task_result(data: Dict[str, Any]) -> bool:
 async def handle_task_error(data: Dict[str, Any]) -> bool:
     task_id = str(data.get("taskId") or "")
     if dispatch_has_recorded_outcome(task_id):
+        try:
+            from api.services.workflows.run_service import record_ignored_step_result
+            with Session(engine) as session:
+                record_ignored_step_result(session, task_id, reason="duplicate_terminal_error")
+        except Exception:
+            logger.exception("failed to audit duplicate workflow error task=%s", task_id)
         return False
     ctx = _resolve_result_context(data)
     device_id = str(ctx.get("device_id") or data.get("deviceId") or "unknown")

@@ -77,6 +77,8 @@ from .world_meta import WorldActorMeta
 from .workflow import (
     WorkflowCard,
     WorkflowCardVersion,
+    WorkflowAuditEvent,
+    WorkflowSchedulerHeartbeat,
     WorkflowConfirmation,
     WorkflowRun,
     WorkflowStepRun,
@@ -158,6 +160,8 @@ __all__ = [
     # deterministic workflow cards
     "WorkflowCard",
     "WorkflowCardVersion",
+    "WorkflowAuditEvent",
+    "WorkflowSchedulerHeartbeat",
     "WorkflowConfirmation",
     "WorkflowRun",
     "WorkflowStepRun",

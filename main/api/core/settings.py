@@ -197,6 +197,15 @@ class Settings(BaseSettings):
         default=1.0,
         description="Compensation scan interval for ready workflow runs and device results.",
     )
+    workflow_encryption_secret: str = Field(
+        default="",
+        description="Optional Fernet key material for encrypted workflow inputs; falls back to JWT_SECRET.",
+    )
+    workflow_max_concurrent_per_user: int = Field(default=10)
+    workflow_max_concurrent_per_device: int = Field(default=1)
+    workflow_max_argument_bytes: int = Field(default=256 * 1024)
+    workflow_max_result_bytes: int = Field(default=10 * 1024 * 1024)
+    workflow_result_retention_seconds: int = Field(default=60 * 60 * 24 * 30)
     # ---- Auth / Socket.IO ----------------------------------------------------
 
     jwt_secret: str = Field(
@@ -321,6 +330,7 @@ class Settings(BaseSettings):
         "public_base_url",
         "agent_socket_url",
         "timezone",
+        "workflow_encryption_secret",
         mode="before",
     )
     @classmethod

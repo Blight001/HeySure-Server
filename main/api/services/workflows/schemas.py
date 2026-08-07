@@ -25,12 +25,28 @@ class PublishRequest(BaseModel):
     device_id: Optional[str] = None
 
 
+class TraceDraftRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    tags: List[str] = Field(default_factory=list)
+    risk_level: str = "normal"
+    calls: List[Dict[str, Any]] = Field(min_length=1, max_length=50)
+
+
 class RunCreate(BaseModel):
     device_id: str = Field(min_length=1, max_length=256)
     input: Dict[str, Any] = Field(default_factory=dict)
     version_id: Optional[str] = None
-    idempotency_key: Optional[str] = Field(default=None, max_length=200)
+    idempotency_key: str = Field(min_length=1, max_length=200)
 
 
 class RunCancel(BaseModel):
     reason: str = Field(default="cancelled by user", max_length=500)
+
+
+class RunConfirm(BaseModel):
+    approved: bool
+
+
+class RunRetry(BaseModel):
+    idempotency_key: Optional[str] = Field(default=None, max_length=200)

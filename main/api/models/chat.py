@@ -1,3 +1,4 @@
+import builtins
 import time
 from typing import Optional
 
@@ -67,8 +68,8 @@ class ChatMessageMedia(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     media_type: str = Field(default="image/png")
     token: str = Field(index=True)
-    data: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
-    bytes: int = Field(default=0)
+    data: builtins.bytes = Field(sa_column=Column(LargeBinary, nullable=False))
+    bytes: builtins.int = Field(default=0)
     created_at: float = Field(default_factory=time.time)
 
 

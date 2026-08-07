@@ -14,11 +14,16 @@ from api.models import (
     DevicePresence,
     WorkflowCard,
     WorkflowCardVersion,
+    WorkflowConfirmation,
     WorkflowRun,
     WorkflowStepRun,
 )
 
-from .expression import render_template
+from api.core.settings import settings
+from .audit import add_audit
+from .expression import evaluate_expression, render_template
+from .result_store import save_result
+from .secrets import decrypt_json, encrypt_json
 
 
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
@@ -75,7 +80,7 @@ def _project_result(result: Any, projection: Any) -> Any:
 def _context(run: WorkflowRun, device: Optional[DevicePresence] = None) -> Dict[str, Any]:
     variables = _load(run.variables_json, {})
     return {
-        "input": _load(run.input_json, {}),
+        "input": decrypt_json(run.input_json),
         "steps": variables.get("steps", {}),
         "run": {"id": run.id, "startedAt": run.started_at, "createdAt": run.created_at},
         "device": {
@@ -102,6 +107,8 @@ def run_payload(row: WorkflowRun) -> Dict[str, Any]:
         "finished_at": row.finished_at,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
+        "actor_type": row.actor_type,
+        "actor_id": row.actor_id,
     }
 
 
@@ -113,6 +120,7 @@ def step_payload(row: WorkflowStepRun) -> Dict[str, Any]:
         "attempt": row.attempt,
         "dispatch_task_id": row.dispatch_task_id,
         "tool_name": row.tool_name,
+        "tool_provider": row.tool_provider,
         "tool_schema_digest": row.tool_schema_digest,
         "status": row.status,
         "arguments": _load(row.arguments_redacted_json, {}),
@@ -121,6 +129,21 @@ def step_payload(row: WorkflowStepRun) -> Dict[str, Any]:
         "started_at": row.started_at,
         "deadline_at": row.deadline_at,
         "finished_at": row.finished_at,
+    }
+
+
+def confirmation_payload(row: WorkflowConfirmation) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "run_id": row.run_id,
+        "step_id": row.step_id,
+        "type": row.confirmation_type,
+        "status": row.status,
+        "risk_summary": row.risk_summary,
+        "expires_at": row.expires_at,
+        "decision": row.decision,
+        "decided_at": row.decided_at,
+        "created_at": row.created_at,
     }
 
 
@@ -184,7 +207,7 @@ def create_run(
         device_id=device_id,
         status="pending",
         current_step_id=str(definition["startStepId"]),
-        input_json=_dump(input_value),
+        input_json=encrypt_json(input_value),
         variables_json=_dump({"steps": {}}),
         deadline_at=now + timeout,
         next_wakeup_at=now,
@@ -192,7 +215,19 @@ def create_run(
         created_at=now,
         updated_at=now,
     )
+    active_user_runs = session.exec(
+        select(WorkflowRun).where(
+            WorkflowRun.user_id == user_id,
+            WorkflowRun.status.in_(["pending", "running", "waiting_device", "waiting_confirmation", "retry_wait", "paused_offline"]),
+        )
+    ).all()
+    if len(active_user_runs) >= int(settings.workflow_max_concurrent_per_user):
+        raise ValueError("RUN_CONCURRENCY_LIMIT")
+    active_device_runs = [item for item in active_user_runs if item.device_id == device_id]
+    if len(active_device_runs) >= int(settings.workflow_max_concurrent_per_device):
+        raise ValueError("DEVICE_CONCURRENCY_LIMIT")
     session.add(row)
+    add_audit(session, event_type="run_created", run=row, status_to="pending")
     session.commit()
     session.refresh(row)
     return row
@@ -202,6 +237,7 @@ def fail_run(session: Session, run: WorkflowRun, error: Dict[str, Any], *, statu
     if run.status in TERMINAL_RUN_STATUSES:
         return
     now = time.time()
+    previous = run.status
     run.status = status
     run.error_json = _dump(error)
     run.finished_at = now
@@ -209,15 +245,49 @@ def fail_run(session: Session, run: WorkflowRun, error: Dict[str, Any], *, statu
     run.updated_at = now
     run.lock_version += 1
     session.add(run)
+    active_steps = session.exec(
+        select(WorkflowStepRun).where(
+            WorkflowStepRun.run_id == run.id,
+            WorkflowStepRun.status.in_(["dispatch_pending", "dispatching", "waiting_device"]),
+        )
+    ).all()
+    for step in active_steps:
+        step.status = "timed_out" if status == "timed_out" else "cancelled"
+        step.error_json = step.error_json or _dump(error)
+        step.finished_at = now
+        step.claim_owner = ""
+        step.claimed_at = None
+        session.add(step)
+    pending_confirmations = session.exec(
+        select(WorkflowConfirmation).where(
+            WorkflowConfirmation.run_id == run.id,
+            WorkflowConfirmation.status == "pending",
+        )
+    ).all()
+    for confirmation in pending_confirmations:
+        confirmation.status = "expired" if status == "timed_out" else "cancelled"
+        confirmation.decision = confirmation.status
+        confirmation.decided_at = now
+        session.add(confirmation)
+    add_audit(
+        session,
+        event_type="run_terminal",
+        run=run,
+        status_from=previous,
+        status_to=status,
+        detail={"error": _redact(error)},
+    )
 
 
 def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
     run = session.exec(
         select(WorkflowRun).where(WorkflowRun.id == run_id).with_for_update(skip_locked=True)
     ).first()
-    if not run or run.status in TERMINAL_RUN_STATUSES or run.status == "waiting_device":
+    if not run or run.status in TERMINAL_RUN_STATUSES or run.status in {"waiting_device", "waiting_confirmation"}:
         return run
     now = time.time()
+    if run.status == "retry_wait" and (run.next_wakeup_at or 0) > now:
+        return run
     if now >= run.deadline_at:
         fail_run(session, run, error_payload("RUN_TIMEOUT", "workflow deadline elapsed", "run"), status="timed_out")
         session.commit()
@@ -240,10 +310,22 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
         return run
     if run.started_at is None:
         run.started_at = now
+    previous_status = run.status
     run.status = "running"
     run.transition_count += 1
     run.lock_version += 1
-    if step.get("type") == "end":
+    entered_step_id = run.current_step_id
+    step_type = step.get("type")
+    add_audit(
+        session,
+        event_type="step_entered",
+        run=run,
+        step_id=entered_step_id,
+        status_from=previous_status,
+        status_to="running",
+        detail={"type": step_type},
+    )
+    if step_type == "end":
         try:
             output = render_template(definition.get("output", {}), _context(run))
         except Exception as exc:
@@ -255,6 +337,75 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
             run.next_wakeup_at = None
             run.updated_at = now
             session.add(run)
+            add_audit(
+                session,
+                event_type="run_succeeded",
+                run=run,
+                step_id=run.current_step_id,
+                status_from="running",
+                status_to="succeeded",
+            )
+        session.commit()
+        return run
+
+    if step_type == "condition":
+        try:
+            matched = evaluate_expression(step.get("expression"), _context(run))
+        except Exception as exc:
+            fail_run(session, run, error_payload("EXPRESSION_EVALUATION_FAILED", str(exc), "condition"))
+        else:
+            run.current_step_id = str(step["onTrue"] if matched else step["onFalse"])
+            run.status = "running"
+            run.next_wakeup_at = now
+            run.updated_at = now
+            session.add(run)
+            add_audit(
+                session,
+                event_type="condition_evaluated",
+                run=run,
+                step_id=entered_step_id,
+                status_from="running",
+                status_to="running",
+                detail={"matched": matched, "next": run.current_step_id},
+            )
+        session.commit()
+        return run
+
+    if step_type == "delay":
+        delay_seconds = float(step.get("delaySeconds", step.get("seconds", 0)))
+        run.current_step_id = str(step["next"])
+        run.status = "retry_wait"
+        run.next_wakeup_at = min(run.deadline_at, now + delay_seconds)
+        run.updated_at = now
+        session.add(run)
+        add_audit(
+            session,
+            event_type="delay_started",
+            run=run,
+            step_id=entered_step_id,
+            status_from="running",
+            status_to="retry_wait",
+            detail={"delay_seconds": delay_seconds, "wake_at": run.next_wakeup_at},
+        )
+        session.commit()
+        return run
+
+    if step_type == "confirm":
+        request_confirmation(
+            session,
+            run=run,
+            step_id=run.current_step_id,
+            confirmation_type="explicit",
+            risk_summary=str(step.get("message") or step.get("riskSummary") or "请确认继续执行自动化卡片"),
+            timeout_seconds=int(step.get("timeoutSeconds", 300)),
+            next_step_id=str(step["next"]),
+            on_denied_step_id=str(step.get("onDenied") or ""),
+        )
+        session.commit()
+        return run
+
+    if step_type != "mcp":
+        fail_run(session, run, error_payload("INTERNAL_STATE_CONFLICT", f"unsupported compiled step type: {step_type}", "advance"))
         session.commit()
         return run
 
@@ -271,24 +422,56 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
         session.commit()
         return run
     timeout = min(int(step.get("timeoutSeconds", 120)), max(1, int(run.deadline_at - now)))
+    previous_attempt = session.exec(
+        select(WorkflowStepRun)
+        .where(WorkflowStepRun.run_id == run.id, WorkflowStepRun.step_id == run.current_step_id)
+        .order_by(WorkflowStepRun.attempt.desc())
+    ).first()
+    attempt = int(previous_attempt.attempt + 1) if previous_attempt else 1
+    total_timeout = int(step.get("totalTimeoutSeconds", step.get("timeoutSeconds", 120)))
+    first_started_at = now
+    if previous_attempt:
+        first_attempt = session.exec(
+            select(WorkflowStepRun)
+            .where(WorkflowStepRun.run_id == run.id, WorkflowStepRun.step_id == run.current_step_id)
+            .order_by(WorkflowStepRun.attempt)
+        ).first()
+        if first_attempt:
+            first_started_at = first_attempt.started_at or max(0.0, first_attempt.deadline_at - int(step.get("timeoutSeconds", 120)))
+    step_deadline = min(run.deadline_at, now + timeout, first_started_at + total_timeout)
+    if step_deadline <= now:
+        fail_run(session, run, error_payload("STEP_TIMEOUT", "step retry deadline elapsed", "retry"))
+        session.commit()
+        return run
     step_run = WorkflowStepRun(
         id=f"wstep_{uuid.uuid4().hex}",
         run_id=run.id,
         step_id=run.current_step_id,
-        attempt=1,
+        attempt=attempt,
         dispatch_task_id=f"wftask_{uuid.uuid4().hex}",
         tool_name=str(step["toolRef"]["name"]),
+        tool_provider=str(step["toolRef"].get("provider") or ""),
         tool_schema_digest=str(step["toolRef"].get("schemaDigest") or ""),
         status="dispatch_pending",
         arguments_redacted_json=_dump(_redact(arguments)),
         arguments_json="{}",
-        deadline_at=now + timeout,
+        deadline_at=step_deadline,
     )
     session.add(step_run)
     run.status = "waiting_device"
     run.next_wakeup_at = now
     run.updated_at = now
     session.add(run)
+    add_audit(
+        session,
+        event_type="step_dispatch_pending",
+        run=run,
+        step_id=step_run.step_id,
+        dispatch_task_id=step_run.dispatch_task_id,
+        status_from="running",
+        status_to="waiting_device",
+        detail={"attempt": attempt, "tool": step_run.tool_name, "arguments": _redact(arguments)},
+    )
     session.commit()
     return run
 
@@ -307,6 +490,254 @@ def render_step_arguments(session: Session, step_run: WorkflowStepRun) -> Dict[s
     return rendered
 
 
+def request_confirmation(
+    session: Session,
+    *,
+    run: WorkflowRun,
+    step_id: str,
+    confirmation_type: str,
+    risk_summary: str,
+    timeout_seconds: int,
+    next_step_id: str = "",
+    on_denied_step_id: str = "",
+) -> WorkflowConfirmation:
+    existing = session.exec(
+        select(WorkflowConfirmation)
+        .where(
+            WorkflowConfirmation.run_id == run.id,
+            WorkflowConfirmation.step_id == step_id,
+            WorkflowConfirmation.status.in_(["pending", "approved"]),
+        )
+        .order_by(WorkflowConfirmation.created_at.desc())
+    ).first()
+    if existing:
+        return existing
+    now = time.time()
+    row = WorkflowConfirmation(
+        id=f"wconf_{uuid.uuid4().hex}",
+        run_id=run.id,
+        step_id=step_id,
+        confirmation_type=confirmation_type,
+        risk_summary=risk_summary[:2000],
+        next_step_id=next_step_id,
+        on_denied_step_id=on_denied_step_id,
+        requested_user_id=run.user_id,
+        expires_at=min(run.deadline_at, now + max(1, int(timeout_seconds))),
+    )
+    previous = run.status
+    run.status = "waiting_confirmation"
+    run.next_wakeup_at = row.expires_at
+    run.updated_at = now
+    run.lock_version += 1
+    session.add(row)
+    session.add(run)
+    add_audit(
+        session,
+        event_type="confirmation_requested",
+        run=run,
+        step_id=step_id,
+        status_from=previous,
+        status_to="waiting_confirmation",
+        detail={"confirmation_id": row.id, "type": confirmation_type, "risk_summary": risk_summary[:500]},
+    )
+    return row
+
+
+def confirmation_granted(session: Session, run_id: str, step_id: str) -> bool:
+    row = session.exec(
+        select(WorkflowConfirmation)
+        .where(
+            WorkflowConfirmation.run_id == run_id,
+            WorkflowConfirmation.step_id == step_id,
+            WorkflowConfirmation.confirmation_type == "forced",
+            WorkflowConfirmation.status == "approved",
+        )
+        .order_by(WorkflowConfirmation.decided_at.desc())
+    ).first()
+    return bool(row)
+
+
+def decide_confirmation(
+    session: Session,
+    *,
+    run: WorkflowRun,
+    user_id: int,
+    approved: bool,
+) -> WorkflowRun:
+    confirmation = session.exec(
+        select(WorkflowConfirmation)
+        .where(
+            WorkflowConfirmation.run_id == run.id,
+            WorkflowConfirmation.status == "pending",
+        )
+        .order_by(WorkflowConfirmation.created_at.desc())
+        .with_for_update(skip_locked=True)
+    ).first()
+    if not confirmation:
+        raise ValueError("CONFIRMATION_NOT_PENDING")
+    if confirmation.requested_user_id != user_id:
+        raise ValueError("CONFIRMATION_ACCESS_DENIED")
+    now = time.time()
+    if now >= confirmation.expires_at:
+        approved = False
+    confirmation.status = "approved" if approved else "denied"
+    confirmation.decision = confirmation.status
+    confirmation.decided_by = user_id
+    confirmation.decided_at = now
+    session.add(confirmation)
+    if approved:
+        if confirmation.confirmation_type == "explicit":
+            run.current_step_id = confirmation.next_step_id
+            run.status = "running"
+        else:
+            run.status = "waiting_device"
+        run.next_wakeup_at = now
+        run.updated_at = now
+        run.lock_version += 1
+        session.add(run)
+    elif confirmation.on_denied_step_id:
+        run.current_step_id = confirmation.on_denied_step_id
+        run.status = "running"
+        run.next_wakeup_at = now
+        run.updated_at = now
+        run.lock_version += 1
+        session.add(run)
+    else:
+        fail_run(
+            session,
+            run,
+            error_payload("CONFIRMATION_DENIED", "workflow confirmation was denied or expired", "confirmation"),
+            status="cancelled",
+        )
+    add_audit(
+        session,
+        event_type="confirmation_decided",
+        run=run,
+        step_id=confirmation.step_id,
+        status_from="waiting_confirmation",
+        status_to=run.status,
+        detail={"confirmation_id": confirmation.id, "decision": confirmation.status},
+    )
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def expire_confirmations(session: Session, now: Optional[float] = None, limit: int = 100) -> int:
+    current = float(now or time.time())
+    rows = session.exec(
+        select(WorkflowConfirmation)
+        .where(WorkflowConfirmation.status == "pending", WorkflowConfirmation.expires_at <= current)
+        .limit(limit)
+    ).all()
+    expired = 0
+    for confirmation in rows:
+        run = session.get(WorkflowRun, confirmation.run_id)
+        if not run or run.status != "waiting_confirmation":
+            confirmation.status = "expired"
+            confirmation.decided_at = current
+            session.add(confirmation)
+            expired += 1
+            continue
+        confirmation.status = "expired"
+        confirmation.decision = "expired"
+        confirmation.decided_at = current
+        session.add(confirmation)
+        if confirmation.on_denied_step_id:
+            run.current_step_id = confirmation.on_denied_step_id
+            run.status = "running"
+            run.next_wakeup_at = current
+            run.updated_at = current
+            run.lock_version += 1
+            session.add(run)
+        else:
+            fail_run(
+                session,
+                run,
+                error_payload("CONFIRMATION_DENIED", "workflow confirmation expired", "confirmation"),
+                status="cancelled",
+            )
+        add_audit(
+            session,
+            event_type="confirmation_expired",
+            run=run,
+            step_id=confirmation.step_id,
+            status_from="waiting_confirmation",
+            status_to=run.status,
+        )
+        expired += 1
+    if rows:
+        session.commit()
+    return expired
+
+
+def _handle_step_error(
+    session: Session,
+    *,
+    run: WorkflowRun,
+    step_run: WorkflowStepRun,
+    step: Dict[str, Any],
+    definition: Dict[str, Any],
+    error: Dict[str, Any],
+) -> None:
+    now = time.time()
+    step_run.status = "timed_out" if error.get("code") == "STEP_TIMEOUT" else "failed"
+    step_run.error_json = _dump(error)
+    step_run.finished_at = now
+    session.add(step_run)
+    retry = step.get("retryPolicy") if isinstance(step.get("retryPolicy"), dict) else {}
+    max_attempts = int(retry.get("maxAttempts", 1))
+    retry_on = {str(item) for item in retry.get("retryOn", []) if isinstance(item, str)}
+    retryable = bool(error.get("retryable")) or str(error.get("code")) in retry_on
+    contracts = definition.get("_toolContracts", {})
+    destructive = bool(contracts.get(step_run.tool_name, {}).get("destructive"))
+    has_idempotency = bool(retry.get("idempotencyKey") or step.get("idempotencyKey"))
+    if retryable and step_run.attempt < max_attempts and (not destructive or has_idempotency):
+        base = float(retry.get("delaySeconds", 1))
+        delay = base * (2 ** max(0, step_run.attempt - 1)) if retry.get("backoff") == "exponential" else base
+        delay = min(delay, float(retry.get("maxDelaySeconds", 60)))
+        run.status = "retry_wait"
+        run.current_step_id = step_run.step_id
+        run.next_wakeup_at = min(run.deadline_at, now + max(0, delay))
+        run.updated_at = now
+        run.lock_version += 1
+        session.add(run)
+        add_audit(
+            session,
+            event_type="step_retry_scheduled",
+            run=run,
+            step_id=step_run.step_id,
+            dispatch_task_id=step_run.dispatch_task_id,
+            status_from="waiting_device",
+            status_to="retry_wait",
+            detail={"attempt": step_run.attempt, "next_attempt": step_run.attempt + 1, "delay_seconds": delay, "error": error},
+        )
+        return
+    on_error = str(step.get("onError") or "fail")
+    if on_error not in {"", "fail"}:
+        variables = _load(run.variables_json, {"steps": {}})
+        variables.setdefault("steps", {})[str(step.get("saveAs"))] = {"error": _redact(error)}
+        run.variables_json = _dump(variables)
+        run.current_step_id = on_error
+        run.status = "running"
+        run.next_wakeup_at = now
+        run.updated_at = now
+        run.lock_version += 1
+        session.add(run)
+        add_audit(
+            session,
+            event_type="step_error_branch",
+            run=run,
+            step_id=step_run.step_id,
+            dispatch_task_id=step_run.dispatch_task_id,
+            status_from="waiting_device",
+            status_to="running",
+            detail={"next": on_error, "error": error},
+        )
+        return
+    fail_run(session, run, error, status="timed_out" if error.get("code") == "RUN_TIMEOUT" else "failed")
+
+
 def apply_step_result(
     session: Session,
     *,
@@ -320,7 +751,22 @@ def apply_step_result(
         .where(WorkflowStepRun.dispatch_task_id == dispatch_task_id)
         .with_for_update(skip_locked=True)
     ).first()
-    if not step_run or step_run.status in {"succeeded", "failed", "timed_out", "cancelled"}:
+    if not step_run:
+        return False
+    if step_run.status in {"succeeded", "failed", "timed_out", "cancelled"}:
+        run = session.get(WorkflowRun, step_run.run_id)
+        if run:
+            add_audit(
+                session,
+                event_type="step_result_ignored",
+                run=run,
+                step_id=step_run.step_id,
+                dispatch_task_id=dispatch_task_id,
+                status_from=run.status,
+                status_to=run.status,
+                detail={"reason": "step_is_terminal", "step_status": step_run.status},
+            )
+            session.commit()
         return False
     run = session.exec(
         select(WorkflowRun).where(WorkflowRun.id == step_run.run_id).with_for_update(skip_locked=True)
@@ -329,53 +775,73 @@ def apply_step_result(
         step_run.status = "cancelled"
         step_run.finished_at = time.time()
         session.add(step_run)
+        if run:
+            add_audit(
+                session,
+                event_type="step_result_ignored",
+                run=run,
+                step_id=step_run.step_id,
+                dispatch_task_id=dispatch_task_id,
+                status_from=run.status,
+                status_to=run.status,
+                detail={"reason": "run_is_terminal"},
+            )
         session.commit()
         return False
     now = time.time()
     if now >= min(step_run.deadline_at, run.deadline_at):
-        normalized = error_payload("STEP_TIMEOUT", "step deadline elapsed", "device")
-        step_run.status = "timed_out"
-        step_run.error_json = _dump(normalized)
-        step_run.finished_at = now
-        fail_run(session, run, normalized, status="timed_out")
-        session.add(step_run)
+        normalized = error_payload("STEP_TIMEOUT", "step deadline elapsed", "device", retryable=True)
+        version = session.get(WorkflowCardVersion, run.card_version_id)
+        definition = _load(version.definition_json, {}) if version else {}
+        definition["_toolContracts"] = _load(version.tool_contracts_json, {}) if version else {}
+        step = definition.get("steps", {}).get(step_run.step_id, {})
+        _handle_step_error(
+            session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
+        )
         session.commit()
         return True
     version = session.get(WorkflowCardVersion, run.card_version_id)
     definition = _load(version.definition_json, {}) if version else {}
+    definition["_toolContracts"] = _load(version.tool_contracts_json, {}) if version else {}
     step = definition.get("steps", {}).get(step_run.step_id, {})
     if not success:
         normalized = error_payload("DISPATCH_FAILED", str(error or "device tool failed"), "device")
-        step_run.status = "failed"
-        step_run.error_json = _dump(normalized)
-        step_run.finished_at = now
-        fail_run(session, run, normalized)
-        session.add(step_run)
+        _handle_step_error(
+            session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
+        )
         session.commit()
         return True
     try:
         projected = _redact(_project_result(result, step.get("resultProjection")))
     except Exception as exc:
         normalized = error_payload("EXPRESSION_EVALUATION_FAILED", str(exc), "result_projection")
-        step_run.status = "failed"
-        step_run.error_json = _dump(normalized)
-        step_run.finished_at = now
-        fail_run(session, run, normalized)
-        session.add(step_run)
+        _handle_step_error(
+            session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
+        )
         session.commit()
         return True
     encoded = _dump(projected)
+    variable_result = projected
     if len(encoded.encode("utf-8")) > MAX_PROJECTED_RESULT_BYTES:
-        normalized = error_payload("STEP_RESULT_TOO_LARGE", "projected result exceeds 64 KiB", "result")
-        step_run.status = "failed"
-        step_run.error_json = _dump(normalized)
-        step_run.finished_at = now
-        fail_run(session, run, normalized)
-        session.add(step_run)
-        session.commit()
-        return True
+        try:
+            reference, size = save_result(
+                run.user_id,
+                run.id,
+                projected,
+                max_bytes=int(definition.get("limits", {}).get("maxResultBytes", settings.workflow_max_result_bytes)),
+            )
+        except ValueError:
+            normalized = error_payload("STEP_RESULT_TOO_LARGE", "projected result exceeds configured maximum", "result")
+            _handle_step_error(
+                session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
+            )
+            session.commit()
+            return True
+        variable_result = {"$ref": reference, "size": size, "stored": True}
+        step_run.result_ref = reference
+        encoded = _dump(variable_result)
     variables = _load(run.variables_json, {"steps": {}})
-    variables.setdefault("steps", {})[str(step.get("saveAs"))] = {"result": projected}
+    variables.setdefault("steps", {})[str(step.get("saveAs"))] = {"result": variable_result}
     run.variables_json = _dump(variables)
     run.current_step_id = str(step.get("next") or "")
     run.status = "running"
@@ -387,6 +853,40 @@ def apply_step_result(
     step_run.finished_at = now
     session.add(step_run)
     session.add(run)
+    add_audit(
+        session,
+        event_type="step_succeeded",
+        run=run,
+        step_id=step_run.step_id,
+        dispatch_task_id=step_run.dispatch_task_id,
+        status_from="waiting_device",
+        status_to="running",
+        detail={"attempt": step_run.attempt, "result": variable_result},
+    )
+    session.commit()
+    return True
+
+
+def record_ignored_step_result(session: Session, dispatch_task_id: str, *, reason: str) -> bool:
+    """Audit duplicate or late device terminal messages without advancing state."""
+    step_run = session.exec(
+        select(WorkflowStepRun).where(WorkflowStepRun.dispatch_task_id == dispatch_task_id)
+    ).first()
+    if not step_run:
+        return False
+    run = session.get(WorkflowRun, step_run.run_id)
+    if not run:
+        return False
+    add_audit(
+        session,
+        event_type="step_result_ignored",
+        run=run,
+        step_id=step_run.step_id,
+        dispatch_task_id=dispatch_task_id,
+        status_from=run.status,
+        status_to=run.status,
+        detail={"reason": reason, "step_status": step_run.status},
+    )
     session.commit()
     return True
 
@@ -413,12 +913,13 @@ def fail_step_dispatch(
     if not run or run.status in TERMINAL_RUN_STATUSES:
         return False
     error = error_payload(code, message, "dispatch", retryable)
-    now = time.time()
-    step_run.status = "failed"
-    step_run.error_json = _dump(error)
-    step_run.finished_at = now
-    fail_run(session, run, error, status="timed_out" if code in {"STEP_TIMEOUT", "RUN_TIMEOUT"} else "failed")
-    session.add(step_run)
+    version = session.get(WorkflowCardVersion, run.card_version_id)
+    definition = _load(version.definition_json, {}) if version else {}
+    definition["_toolContracts"] = _load(version.tool_contracts_json, {}) if version else {}
+    step = definition.get("steps", {}).get(step_run.step_id, {})
+    _handle_step_error(
+        session, run=run, step_run=step_run, step=step, definition=definition, error=error
+    )
     session.commit()
     return True
 
@@ -429,13 +930,77 @@ def cancel_run(session: Session, run: WorkflowRun, reason: str) -> WorkflowRun:
         steps = session.exec(
             select(WorkflowStepRun).where(
                 WorkflowStepRun.run_id == run.id,
-                WorkflowStepRun.status.in_(["dispatch_pending", "waiting_device"]),
+                WorkflowStepRun.status.in_(["dispatch_pending", "dispatching", "waiting_device"]),
             )
         ).all()
         for step in steps:
             step.status = "cancelled"
             step.finished_at = time.time()
             session.add(step)
+        confirmations = session.exec(
+            select(WorkflowConfirmation).where(
+                WorkflowConfirmation.run_id == run.id,
+                WorkflowConfirmation.status == "pending",
+            )
+        ).all()
+        for confirmation in confirmations:
+            confirmation.status = "cancelled"
+            confirmation.decision = "cancelled"
+            confirmation.decided_at = time.time()
+            session.add(confirmation)
         session.commit()
         session.refresh(run)
     return run
+
+
+def wake_offline_runs(session: Session, *, user_id: int, device_id: str) -> int:
+    """Actively wake this user's runs when their target device reconnects."""
+    now = time.time()
+    rows = session.exec(
+        select(WorkflowRun)
+        .where(
+            WorkflowRun.user_id == user_id,
+            WorkflowRun.device_id == device_id,
+            WorkflowRun.status == "paused_offline",
+            WorkflowRun.deadline_at > now,
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    for run in rows:
+        run.status = "waiting_device"
+        run.next_wakeup_at = now
+        run.updated_at = now
+        run.lock_version += 1
+        session.add(run)
+        add_audit(
+            session,
+            event_type="device_reconnected",
+            run=run,
+            status_from="paused_offline",
+            status_to="waiting_device",
+        )
+    if rows:
+        session.commit()
+    return len(rows)
+
+
+def retry_failed_run(
+    session: Session,
+    *,
+    run: WorkflowRun,
+    user_id: int,
+    idempotency_key: Optional[str] = None,
+) -> WorkflowRun:
+    if run.status not in {"failed", "timed_out", "cancelled"}:
+        raise ValueError("RUN_NOT_RETRYABLE")
+    return create_run(
+        session,
+        user_id=user_id,
+        card_id=run.card_id,
+        device_id=run.device_id,
+        input_value=decrypt_json(run.input_json),
+        version_id=run.card_version_id,
+        idempotency_key=idempotency_key or f"retry:{run.id}:{uuid.uuid4().hex}",
+        actor_type="user",
+        actor_id=str(user_id),
+    )

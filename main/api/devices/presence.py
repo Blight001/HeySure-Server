@@ -110,6 +110,11 @@ def _decode_defs(row: DevicePresence) -> Dict[str, dict]:
             "input_schema": schema if isinstance(schema, dict) else {},
             "destructive": bool(spec.get("destructive")),
             "implementation": spec.get("implementation") if isinstance(spec.get("implementation"), dict) else {},
+            "permissions": [
+                str(item).strip()
+                for item in (spec.get("permissions") if isinstance(spec.get("permissions"), list) else [])
+                if str(item).strip()
+            ],
         }
     return out
 

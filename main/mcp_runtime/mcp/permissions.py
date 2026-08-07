@@ -66,6 +66,12 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     "conversation.manage": ROLE_MEMBER,
     "admin.manage": ROLE_MEMBER,
     "device+mcp.manage": ROLE_MEMBER,
+    "automation.list": ROLE_MEMBER,
+    "automation.get": ROLE_MEMBER,
+    "automation.run": ROLE_MEMBER,
+    "automation.status": ROLE_MEMBER,
+    "automation.cancel": ROLE_MEMBER,
+    "automation.manage": ROLE_MEMBER,
 }
 
 
@@ -81,6 +87,7 @@ LIBRARY_BOUND_TOOLS: Set[str] = {
     "admin.manage",
     "device+mcp.manage",
     "knowledge.manage",
+    "automation.manage",
 }
 
 

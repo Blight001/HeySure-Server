@@ -1,8 +1,4 @@
-"""Static compiler for the deliberately small workflow Schema v1.
-
-Phase one executes only ``mcp`` and ``end`` nodes. Unsupported node types are
-rejected at publish time instead of being partially interpreted at runtime.
-"""
+"""Static compiler for the bounded, declarative workflow Schema v1."""
 
 from __future__ import annotations
 
@@ -19,9 +15,16 @@ STEP_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 SAVE_AS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 TEMPLATE_RE = re.compile(r"\$\{([^{}]+)\}")
 ALLOWED_NAMESPACES = {"input", "steps", "run", "device"}
+EXPRESSION_OPS = {
+    "eq", "ne", "gt", "gte", "lt", "lte", "exists", "contains",
+    "startsWith", "endsWith", "and", "or", "not",
+}
 MAX_DEFINITION_BYTES = 256 * 1024
 MAX_STEPS = 100
 MAX_DEPTH = 16
+SENSITIVE_FIELD_NAMES = {
+    "authorization", "cookie", "password", "secret", "token", "api_key", "apikey",
+}
 
 
 class WorkflowValidationError(ValueError):
@@ -65,6 +68,52 @@ def _walk_templates(value: Any, path: str = "definition", depth: int = 0):
                 yield path, f"template reference is too deep: {ref}"
 
 
+def _template_refs(value: Any) -> Set[str]:
+    return {match.group(1).strip() for match in TEMPLATE_RE.finditer(canonical_json(value))}
+
+
+def _validate_expression(expression: Any, path: str, errors: List[str], depth: int = 0) -> None:
+    if depth > MAX_DEPTH or not isinstance(expression, dict):
+        errors.append(f"{path}: expression must be an object within maximum depth")
+        return
+    op = expression.get("op")
+    if op not in EXPRESSION_OPS:
+        errors.append(f"{path}: unsupported expression operator {op}")
+        return
+    if op in {"and", "or"}:
+        children = expression.get("expressions", expression.get("args"))
+        if not isinstance(children, list) or not children:
+            errors.append(f"{path}: {op} requires a non-empty expressions array")
+        else:
+            for index, child in enumerate(children):
+                _validate_expression(child, f"{path}.{op}[{index}]", errors, depth + 1)
+    elif op == "not":
+        _validate_expression(
+            expression.get("expression", expression.get("value")), f"{path}.not", errors, depth + 1
+        )
+    elif op == "exists":
+        if "value" not in expression and "left" not in expression:
+            errors.append(f"{path}: exists requires value")
+    elif "left" not in expression or "right" not in expression:
+        errors.append(f"{path}: {op} requires left and right")
+
+
+def _walk_sensitive_literals(value: Any, path: str = "definition", depth: int = 0):
+    if depth > MAX_DEPTH:
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}"
+            if str(key).lower() in SENSITIVE_FIELD_NAMES and not isinstance(child, (dict, list)):
+                text = str(child or "")
+                if text and not TEMPLATE_RE.fullmatch(text):
+                    yield child_path
+            yield from _walk_sensitive_literals(child, child_path, depth + 1)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _walk_sensitive_literals(child, f"{path}[{index}]", depth + 1)
+
+
 def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
@@ -104,8 +153,8 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
             errors.append(f"step {step_id} must be an object")
             continue
         step_type = step.get("type")
-        if step_type not in {"mcp", "end"}:
-            errors.append(f"step {step_id}: Schema v1 phase one supports only mcp and end")
+        if step_type not in {"mcp", "condition", "delay", "confirm", "end"}:
+            errors.append(f"step {step_id}: unsupported step type {step_type}")
             continue
         targets: List[str] = []
         if step_type == "mcp":
@@ -131,6 +180,9 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
             timeout = step.get("timeoutSeconds", 120)
             if not isinstance(timeout, int) or not 1 <= timeout <= 1800:
                 errors.append(f"step {step_id}: timeoutSeconds must be 1..1800")
+            total_timeout = step.get("totalTimeoutSeconds", timeout)
+            if not isinstance(total_timeout, int) or not timeout <= total_timeout <= 86400:
+                errors.append(f"step {step_id}: totalTimeoutSeconds must be >= timeoutSeconds and <= 86400")
             projection = step.get("resultProjection")
             if projection is not None:
                 if not isinstance(projection, list) or not all(isinstance(item, str) for item in projection):
@@ -140,6 +192,59 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
                         parts = item.split(".")
                         if not item or len(parts) > MAX_DEPTH or any(not part or part.startswith("__") for part in parts):
                             errors.append(f"step {step_id}: invalid resultProjection path {item}")
+                        if any(part.lower() in SENSITIVE_FIELD_NAMES for part in parts):
+                            errors.append(f"step {step_id}: resultProjection cannot persist sensitive field {item}")
+            on_error = step.get("onError", "fail")
+            if isinstance(on_error, str) and on_error not in {"", "fail"}:
+                targets.append(on_error)
+            elif not isinstance(on_error, str):
+                errors.append(f"step {step_id}: onError must be fail or a step id")
+            retry = step.get("retryPolicy")
+            if retry is not None:
+                if not isinstance(retry, dict):
+                    errors.append(f"step {step_id}: retryPolicy must be an object")
+                else:
+                    attempts = retry.get("maxAttempts", 1)
+                    delay_seconds = retry.get("delaySeconds", 1)
+                    max_delay = retry.get("maxDelaySeconds", 60)
+                    mode = retry.get("backoff", "fixed")
+                    if not isinstance(attempts, int) or not 1 <= attempts <= 10:
+                        errors.append(f"step {step_id}: retryPolicy.maxAttempts must be 1..10")
+                    if not isinstance(delay_seconds, (int, float)) or not 0 <= delay_seconds <= 3600:
+                        errors.append(f"step {step_id}: retryPolicy.delaySeconds must be 0..3600")
+                    if not isinstance(max_delay, (int, float)) or not 0 <= max_delay <= 3600:
+                        errors.append(f"step {step_id}: retryPolicy.maxDelaySeconds must be 0..3600")
+                    if mode not in {"fixed", "exponential"}:
+                        errors.append(f"step {step_id}: retryPolicy.backoff must be fixed or exponential")
+        elif step_type == "condition":
+            _validate_expression(step.get("expression"), f"step {step_id}.expression", errors)
+            for field in ("onTrue", "onFalse"):
+                target = str(step.get(field) or "")
+                if not target:
+                    errors.append(f"step {step_id}: {field} is required")
+                else:
+                    targets.append(target)
+        elif step_type == "delay":
+            seconds = step.get("delaySeconds", step.get("seconds"))
+            if not isinstance(seconds, (int, float)) or not 0 <= seconds <= 86400:
+                errors.append(f"step {step_id}: delaySeconds must be 0..86400")
+            target = str(step.get("next") or "")
+            if not target:
+                errors.append(f"step {step_id}: next is required")
+            else:
+                targets.append(target)
+        elif step_type == "confirm":
+            target = str(step.get("next") or "")
+            if not target:
+                errors.append(f"step {step_id}: next is required")
+            else:
+                targets.append(target)
+            denied = str(step.get("onDenied") or "")
+            if denied:
+                targets.append(denied)
+            confirm_timeout = step.get("timeoutSeconds", 300)
+            if not isinstance(confirm_timeout, int) or not 1 <= confirm_timeout <= 86400:
+                errors.append(f"step {step_id}: timeoutSeconds must be 1..86400")
         edges[str(step_id)] = targets
 
     for source, targets in edges.items():
@@ -178,6 +283,48 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     if start in steps:
         visit(start)
 
+    # A step result may only be referenced after its producer on every path.
+    # This conservative dominator check prevents runtime reads of a result that
+    # exists on only one side of a branch.
+    producers = {
+        str(step.get("saveAs")): step_id
+        for step_id, step in steps.items()
+        if isinstance(step, dict) and step.get("type") == "mcp" and step.get("saveAs")
+    }
+    predecessors: Dict[str, Set[str]] = {step_id: set() for step_id in steps}
+    for source, targets in edges.items():
+        for target in targets:
+            if target in predecessors:
+                predecessors[target].add(source)
+    dominators: Dict[str, Set[str]] = {step_id: set(steps) for step_id in steps}
+    if start in steps:
+        dominators[start] = {start}
+        changed = True
+        while changed:
+            changed = False
+            for step_id in reachable - {start}:
+                incoming = [dominators[parent] for parent in predecessors[step_id] if parent in reachable]
+                new_value = {step_id} | (set.intersection(*incoming) if incoming else set())
+                if new_value != dominators[step_id]:
+                    dominators[step_id] = new_value
+                    changed = True
+    for step_id in reachable:
+        for ref in _template_refs(steps[step_id]):
+            parts = ref.split(".")
+            if len(parts) >= 2 and parts[0] == "steps":
+                producer = producers.get(parts[1])
+                if producer and producer not in dominators.get(step_id, set()):
+                    errors.append(
+                        f"step {step_id}: template may read step result before it is available: {ref}"
+                    )
+    reachable_ends = [step_id for step_id in reachable if steps[step_id].get("type") == "end"]
+    for ref in _template_refs(definition.get("output", {})):
+        parts = ref.split(".")
+        if len(parts) >= 2 and parts[0] == "steps":
+            producer = producers.get(parts[1])
+            if producer and any(producer not in dominators.get(end_id, set()) for end_id in reachable_ends):
+                errors.append(f"output may read step result unavailable on an end path: {ref}")
+
     limits = definition.get("limits", {})
     if not isinstance(limits, dict):
         errors.append("limits must be an object")
@@ -188,13 +335,34 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
         errors.append("limits.timeoutSeconds must be 1..86400")
     if not isinstance(transitions, int) or not 1 <= transitions <= 500:
         errors.append("limits.maxTransitions must be 1..500")
+    max_result_bytes = limits.get("maxResultBytes", 10 * 1024 * 1024)
+    if not isinstance(max_result_bytes, int) or not 1024 <= max_result_bytes <= 100 * 1024 * 1024:
+        errors.append("limits.maxResultBytes must be 1024..104857600")
     if isinstance(timeout, int):
         for step_id, step in steps.items():
             if isinstance(step, dict) and isinstance(step.get("timeoutSeconds"), int) and step["timeoutSeconds"] > timeout:
                 errors.append(f"step {step_id}: timeoutSeconds exceeds workflow timeout")
+            if isinstance(step, dict) and isinstance(step.get("totalTimeoutSeconds"), int) and step["totalTimeoutSeconds"] > timeout:
+                errors.append(f"step {step_id}: totalTimeoutSeconds exceeds workflow timeout")
 
     for path, message in _walk_templates(definition):
         errors.append(f"{path}: {message}")
+    input_properties = input_schema.get("properties", {}) if isinstance(input_schema, dict) else {}
+    for match in TEMPLATE_RE.finditer(canonical_json(definition)):
+        ref = match.group(1).strip()
+        parts = ref.split(".")
+        if len(parts) >= 2 and parts[0] == "input" and parts[1] not in input_properties:
+            errors.append(f"template references undeclared input property: {ref}")
+        if len(parts) >= 2 and parts[0] == "steps":
+            if parts[1] not in save_names:
+                errors.append(f"template references undeclared step result: {ref}")
+            elif len(parts) < 3 or parts[2] not in {"result", "error"}:
+                errors.append(f"step template must read result or error: {ref}")
+    for path in _walk_sensitive_literals(definition):
+        # inputSchema merely declares a sensitive field; only runtime values
+        # belong in input, never literal secrets in a workflow definition.
+        if ".inputSchema.properties." not in path:
+            errors.append(f"definition contains a literal sensitive value at {path}; use an input reference")
     if errors:
         raise WorkflowValidationError(errors, warnings)
 
@@ -203,5 +371,6 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("limits", {})
     normalized["limits"].setdefault("timeoutSeconds", 300)
     normalized["limits"].setdefault("maxTransitions", min(MAX_STEPS, 100))
+    normalized["limits"].setdefault("maxResultBytes", 10 * 1024 * 1024)
     normalized.setdefault("output", {})
     return {"definition": normalized, "digest": definition_digest(normalized), "warnings": warnings}

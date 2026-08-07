@@ -256,6 +256,16 @@ def register_agent_socket_events():
         except Exception:
             logger.exception('Failed to resume endpoint MCP queue: %s', device_id)
         if owner_user_id is not None:
+            try:
+                from api.core.settings import settings
+                from api.services.workflows.run_service import wake_offline_runs
+
+                if settings.workflow_scheduler_enabled:
+                    with Session(engine) as session:
+                        wake_offline_runs(session, user_id=owner_user_id, device_id=device_id)
+            except Exception:
+                logger.exception('Failed to wake offline workflows: %s', device_id)
+        if owner_user_id is not None:
             await emit_agent_list_for_user(owner_user_id)
 
     @sio.on('flow:log')

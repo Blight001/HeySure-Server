@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 
 from sqlmodel import Session, select
 
@@ -13,13 +14,17 @@ from api.models import AgentDispatchTask, WorkflowRun, WorkflowStepRun
 from api.services.workflows.permissions import WorkflowDispatchError, validate_step_dispatch
 from api.services.workflows.run_service import (
     apply_step_result,
+    confirmation_granted,
     fail_step_dispatch,
     render_step_arguments,
+    request_confirmation,
 )
 from connector_runtime.dispatch.device_dispatch import dispatch_task_to_agent, redeliver_dispatch
 
 
 logger = logging.getLogger(__name__)
+CLAIM_OWNER = f"connector-{uuid.uuid4().hex}"
+CLAIM_STALE_SECONDS = 30.0
 
 
 def _decode_result(raw: str):
@@ -35,7 +40,7 @@ def reconcile_finished_dispatches(limit: int = 100) -> int:
     with Session(engine) as session:
         steps = session.exec(
             select(WorkflowStepRun)
-            .where(WorkflowStepRun.status.in_(["dispatch_pending", "waiting_device"]))
+            .where(WorkflowStepRun.status.in_(["dispatch_pending", "dispatching", "waiting_device"]))
             .limit(limit)
         ).all()
     for step in steps:
@@ -68,7 +73,7 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
     with Session(engine) as session:
         rows = session.exec(
             select(WorkflowStepRun)
-            .where(WorkflowStepRun.status == "dispatch_pending")
+            .where(WorkflowStepRun.status.in_(["dispatch_pending", "dispatching"]))
             .order_by(WorkflowStepRun.deadline_at, WorkflowStepRun.id)
             .limit(limit)
         ).all()
@@ -77,14 +82,29 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
         action = ""
         prepared = None
         with Session(engine) as session:
-            step = session.get(WorkflowStepRun, snapshot.id)
+            step = session.exec(
+                select(WorkflowStepRun)
+                .where(WorkflowStepRun.id == snapshot.id)
+                .with_for_update(skip_locked=True)
+            ).first()
             run = session.get(WorkflowRun, step.run_id) if step else None
-            if not step or step.status != "dispatch_pending" or not run:
+            if not step or not run:
+                continue
+            if step.status == "dispatching" and (step.claimed_at or 0) > now - CLAIM_STALE_SECONDS:
+                continue
+            if step.status not in {"dispatch_pending", "dispatching"}:
                 continue
             if run.status in {"cancelled", "failed", "succeeded", "timed_out"}:
                 continue
+            if run.status == "waiting_confirmation":
+                continue
             if run.status == "paused_offline" and (run.next_wakeup_at or 0) > now:
                 continue
+            step.status = "dispatching"
+            step.claim_owner = CLAIM_OWNER
+            step.claimed_at = now
+            session.add(step)
+            session.commit()
             if now >= min(step.deadline_at, run.deadline_at):
                 fail_step_dispatch(
                     session,
@@ -109,15 +129,37 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                         user_id=run.user_id,
                         device_id=run.device_id,
                         tool_name=step.tool_name,
+                        expected_provider=step.tool_provider,
                         expected_digest=step.tool_schema_digest,
                         arguments=arguments,
+                        confirmation_granted=confirmation_granted(session, run.id, step.step_id),
+                        card_id=run.card_id,
+                        card_version_id=run.card_version_id,
                     )
                 except WorkflowDispatchError as exc:
                     if exc.code == "DEVICE_OFFLINE":
                         run.status = "paused_offline"
+                        step.status = "dispatch_pending"
+                        step.claim_owner = ""
+                        step.claimed_at = None
                         run.next_wakeup_at = min(run.deadline_at, now + 5.0)
                         run.updated_at = now
                         session.add(run)
+                        session.commit()
+                        continue
+                    if exc.code == "CONFIRMATION_REQUIRED":
+                        step.status = "dispatch_pending"
+                        step.claim_owner = ""
+                        step.claimed_at = None
+                        session.add(step)
+                        request_confirmation(
+                            session,
+                            run=run,
+                            step_id=step.step_id,
+                            confirmation_type="forced",
+                            risk_summary=f"高风险设备工具：{step.tool_name}",
+                            timeout_seconds=min(300, max(1, int(run.deadline_at - now))),
+                        )
                         session.commit()
                         continue
                     fail_step_dispatch(
@@ -160,8 +202,10 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                 with Session(engine) as session:
                     step = session.exec(select(WorkflowStepRun).where(WorkflowStepRun.dispatch_task_id == prepared["task_id"])).first()
                     run = session.get(WorkflowRun, step.run_id) if step else None
-                    if step and run and step.status == "dispatch_pending":
+                    if step and run and step.status == "dispatching" and step.claim_owner == CLAIM_OWNER:
                         step.status = "waiting_device"
+                        step.claim_owner = ""
+                        step.claimed_at = None
                         step.started_at = step.started_at or now
                         run.status = "waiting_device"
                         run.next_wakeup_at = step.deadline_at
@@ -197,10 +241,12 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
             with Session(engine) as session:
                 step = session.get(WorkflowStepRun, prepared["step_db_id"])
                 run = session.get(WorkflowRun, prepared["run_id"])
-                if not step or not run or step.status != "dispatch_pending":
+                if not step or not run or step.status != "dispatching" or step.claim_owner != CLAIM_OWNER:
                     continue
                 if outcome.get("success"):
                     step.status = "waiting_device"
+                    step.claim_owner = ""
+                    step.claimed_at = None
                     step.started_at = now
                     run.status = "waiting_device"
                     run.next_wakeup_at = step.deadline_at
@@ -211,8 +257,12 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                     sent += 1
                 else:
                     run.status = "paused_offline"
+                    step.status = "dispatch_pending"
+                    step.claim_owner = ""
+                    step.claimed_at = None
                     run.next_wakeup_at = min(run.deadline_at, time.time() + 5.0)
                     run.updated_at = time.time()
                     session.add(run)
+                    session.add(step)
                     session.commit()
     return sent

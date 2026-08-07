@@ -64,6 +64,14 @@ def upgrade() -> None:
     op.create_index("ix_workflowcardversion_card_id", "workflowcardversion", ["card_id"])
     op.create_index("ix_workflowcardversion_version_number", "workflowcardversion", ["version_number"])
     op.create_index("ix_workflowcardversion_definition_digest", "workflowcardversion", ["definition_digest"])
+    op.create_foreign_key(
+        "fk_workflowcard_latest_version_id",
+        "workflowcard",
+        "workflowcardversion",
+        ["latest_version_id"],
+        ["id"],
+        ondelete="SET NULL",
+    )
 
     op.create_table(
         "workflowrun",
@@ -108,8 +116,11 @@ def upgrade() -> None:
         sa.Column("attempt", sa.Integer(), nullable=False),
         sa.Column("dispatch_task_id", sa.String(), nullable=False),
         sa.Column("tool_name", sa.String(), nullable=False),
+        sa.Column("tool_provider", sa.String(), nullable=False),
         sa.Column("tool_schema_digest", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
+        sa.Column("claim_owner", sa.String(), nullable=False),
+        sa.Column("claimed_at", sa.Float(), nullable=True),
         sa.Column("arguments_redacted_json", sa.Text(), nullable=False),
         sa.Column("arguments_json", sa.Text(), nullable=False),
         sa.Column("result_projection_json", sa.Text(), nullable=True),
@@ -123,7 +134,7 @@ def upgrade() -> None:
         sa.UniqueConstraint("dispatch_task_id"),
         sa.UniqueConstraint("run_id", "step_id", "attempt", name="uq_workflowsteprun_attempt"),
     )
-    for column in ("run_id", "step_id", "dispatch_task_id", "status", "deadline_at"):
+    for column in ("run_id", "step_id", "dispatch_task_id", "status", "claim_owner", "claimed_at", "deadline_at"):
         op.create_index(f"ix_workflowsteprun_{column}", "workflowsteprun", [column])
 
     op.create_table(
@@ -131,8 +142,11 @@ def upgrade() -> None:
         sa.Column("id", sa.String(), nullable=False),
         sa.Column("run_id", sa.String(), nullable=False),
         sa.Column("step_id", sa.String(), nullable=False),
+        sa.Column("confirmation_type", sa.String(), nullable=False),
         sa.Column("status", sa.String(), nullable=False),
         sa.Column("risk_summary", sa.String(), nullable=False),
+        sa.Column("next_step_id", sa.String(), nullable=False),
+        sa.Column("on_denied_step_id", sa.String(), nullable=False),
         sa.Column("requested_user_id", sa.Integer(), nullable=False),
         sa.Column("decided_by", sa.Integer(), nullable=True),
         sa.Column("decision", sa.String(), nullable=True),
@@ -147,10 +161,48 @@ def upgrade() -> None:
     for column in ("run_id", "step_id", "status", "requested_user_id", "expires_at"):
         op.create_index(f"ix_workflowconfirmation_{column}", "workflowconfirmation", [column])
 
+    op.create_table(
+        "workflowauditevent",
+        sa.Column("id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("run_id", sa.String(), nullable=True),
+        sa.Column("card_id", sa.String(), nullable=True),
+        sa.Column("card_version_id", sa.String(), nullable=True),
+        sa.Column("step_id", sa.String(), nullable=False),
+        sa.Column("dispatch_task_id", sa.String(), nullable=False),
+        sa.Column("device_id", sa.String(), nullable=False),
+        sa.Column("event_type", sa.String(), nullable=False),
+        sa.Column("status_from", sa.String(), nullable=False),
+        sa.Column("status_to", sa.String(), nullable=False),
+        sa.Column("detail_json", sa.Text(), nullable=False),
+        sa.Column("created_at", sa.Float(), nullable=False),
+        sa.ForeignKeyConstraint(["user_id"], ["user.id"]),
+        sa.ForeignKeyConstraint(["run_id"], ["workflowrun.id"]),
+        sa.ForeignKeyConstraint(["card_id"], ["workflowcard.id"]),
+        sa.ForeignKeyConstraint(["card_version_id"], ["workflowcardversion.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    for column in ("user_id", "run_id", "card_id", "card_version_id", "step_id", "dispatch_task_id", "device_id", "event_type", "created_at"):
+        op.create_index(f"ix_workflowauditevent_{column}", "workflowauditevent", [column])
+    op.create_index("ix_workflowauditevent_run_created", "workflowauditevent", ["run_id", "created_at"])
+
+    op.create_table(
+        "workflowschedulerheartbeat",
+        sa.Column("instance_id", sa.String(), nullable=False),
+        sa.Column("heartbeat_at", sa.Float(), nullable=False),
+        sa.Column("last_tick_duration_ms", sa.Integer(), nullable=False),
+        sa.Column("last_error", sa.String(), nullable=False),
+        sa.PrimaryKeyConstraint("instance_id"),
+    )
+    op.create_index("ix_workflowschedulerheartbeat_heartbeat_at", "workflowschedulerheartbeat", ["heartbeat_at"])
+
 
 def downgrade() -> None:
+    op.drop_table("workflowschedulerheartbeat")
+    op.drop_table("workflowauditevent")
     op.drop_table("workflowconfirmation")
     op.drop_table("workflowsteprun")
     op.drop_table("workflowrun")
+    op.drop_constraint("fk_workflowcard_latest_version_id", "workflowcard", type_="foreignkey")
     op.drop_table("workflowcardversion")
     op.drop_table("workflowcard")
