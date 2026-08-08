@@ -606,11 +606,14 @@ async def _call_mcp_or_endpoint_tool(
             ),
         }
     if is_endpoint_agent_tool(tool):
-        # Desktop / browser agents register their socket on the api-gateway, so
-        # endpoint-tool dispatch is served there (gateway.routers.
-        # device_dispatch_internal). In the monolith api_gateway_url is empty and
-        # we dispatch in-process below.
-        agent_host_url = settings.api_gateway_url
+        # Dispatch through the process that owns endpoint-agent sockets. In a
+        # split deployment that is connector-runtime; legacy monoliths either
+        # use api-gateway or dispatch in-process when both URLs are empty.
+        from api.devices.socket_owner import endpoint_dispatch_url
+        agent_host_url = endpoint_dispatch_url(
+            settings.api_gateway_url,
+            settings.connector_runtime_url,
+        )
         dispatch_timeout = _endpoint_dispatch_timeout(tool, arguments)
         if agent_host_url:
             return {

@@ -1,6 +1,6 @@
 import unittest
 
-from api.devices.socket_owner import should_reset_endpoint_presence
+from api.devices.socket_owner import endpoint_dispatch_url, should_reset_endpoint_presence
 
 
 class EndpointSocketOwnerTests(unittest.TestCase):
@@ -21,6 +21,21 @@ class EndpointSocketOwnerTests(unittest.TestCase):
     def test_non_socket_runtime_never_resets_presence(self) -> None:
         self.assertFalse(should_reset_endpoint_presence("worker", ""))
         self.assertFalse(should_reset_endpoint_presence("mcp", ""))
+
+    def test_dispatch_prefers_connector_socket_owner(self) -> None:
+        self.assertEqual(
+            endpoint_dispatch_url(
+                "http://api-gateway:3000/",
+                "http://connector-runtime:3002/",
+            ),
+            "http://connector-runtime:3002",
+        )
+
+    def test_dispatch_falls_back_to_gateway_for_legacy_deployments(self) -> None:
+        self.assertEqual(
+            endpoint_dispatch_url("http://api-gateway:3000/", ""),
+            "http://api-gateway:3000",
+        )
 
 
 if __name__ == "__main__":
