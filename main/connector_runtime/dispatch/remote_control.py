@@ -66,7 +66,7 @@ class RcSession:
     device_id: str
     user_id: int
     controller_sid: str
-    android_sid: str
+    device_sid: str
     created_at: float = field(default_factory=time.time)
 
 
@@ -74,7 +74,7 @@ class RcSession:
 _SESSIONS: Dict[str, RcSession] = {}
 
 
-def _find_android_sid(device_id: str) -> Optional[str]:
+def _find_device_sid(device_id: str) -> Optional[str]:
     target = str(device_id or "").strip()
     if not target:
         return None
@@ -135,16 +135,16 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
         )
         return
 
-    android_sid = _find_android_sid(device_id)
-    if not android_sid:
+    device_sid = _find_device_sid(device_id)
+    if not device_sid:
         await sio.emit(
             "rc:error",
-            {"code": "offline", "message": "目标安卓设备不在线"},
+            {"code": "offline", "message": "目标设备不在线或未连接到控制服务"},
             to=controller_sid,
         )
         return
 
-    if _agent_owner(android_sid) != user_id:
+    if _agent_owner(device_sid) != user_id:
         await sio.emit(
             "rc:error",
             {"code": "forbidden", "message": "无权控制该设备"},
@@ -152,7 +152,7 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
         )
         return
 
-    if not _agent_supports_rc(android_sid):
+    if not _agent_supports_rc(device_sid):
         await sio.emit(
             "rc:error",
             {"code": "unsupported", "message": "该设备版本不支持远程控制（请更新端侧客户端后重连）"},
@@ -166,11 +166,11 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
         device_id=device_id,
         user_id=user_id,
         controller_sid=controller_sid,
-        android_sid=android_sid,
+        device_sid=device_sid,
     )
     logger.info("remote-control start session=%s device=%s user=%s", session_id, device_id, user_id)
     # Tell the device to bring up capture + the peer connection (it offers).
-    await sio.emit("rc:start", {"sessionId": session_id}, to=android_sid)
+    await sio.emit("rc:start", {"sessionId": session_id}, to=device_sid)
     # Ack the controller so it can wire up its RTCPeerConnection and wait for
     # the offer.
     await sio.emit("rc:started", {"sessionId": session_id, "deviceId": device_id}, to=controller_sid)
@@ -192,8 +192,8 @@ async def relay(sid: str, event: str, data: Dict[str, Any]) -> None:
     if not session:
         return
     if sid == session.controller_sid:
-        target = session.android_sid
-    elif sid == session.android_sid:
+        target = session.device_sid
+    elif sid == session.device_sid:
         target = session.controller_sid
     else:
         return  # sid is not a member of this session — ignore (spoofing guard)
@@ -211,7 +211,7 @@ async def handle_disconnect(sid: str) -> None:
         _SESSIONS.pop(session.session_id, None)
         if session.controller_sid == sid:
             # Operator closed the tab — tell the device to stop capturing.
-            await sio.emit("rc:stop", {"sessionId": session.session_id}, to=session.android_sid)
+            await sio.emit("rc:stop", {"sessionId": session.session_id}, to=session.device_sid)
         else:
             # Device dropped — tell the operator the mirror ended.
             await sio.emit(

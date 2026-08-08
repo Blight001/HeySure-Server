@@ -613,9 +613,18 @@ async def _call_mcp_or_endpoint_tool(
         # split deployment that is connector-runtime; legacy monoliths either
         # use api-gateway or dispatch in-process when both URLs are empty.
         from api.devices.socket_owner import endpoint_dispatch_url
-        agent_host_url = endpoint_dispatch_url(
-            settings.api_gateway_url,
-            settings.connector_runtime_url,
+        # Bot-originated runs execute inside connector-runtime itself. That
+        # process owns the endpoint Socket.IO registry but intentionally has no
+        # CONNECTOR_RUNTIME_URL, so falling back to api-gateway would dispatch
+        # in the wrong process and return "no agent connected for this tool".
+        # Use the in-process path when this worker is the socket owner.
+        agent_host_url = (
+            ""
+            if str(settings.service_role or "").strip().lower() == "connector"
+            else endpoint_dispatch_url(
+                settings.api_gateway_url,
+                settings.connector_runtime_url,
+            )
         )
         dispatch_timeout = _endpoint_dispatch_timeout(tool, arguments)
         if agent_host_url:
@@ -3035,23 +3044,8 @@ def _run_worker_impl(
                         rebuilt_convo = None
                     if rebuilt_convo:
                         _compress_note = (
-                            "已压缩上下文：较早的对话历史已折叠为摘要，最近若干条原样保留，"
-                            "请基于压缩后的上下文继续。"
-                        )
-                        _save_message(
-                            bg,
-                            user_id,
-                            ChatMessageCreate(
-                                role="user",
-                                content=_compress_note,
-                                tags="system_notice_compress",
-                                ai_config_id=ai_config_id,
-                                ai_kind=ai_kind,
-                                session_id=session_id,
-                                session_name=session_name,
-                                model=model,
-                                total_tokens=0,
-                            ),
+                            "已完成上下文压缩；详细摘要已写入对话记录。"
+                            "请严格继承摘要中的目标、约束、进度、关键数据、待办与风险继续执行。"
                         )
                         convo = rebuilt_convo
                         convo.append({"role": "user", "content": _compress_note})

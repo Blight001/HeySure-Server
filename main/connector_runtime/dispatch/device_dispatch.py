@@ -39,7 +39,7 @@ from connector_runtime.dispatch.desktop_device_tools import (
     is_workshop_tool,
 )
 from api.services.storage.screenshot_store import attach_persisted_screenshot
-from api.models import AgentDispatchTask, ChatMessageCreate
+from api.models import AgentDispatchTask, ChatMessageCreate, DeviceAiBinding, DevicePresence
 from api.sio import agents, sio
 from api.services.chat.chat_persistence import _save_message
 
@@ -476,8 +476,6 @@ async def dispatch_task_to_agent(
     task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     target_sid = _find_agent_sid(device_id)
-    if not target_sid:
-        return {"success": False, "error": f"Agent not connected: {device_id}"}
 
     purge_stale_dispatches()
     task_id = str(task_id or f"atask_{uuid.uuid4().hex[:12]}")
@@ -524,7 +522,7 @@ async def dispatch_task_to_agent(
         loop = asyncio.get_running_loop()
         waiter = {"loop": loop, "future": loop.create_future()}
         _PENDING_DISPATCH_WAITERS[task_id] = waiter
-    if dispatch_status == "pending":
+    if dispatch_status == "pending" and target_sid:
         try:
             await sio.emit("task:dispatch", payload, to=target_sid)
         except Exception as exc:
@@ -532,7 +530,7 @@ async def dispatch_task_to_agent(
             _finalize_dispatch_row(task_id, status="error", success=False, error=str(exc))
             await resume_device_dispatch_queue(device_id)
             raise
-    else:
+    elif dispatch_status != "pending":
         promoted_task_id = await resume_device_dispatch_queue(device_id)
         if promoted_task_id == task_id:
             dispatch_status = "pending"
@@ -565,14 +563,17 @@ async def dispatch_task_to_agent(
             }
         finally:
             _PENDING_DISPATCH_WAITERS.pop(task_id, None)
+    public_status = dispatch_status if target_sid else "waiting_device"
     return {
         "success": True,
         "taskId": task_id,
         "deviceId": device_id,
-        "status": dispatch_status,
+        "status": public_status,
         "note": (
             f"Task dispatched to {_device_kind_label(device_id)}."
-            if dispatch_status == "pending"
+            if public_status == "pending"
+            else f"Task is waiting for {_device_kind_label(device_id)} to reconnect."
+            if public_status == "waiting_device"
             else f"Task queued for {_device_kind_label(device_id)}; it will run after the current task."
         ),
     }
@@ -1094,9 +1095,27 @@ async def dispatch_endpoint_tool(
         agent = get_connected_desktop_agent(ai_config_id, user_id, tool=tool_name)
     else:
         agent = None
-    if not agent:
-        return None
-    device_id = str(agent.get("id") or "").strip()
+    device_id = str(agent.get("id") or "").strip() if agent else ""
+    if not device_id:
+        # Preserve bot-originated MCP calls across short endpoint reconnects.
+        with Session(engine) as session:
+            rows = session.exec(
+                select(DeviceAiBinding, DevicePresence)
+                .join(DevicePresence, DevicePresence.device_id == DeviceAiBinding.device_id)
+                .where(
+                    DeviceAiBinding.user_id == int(user_id),
+                    DeviceAiBinding.ai_config_id == int(ai_config_id),
+                    DevicePresence.user_id == int(user_id),
+                )
+            ).all()
+        for binding, presence in rows:
+            try:
+                capabilities = set(json.loads(presence.capabilities_json or "[]"))
+            except Exception:
+                capabilities = set()
+            if tool_name in capabilities:
+                device_id = str(binding.device_id or "").strip()
+                break
     if not device_id:
         return None
 

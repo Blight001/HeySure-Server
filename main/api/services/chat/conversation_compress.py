@@ -199,7 +199,11 @@ def compress_session(
         logger.warning("conversation_compress: summary request returned empty content")
         return None
 
-    summary_content = "[对话历史摘要]\n" + summary
+    summary_content = "[系统提示]\n对话压缩摘要\n\n" + summary
+    compression_notice = (
+        "[系统提示]\n正在自动压缩较早的对话历史；系统会保留最近消息，"
+        "并用详细摘要承接目标、约束、进度、关键数据、待办与风险。"
+    )
 
     # Persist: fold the to-summarize rows into the summary.
     try:
@@ -214,9 +218,24 @@ def compress_session(
             session,
             user_id,
             ChatMessageCreate(
-                role="user",
+                role="system",
+                content=compression_notice,
+                tags="system_notice_compress_started",
+                ai_config_id=ai_config_id,
+                ai_kind=ai_kind,
+                session_id=session_id,
+                session_name=session_name,
+                model=model,
+                total_tokens=0,
+            ),
+        )
+        _save_message(
+            session,
+            user_id,
+            ChatMessageCreate(
+                role="system",
                 content=summary_content,
-                tags="conversation_summary",
+                tags="conversation_summary,system_notice_compress_result",
                 ai_config_id=ai_config_id,
                 ai_kind=ai_kind,
                 session_id=session_id,

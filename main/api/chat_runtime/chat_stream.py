@@ -303,10 +303,16 @@ def stream_turn_openai_compat(
             return sr
         if not raw_line:
             continue
-        line = raw_line.decode("utf-8")
-        if not line.startswith("data: "):
+        line = raw_line.decode("utf-8").strip()
+        # Some OpenAI-compatible gateways ignore ``stream=true`` and return one
+        # ordinary JSON completion. Accept both that shape and proper SSE so the
+        # final usage block is not silently discarded (which persisted 0 tokens).
+        if line.startswith("data: "):
+            payload_line = line[6:].strip()
+        elif line.startswith("{"):
+            payload_line = line
+        else:
             continue
-        payload_line = line[6:].strip()
         if payload_line == "[DONE]":
             break
         try:
@@ -327,8 +333,11 @@ def stream_turn_openai_compat(
         if not choices:
             continue
 
-        sr.finish_reason = choices[0].get("finish_reason") or sr.finish_reason
-        delta = choices[0].get("delta") or {}
+        choice = choices[0]
+        sr.finish_reason = choice.get("finish_reason") or sr.finish_reason
+        # Streaming chunks carry ``delta``; a gateway that buffered the answer
+        # carries the same fields in ``message`` instead.
+        delta = choice.get("delta") or choice.get("message") or {}
 
         delta_reasoning = delta.get("reasoning_content")
         if isinstance(delta_reasoning, str):
@@ -339,9 +348,9 @@ def stream_turn_openai_compat(
         tc_list = delta.get("tool_calls")
         if tc_list:
             sr.has_native_tc = True
-            for _tc in tc_list:
+            for _fallback_index, _tc in enumerate(tc_list):
                 try:
-                    tc_index = int(_tc.get("index") or 0)
+                    tc_index = int(_tc.get("index", _fallback_index))
                 except Exception:
                     tc_index = len(tool_call_parts)
                 part = tool_call_parts.setdefault(tc_index, {"id": "", "name": "", "arguments": ""})
