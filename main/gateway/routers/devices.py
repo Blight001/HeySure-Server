@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 
 from api.devices.bindings import set_binding
 from api.devices.mcp_permissions import get_scope, set_scope
+from api.devices.presence import online_agent_snapshot_for_user
 from api.database import get_session
 from api.models import AssistantAIConfig, DevicePresence
 from .auth import get_current_user
@@ -43,7 +44,10 @@ def _find_connected_agent(device_id: str, user_id: int) -> Optional[dict]:
             return toolbox_engine.toolbox_connected_entry_for_user(user_id)
     except Exception:
         pass
-    return None
+    # Split deployment: endpoint sockets belong to Connector Runtime, so the
+    # Gateway's process-local ``agents`` registry is empty for those devices.
+    # Fall back to the shared presence snapshot written by the socket owner.
+    return online_agent_snapshot_for_user(user_id, aid)
 
 
 def _scope_view(agent: dict, user_id: int) -> dict:

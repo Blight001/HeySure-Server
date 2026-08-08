@@ -465,6 +465,43 @@ def online_device_display_names(user_id) -> Dict[str, str]:
     return out
 
 
+def online_agent_snapshot_for_user(user_id, device_id) -> Optional[dict]:
+    """Return an agent-like record for an online endpoint owned by ``user_id``.
+
+    Gateway routes use this when endpoint sockets live in Connector Runtime.
+    The returned shape intentionally matches the subset consumed by
+    ``device_type_of`` and ``agent_endpoint_tools``.
+    """
+    uid = _int(user_id)
+    aid = str(device_id or "").strip()
+    if uid is None or not aid:
+        return None
+    with Session(engine) as session:
+        row = session.exec(
+            select(DevicePresence).where(
+                DevicePresence.user_id == uid,
+                DevicePresence.device_id == aid,
+                DevicePresence.online == True,  # noqa: E712
+            ).order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
+        ).first()
+        if row is None:
+            return None
+        device_type = str(row.device_type or "").strip()
+        return {
+            "id": aid,
+            "name": str(row.name or "").strip() or aid,
+            "platform": str(row.platform or "").strip(),
+            "deviceType": device_type,
+            "aiConfigId": row.ai_config_id,
+            "isWindowsDesktop": device_type == "desktop",
+            "isBrowserExtension": device_type == "browser",
+            "isAndroid": device_type == "android",
+            "capabilities": sorted(mcp_capabilities(_decode(row))),
+            "online": True,
+            "dispatchable": True,
+        }
+
+
 def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict]:
     """Persisted endpoint rows not covered by this process's live sockets.
 
