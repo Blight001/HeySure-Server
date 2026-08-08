@@ -35,7 +35,12 @@ def _sanitize(policy: Any) -> Dict[str, str]:
 
 
 def get_policy(user_id: int, device_type: str) -> Dict[str, str]:
-    dtype = normalize_device_type(device_type)
+    try:
+        dtype = normalize_device_type(device_type)
+    except ValueError:
+        # Custom endpoint agents (for example Linux server agents) own their
+        # runtime tool policy and do not have a server-managed type policy.
+        return {}
     with Session(engine) as session:
         row = session.exec(
             select(DevicePermissionPolicy).where(

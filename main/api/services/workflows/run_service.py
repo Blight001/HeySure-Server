@@ -227,6 +227,10 @@ def create_run(
     if len(active_device_runs) >= int(settings.workflow_max_concurrent_per_device):
         raise ValueError("DEVICE_CONCURRENCY_LIMIT")
     session.add(row)
+    # WorkflowAuditEvent.run_id has a foreign key but the models do not expose
+    # an ORM relationship, so SQLAlchemy cannot infer insert ordering. Persist
+    # the parent run before enqueueing its audit row.
+    session.flush()
     add_audit(session, event_type="run_created", run=row, status_to="pending")
     session.commit()
     session.refresh(row)

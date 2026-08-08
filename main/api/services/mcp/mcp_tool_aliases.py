@@ -62,6 +62,22 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
 }
 
 
+# Permission selectors shown as one logical toolbox capability may represent
+# several independently callable runtime tools.  Expand them at the shared
+# normalization boundary so config allowlists, per-message scopes, prompt
+# previews and the AI runtime all apply identical semantics.
+TOOL_BUNDLE_EXPANSIONS: Dict[str, Set[str]] = {
+    "automation.manage": {
+        "automation.list",
+        "automation.get",
+        "automation.run",
+        "automation.status",
+        "automation.cancel",
+        "automation.manage",
+    },
+}
+
+
 def normalize_legacy_tool_name(name: str) -> str:
     """把单个旧工具名映射到当前名；非旧名原样返回。"""
     key = str(name or "").strip()
@@ -83,8 +99,11 @@ def fully_clean_tool_names(names: Iterable[str]) -> Set[str]:
     确保 prompt 里永远不会再出现 admin.get_overview / prompt.read_ai 这类老名字。
     """
     normalized = normalize_legacy_tool_names(names)
+    expanded: Set[str] = set(normalized)
+    for name in normalized:
+        expanded.update(TOOL_BUNDLE_EXPANSIONS.get(name, set()))
     legacy_old_names = set(LEGACY_TOOL_RENAMES.keys())
-    cleaned = {n for n in normalized if n not in legacy_old_names}
+    cleaned = {n for n in expanded if n not in legacy_old_names}
     return cleaned
 
 

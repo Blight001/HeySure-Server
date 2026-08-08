@@ -547,14 +547,21 @@ async def _dispatch_endpoint_via_runtime(
 # accepted the task keeps working; a disconnected one fails fast upstream
 # ("Agent not connected"), so the longer window only applies to real work.
 _LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT = 900
+# Device execution and result delivery are separate phases.  A command may use
+# its entire declared timeout and finish while the Gateway socket is restarting;
+# keep polling the persisted dispatch row long enough for the Agent to reconnect,
+# re-register and flush its queued terminal result.
+_ENDPOINT_RESULT_DELIVERY_GRACE = 120
 _ENDPOINT_DISPATCH_TIMEOUT_CAP = 1800
 
 
 def _endpoint_dispatch_timeout(tool: str, arguments: dict) -> int:
     """Resolve the result-wait timeout (seconds) for an endpoint-agent tool.
 
-    Priority: an explicit ``args.timeout_seconds`` (the model can extend a
-    known-slow call) > a per-tool long-run default > the global 120s default.
+    Priority: an explicit ``args.timeout_seconds`` (the device execution
+    deadline) plus a separate result-delivery grace period > a per-tool long-run
+    default > the global 120s default.  The grace prevents a completed result
+    queued during a Gateway restart from racing the caller's polling deadline.
     Always clamped to a sane ceiling so a hung device can't wedge the run
     indefinitely.
     """
@@ -562,7 +569,11 @@ def _endpoint_dispatch_timeout(tool: str, arguments: dict) -> int:
     raw = args.get("timeout_seconds")
     if raw is not None:
         try:
-            return max(5, min(int(raw), _ENDPOINT_DISPATCH_TIMEOUT_CAP))
+            execution_timeout = max(5, int(raw))
+            return min(
+                execution_timeout + _ENDPOINT_RESULT_DELIVERY_GRACE,
+                _ENDPOINT_DISPATCH_TIMEOUT_CAP,
+            )
         except (TypeError, ValueError):
             pass
     action = str(args.get("action") or "").strip().lower()
@@ -1361,6 +1372,7 @@ def _run_worker(
     merged_system_prompt: Optional[str] = None,
     max_steps: Optional[int] = None,
     current_user_message_id: Optional[int] = None,
+    selected_mcp_tools: Optional[set[str]] = None,
 ):
     """Public worker entry. Wraps the implementation with heartbeat lifecycle
     so every caller (monolith thread, ai-runtime dispatcher, scheduler) gets
@@ -1410,6 +1422,7 @@ def _run_worker(
             merged_system_prompt=merged_system_prompt,
             max_steps=max_steps,
             current_user_message_id=current_user_message_id,
+            selected_mcp_tools=selected_mcp_tools,
         )
     finally:
         try:
@@ -1447,6 +1460,7 @@ def _run_worker_impl(
     merged_system_prompt: Optional[str] = None,
     max_steps: Optional[int] = None,
     current_user_message_id: Optional[int] = None,
+    selected_mcp_tools: Optional[set[str]] = None,
 ):
     if _run_should_stop(run_id):
         _run_set_status(run_id, "stopped", finished=True)
@@ -1508,6 +1522,7 @@ def _run_worker_impl(
                 cfg=cfg,
                 base_system_prompt=system_prompt,
                 task_payload=task_payload,
+                selected_mcp_tools=selected_mcp_tools,
             )
 
             msg_stmt = select(ChatMessage).where(

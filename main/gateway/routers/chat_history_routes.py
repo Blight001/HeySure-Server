@@ -3,6 +3,7 @@ delete chat sessions, and report per-session total token usage."""
 
 IS_ROUTER_ENTRY = False
 
+import json
 import logging
 import time
 from typing import Dict, Optional
@@ -29,17 +30,28 @@ def get_system_prompt_preview(
     ai_config_id: Optional[int] = None,
     ai_kind: str = "assistant",
     session_id: Optional[str] = None,
+    selected_mcp_tools: Optional[str] = None,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
+
+    selected_scope = None
+    if selected_mcp_tools is not None:
+        try:
+            parsed_scope = json.loads(selected_mcp_tools)
+            if not isinstance(parsed_scope, list):
+                raise ValueError("selected_mcp_tools must be a list")
+            selected_scope = {str(name).strip() for name in parsed_scope[:500] if str(name).strip()}
+        except Exception:
+            raise HTTPException(status_code=400, detail="selected_mcp_tools 格式无效")
 
     # Prefer the *actual* system prompt the model last received in this session
     # (persisted on the assistant message), so the preview shows ground truth —
     # the exact prompt the AI got, including the dynamic MCP catalog as it was
     # resolved at run time (e.g. which browser/desktop agents were online). This
     # avoids a misleading live re-derivation that can diverge from what the AI saw.
-    if session_id:
+    if session_id and selected_scope is None:
         last_stmt = select(ChatMessage).where(
             ChatMessage.user_id == user.id,
             ChatMessage.session_id == session_id,
@@ -61,6 +73,7 @@ def get_system_prompt_preview(
         ai_kind=ai_kind,
         ai_config_id=ai_config_id,
         session_id=session_id,
+        selected_mcp_tools=selected_scope,
     )
     return {"prompt": prompt, "prompt_source": "runtime_preview"}
 

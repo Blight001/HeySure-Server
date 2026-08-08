@@ -210,6 +210,8 @@ def _load_worker_kwargs(run: ChatRun) -> Dict[str, Any]:
         "max_steps": extras.get("max_steps"),
         "current_user_message_id": extras.get("current_user_message_id")
             or (last_user_msg.id if last_user_msg else None),
+        "selected_mcp_tools": set(extras.get("selected_mcp_tools") or [])
+            if extras.get("selected_mcp_tools") is not None else None,
     }
 
 

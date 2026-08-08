@@ -169,6 +169,15 @@ def start_chat_run(
     if trimmed_system:
         merged_system_prompt = f"{system_prompt}\n\n" + "\n\n".join(trimmed_system)
 
+    raw_selected_mcp_tools = req.get("selected_mcp_tools")
+    selected_mcp_tools = None
+    if raw_selected_mcp_tools is not None:
+        if not isinstance(raw_selected_mcp_tools, list):
+            raise HTTPException(status_code=400, detail="selected_mcp_tools must be a list")
+        selected_mcp_tools = list(dict.fromkeys(
+            str(name).strip() for name in raw_selected_mcp_tools[:500] if str(name).strip()
+        ))
+
     visible_tags = str(req.get("visible_tags") or "").strip()
     user_msg = _save_message(
         session,
@@ -189,6 +198,7 @@ def start_chat_run(
         "merged_system_prompt": merged_system_prompt,
         "max_steps": req.get("max_steps"),
         "current_user_message_id": user_msg.id,
+        "selected_mcp_tools": selected_mcp_tools,
     }
     row = ChatRun(
         run_id=run_id,
@@ -222,6 +232,7 @@ def start_chat_run(
             "merged_system_prompt": merged_system_prompt,
             "max_steps": req.get("max_steps"),
             "current_user_message_id": user_msg.id,
+            "selected_mcp_tools": set(selected_mcp_tools) if selected_mcp_tools is not None else None,
         },
         daemon=True,
     )

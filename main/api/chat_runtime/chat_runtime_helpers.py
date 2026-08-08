@@ -148,6 +148,7 @@ def build_runtime_system_prompt_and_tools(
     cfg: Optional[Any] = None,
     base_system_prompt: Optional[str] = None,
     task_payload: Optional[dict] = None,
+    selected_mcp_tools: Optional[set[str]] = None,
 ) -> tuple[str, set]:
     """Single source of truth for the runtime system prompt **and** the effective
     MCP tool allow-list.
@@ -313,6 +314,20 @@ def build_runtime_system_prompt_and_tools(
     # 最后再彻底清理一次老名字，防止任何路径残留
     effective_tool_allowlist = fully_clean_tool_names(effective_tool_allowlist)
 
+    # Per-message scope selected in the Web attachment panel. This can only
+    # narrow the AI's resolved maximum permissions, never grant extra tools.
+    # Introspection remains available so the model can load schemas for tools
+    # inside the selected scope. Task-required tools remain available for
+    # scheduler/task integrity.
+    if selected_mcp_tools is not None:
+        selected = fully_clean_tool_names({
+            str(name).strip() for name in selected_mcp_tools if str(name).strip()
+        })
+        selected.update(MCP_INTROSPECTION_TOOLS)
+        if is_task_runtime:
+            selected.update(TASK_RUNTIME_REQUIRED_TOOLS)
+        effective_tool_allowlist &= selected
+
     if merged_system_prompt:
         system_prompt = merged_system_prompt
     # 数字社会成员名单：让每个 AI 知道同伴的 ai_config_id / 名字，否则
@@ -380,6 +395,7 @@ def build_effective_system_prompt(
     ai_config_id: Optional[int] = None,
     session_id: Optional[str] = None,
     merged_system_prompt: Optional[str] = None,
+    selected_mcp_tools: Optional[set[str]] = None,
 ) -> str:
     """Build the same runtime system prompt the inference loop injects before a turn.
 
@@ -393,6 +409,7 @@ def build_effective_system_prompt(
         ai_config_id=ai_config_id,
         session_id=session_id,
         merged_system_prompt=merged_system_prompt,
+        selected_mcp_tools=selected_mcp_tools,
     )
     return prompt
 
