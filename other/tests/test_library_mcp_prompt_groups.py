@@ -144,3 +144,23 @@ def test_removed_duplicate_library_tools_are_cleaned_from_saved_configs():
     assert fully_clean_tool_names({
         "member.manage", "admin.manage", "task.manage", "prompt.manage"
     }) == {"member.manage"}
+
+
+def test_library_scope_payload_uses_exact_saved_subset():
+    from gateway.routers.workshop import _library_scope_payload
+
+    class _Cfg:
+        id = 42
+        mcp_tools = json.dumps(["member.manage", "knowledge.manage", "workspace.search"])
+
+    payload = _library_scope_payload(_Cfg())
+    assert payload["allowed"] == ["knowledge.manage", "member.manage"]
+    assert set(payload["mcpTools"]) == {
+        "knowledge.manage", "member.manage", "workspace.search",
+    }
+
+
+def test_task_runtime_does_not_regrant_member_management():
+    from api.services.tasks.task_system import TASK_RUNTIME_REQUIRED_TOOLS
+
+    assert "member.manage" not in TASK_RUNTIME_REQUIRED_TOOLS

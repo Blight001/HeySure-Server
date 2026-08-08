@@ -256,18 +256,16 @@ def build_runtime_system_prompt_and_tools(
                 effective_tool_allowlist |= toolbox_tools_for_config(ai_config_id, uid)
             except Exception:
                 pass
-            # Even under task override, ensure core system built-ins are directly available
-            # (knowledge.search, knowledge.manage, todo.manage, workspace.*, etc. must not be
-            # stripped for pre-plan / task flows). Library governance tools are force-included
-            # here and the binding filter below will drop unbound ones. This fixes calls to
-            # "图书馆 MCP" (e.g. knowledge.manage) being rejected during task execution.
+            # Even under task override, ensure non-library system built-ins are
+            # directly available. Library tools remain narrowed by cfg.mcp_tools.
             try:
                 from mcp_runtime.mcp import registry as _mcp_registry
+                from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
                 _server_direct = {
                     str(t.get("name") or "").strip()
                     for t in _mcp_registry.list_tools()
                     if t.get("name")
-                }
+                } - set(LIBRARY_BOUND_TOOLS)
                 effective_tool_allowlist |= _server_direct
             except Exception:
                 pass
@@ -285,29 +283,31 @@ def build_runtime_system_prompt_and_tools(
     except Exception:
         pass
 
-    # System built-in MCPs (from MCP registry) are allowed for direct AI calls.
-    # They are NOT gated behind toolbox binding/selection like device (endpoint) MCPs.
-    # This fixes "Tool not allowed for this task" for knowledge.* / todo.manage / workspace.* etc.
-    # Library governance tools (LIBRARY_BOUND_TOOLS) are included here; the subsequent
-    # _filter_tools_for_current_bindings drops them only if the AI is not bound to library.
-    # This makes 图书馆 MCP usable in task mode / task runtime when bound.
+    # Non-library system built-ins are direct. Library tools remain narrowed by
+    # the exact subset saved in cfg.mcp_tools and are then binding-checked below.
     try:
         from mcp_runtime.mcp import registry as _mcp_registry
+        from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
         _server_direct = {
             str(t.get("name") or "").strip()
             for t in _mcp_registry.list_tools()
             if t.get("name")
-        }
+        } - set(LIBRARY_BOUND_TOOLS)
         effective_tool_allowlist |= _server_direct
+    except Exception:
+        pass
+
+    # A task override or required-tool list may narrow, but may never grant a
+    # library tool that the AI config did not select.
+    try:
+        from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
+        configured = fully_clean_tool_names(_parse_allowed_tools(cfg.mcp_tools if cfg else None))
+        effective_tool_allowlist -= set(LIBRARY_BOUND_TOOLS) - configured
     except Exception:
         pass
 
     # Apply current binding state (library / toolbox) so unbound governance tools
     # do not appear in the visible MCP catalog sent to the model.
-    # Note: LIBRARY_BOUND_TOOLS are now force-included by the server_direct adds above
-    # (for both normal and task-override flows) so that binding to 图书馆 makes
-    # knowledge.manage etc. available even if not explicitly in cfg.mcp_tools or task override.
-    # The filter removes them only when not bound.
     effective_tool_allowlist = _filter_tools_for_current_bindings(
         effective_tool_allowlist, uid, ai_config_id
     )

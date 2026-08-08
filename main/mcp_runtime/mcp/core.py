@@ -1,6 +1,7 @@
 import asyncio
 import contextvars
 import inspect
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -214,6 +215,25 @@ def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Option
             raise HTTPException(
                 status_code=403,
                 detail=f"该 AI 未绑定图书馆，无法调用 {tool_name}（请在 AI 配置或世界中绑定图书馆）",
+            )
+        # Binding opens the library device; the per-AI saved subset still
+        # decides which library MCPs this member may invoke.
+        from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
+        with Session(engine) as session:
+            cfg = session.exec(
+                select(AssistantAIConfig).where(
+                    AssistantAIConfig.user_id == int(user_id),
+                    AssistantAIConfig.id == int(ai_config_id),
+                )
+            ).first()
+        try:
+            selected = fully_clean_tool_names(json.loads(cfg.mcp_tools or "[]")) if cfg else set()
+        except Exception:
+            selected = set()
+        if tool_name not in selected:
+            raise HTTPException(
+                status_code=403,
+                detail=f"该 AI 的图书馆 MCP 权限范围未启用 {tool_name}",
             )
         return
     # 工具箱门禁判定与绑定逻辑由独立的「工具箱」设备模块负责。

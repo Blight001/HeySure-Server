@@ -108,13 +108,6 @@ async def list_mcp_tools(
             if allowed_tools is None:
                 allowed_tools = set()
             allowed_tools |= _sys
-            # Add library-bound governance tools only when actually bound
-            try:
-                from api.devices.workshop_bindings import config_bound_to_library
-                if config_bound_to_library(user.id, ai_config_id):
-                    allowed_tools |= set(_lib or ())
-            except Exception:
-                pass
         except Exception:
             pass
 
@@ -272,14 +265,11 @@ async def call_mcp_tool(
             _sys_direct = {str(t.get("name") or "").strip() for t in _reg.list_tools() if t.get("name")}
             _sys_direct -= set(_lib or ())
             allowed_tools |= _sys_direct
-            is_server_builtin = _reg.has(req.tool) and not is_endpoint_agent_tool(req.tool)
-            # library ones: include if bound (for the check)
-            try:
-                from api.devices.workshop_bindings import config_bound_to_library
-                if config_bound_to_library(user.id, req.ai_config_id):
-                    allowed_tools |= set(_lib or ())
-            except Exception:
-                pass
+            is_server_builtin = (
+                _reg.has(req.tool)
+                and req.tool not in set(_lib or ())
+                and not is_endpoint_agent_tool(req.tool)
+            )
         except Exception:
             pass
 

@@ -9,7 +9,9 @@
 调用 ``library.engine.execute_tool``，其中完成白名单/归属/绑定复核。
 """
 
-from typing import Dict, Optional
+import json
+import time
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
@@ -33,6 +35,11 @@ class WorkshopBindRequest(BaseModel):
     ai_config_id: int
     device_id: str
     bound: bool = True
+
+
+class LibraryMcpScopeRequest(BaseModel):
+    ai_config_id: int
+    tools: List[str] = []
 
 
 def _load_owned_config(session: Session, user_id: int, ai_config_id) -> AssistantAIConfig:
@@ -59,6 +66,78 @@ def _config_name(session: Session, user_id: int, ai_config_id: Optional[int]) ->
         )
     ).first()
     return str(cfg.name or "").strip() if cfg else f"AI-{ai_config_id}"
+
+
+def _library_scope_payload(cfg: AssistantAIConfig) -> dict:
+    from mcp_runtime.mcp import registry
+    from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
+    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
+
+    capabilities = sorted({
+        str(item.get("name") or "").strip()
+        for item in registry.list_tools()
+        if str(item.get("name") or "").strip() in LIBRARY_BOUND_TOOLS
+    })
+    try:
+        parsed = json.loads(cfg.mcp_tools or "[]")
+    except Exception:
+        parsed = []
+    saved = fully_clean_tool_names(parsed if isinstance(parsed, list) else [])
+    allowed = sorted(saved & set(capabilities))
+    return {
+        "aiConfigId": int(cfg.id or 0),
+        "capabilities": capabilities,
+        "allowed": allowed,
+        "mcpTools": sorted(saved),
+    }
+
+
+@router.get("/mcp-scope")
+def get_library_mcp_scope(
+    ai_config_id: int,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Return the exact saved library-tool subset for one owned AI config."""
+    user = get_current_user(authorization, session)
+    cfg = _load_owned_config(session, user.id, ai_config_id)
+    return _library_scope_payload(cfg)
+
+
+@router.put("/mcp-scope")
+def update_library_mcp_scope(
+    payload: LibraryMcpScopeRequest,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Replace only the selected library MCP subset, preserving other tools."""
+    user = get_current_user(authorization, session)
+    cfg = _load_owned_config(session, user.id, payload.ai_config_id)
+    from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS, clamp_tools_json, config_role_tier
+    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
+
+    try:
+        parsed = json.loads(cfg.mcp_tools or "[]")
+    except Exception:
+        parsed = []
+    current = fully_clean_tool_names(parsed if isinstance(parsed, list) else [])
+    capabilities = set(_library_scope_payload(cfg)["capabilities"])
+    requested = {
+        str(item or "").strip()
+        for item in (payload.tools or [])
+        if str(item or "").strip()
+    } & capabilities
+    merged = (current - set(LIBRARY_BOUND_TOOLS)) | requested
+    cfg.mcp_tools = clamp_tools_json(
+        user,
+        config_role_tier(cfg),
+        json.dumps(sorted(merged), ensure_ascii=False),
+    )
+    cfg.updated_at = time.time()
+    session.add(cfg)
+    session.commit()
+    session.refresh(cfg)
+    return _library_scope_payload(cfg)
 
 
 @router.get("/bindings")
