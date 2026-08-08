@@ -328,14 +328,17 @@ def _build_native_tools_payload(allowed_tools: Optional[set] = None) -> tuple[Li
 def _resolve_mcp_tool_name(
     tool: str,
     native_tool_name_map: Dict[str, str],
-    exposed_tools: Optional[set] = None,
+    allowed_tools: Optional[set] = None,
 ) -> str:
     """Map whatever name the model emitted back onto a real MCP tool name.
 
     Native calls arrive already mapped through ``native_tool_name_map``. Models
     on the text protocol routinely mix separators (``mcp_xxx`` / ``mcp__xxx`` /
     superseded names), so fall back to the alias resolver rather than failing
-    the call outright.
+    the call outright. The candidates must be the full effective execution
+    allow-list, not only the progressively exposed schema subset: text-protocol
+    providers do not receive native schemas and may encode an allowed dynamic
+    endpoint tool such as ``aifree.windows_tab`` as ``aifree_windows_tab``.
     """
     name = str(tool or "").strip()
     if not name:
@@ -346,7 +349,7 @@ def _resolve_mcp_tool_name(
     from api.services.mcp.mcp_tool_aliases import resolve_tool_name
 
     candidates = set(native_tool_name_map.values())
-    candidates.update(exposed_tools or set())
+    candidates.update(allowed_tools or set())
     try:
         candidates.update(
             str(item.get("name") or "").strip()
@@ -2917,7 +2920,7 @@ def _run_worker_impl(
                 for _raw_call in sr.tool_calls:
                     _resolved_call = dict(_raw_call)
                     _resolved_call["tool"] = _resolve_mcp_tool_name(
-                        _raw_call.get("tool", ""), native_tool_name_map, current_exposed_tools
+                        _raw_call.get("tool", ""), native_tool_name_map, effective_tool_allowlist
                     )
                     turn_calls.append(_resolved_call)
 

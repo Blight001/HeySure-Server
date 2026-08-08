@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from ai_runtime.inference import core
 from api.chat_runtime.chat_runtime_helpers import _digital_society_roster_text
 from api.services.mcp.mcp_tool_aliases import resolve_tool_name
 from mcp_runtime.mcp import registry
@@ -71,6 +72,17 @@ def test_mcp_native_name_variants_resolve_to_the_same_registered_tool():
     assert resolve_tool_name("message.send+to+ai", candidates) == "message.send+to"
     assert resolve_tool_name("message.send_to_user", candidates) == "message.send+to"
     assert resolve_tool_name("message_send-to", candidates) == "message.send+to"
+
+
+def test_text_protocol_dynamic_endpoint_name_resolves_against_full_allowlist():
+    # Text-protocol providers receive no native schema map. They may still emit
+    # the function-safe spelling from memory, so the execution allow-list must
+    # provide the canonical dynamic endpoint name used for permission checks.
+    assert core._resolve_mcp_tool_name(
+        "aifree_windows_tab",
+        {},
+        {"mcp.describe+tool", "aifree.windows_tab"},
+    ) == "aifree.windows_tab"
 
 
 def test_registered_mcp_names_do_not_contain_internal_underscores():
