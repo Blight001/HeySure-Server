@@ -31,7 +31,7 @@ DEFAULT_UI_BRAIN_VIEW_MODE = "sections"
 
 DEFAULT_MODEL_PRESETS = """[{"id":"deepseek-chat","name":"DeepSeek Chat","api_key":"sk-cb40bc0b0b894934919907913e337927","base_url":"https://api.deepseek.com/chat/completions","model":"deepseek-chat"}]"""
 
-DEFAULT_MCP_NAMESPACE_HINTS = """{"mcp":"MCP 自省入口。使用 mcp.describe+tool 发现工具并读取参数 schema。","member":"AI 数字成员管理。member.manage 查询、创建、编辑成员及其任务与设备绑定，需要绑定图书馆；成员删除只能由人在控制台确认。","todo":"统一计划管理。todo.manage(action=create/get/edit/delete) 创建、查看、推进或删除计划；edit 更新当前阶段状态，最后阶段更新后系统自动收尾。","workspace":"工作区。workspace.run+command 执行命令和文件操作；联网查询用 workspace.search。","device_mcp":"设备 MCP 自迭代（图书馆工具，需绑定图书馆）。","conversation":"会话管理。","knowledge":"knowledge.search 检索知识；knowledge.manage 管理图书馆内容（需绑定图书馆）。","ai":"AI 间通信。","user":"用户通知。","web":"联网搜索。","memory":"长期记忆。","project":"项目管理。"}"""
+DEFAULT_MCP_NAMESPACE_HINTS = """{"mcp":"MCP 自省入口。使用 mcp.describe+tool 发现工具并读取参数 schema。","member":"AI 数字成员管理。member.manage 查询、创建、编辑成员及其任务与设备绑定，需要绑定图书馆；成员删除只能由人在控制台确认。","todo":"统一计划管理。todo.manage(action=create/get/edit/delete) 创建、查看、推进或删除计划；edit 更新当前阶段状态，最后阶段更新后系统自动收尾。","workspace":"工作区。workspace.run+command 执行命令和文件操作；联网查询用 workspace.search。","device_mcp":"设备清单、设备 MCP 使用范围与动态工具管理（图书馆工具，需绑定图书馆）。","conversation":"会话管理。","knowledge":"knowledge.search 检索知识；knowledge.manage 管理图书馆内容（需绑定图书馆）。","ai":"AI 间通信。","user":"用户通知。","web":"联网搜索。","memory":"长期记忆。","project":"项目管理。"}"""
 
 DEFAULT_MCP_DYNAMIC_RULE = """工具目录由运行时按当前 AI 的真实权限动态注入系统提示，并显示在前置 Prompt 预览中；不要把工具说明附加到用户消息。已暴露参数 schema 的工具应直接调用；只有目标工具未暴露 schema 或参数确实不明确时，才用 mcp.describe+tool（支持 tool 单个、tools 批量或 query 关键词搜索）发现工具或补充 schema。不要在任务开始时枚举、摸底全部 MCP；被加载的目标工具会在随后轮次直接可调用。
 

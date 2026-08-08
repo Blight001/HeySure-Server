@@ -288,8 +288,10 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
     registry.register(MCPTool(
         name="device+mcp.manage",
         description=(
-            "自主管理设备端 MCP 工具（按设备类型 desktop/browser），可用于迭代更好用的工具实现。"
-            "list/get 查看；capabilities 列出该类型设备可调用的原生能力；upsert 创建或覆盖；delete 删除。"
+            "统一管理账号下设备及其 MCP：devices 获取在线/离线设备号、绑定成员和工具数量；"
+            "scope_get/scope_set 读取或保存单台设备的 MCP 使用范围，设备号可直接交给 member.manage 绑定数字成员。"
+            "同时支持按设备类型 desktop/browser 自主管理动态 MCP 工具，用于迭代更好用的工具实现。"
+            "list/get 查看动态工具；capabilities 列出该类型设备可调用的原生能力；upsert 创建或覆盖；delete 删除。"
             "desktop 工具是在设备上运行的 JS（作用域有 args/cap/ctx，cap 是原生能力库，如 cap.call('fs.read', args)）；"
             "browser 工具用 call/set/return 指令。保存后立即下发到在线设备，下一轮即可调用。"
         ),
