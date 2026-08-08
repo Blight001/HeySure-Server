@@ -136,3 +136,11 @@ def test_removed_duplicate_library_tools_are_not_registered():
     names = {item["name"] for item in registry.list_tools()}
     assert "member.manage" in names
     assert {"admin.manage", "task.manage", "prompt.manage"}.isdisjoint(names)
+
+
+def test_removed_duplicate_library_tools_are_cleaned_from_saved_configs():
+    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
+
+    assert fully_clean_tool_names({
+        "member.manage", "admin.manage", "task.manage", "prompt.manage"
+    }) == {"member.manage"}

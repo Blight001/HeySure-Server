@@ -85,6 +85,8 @@ async def list_mcp_tools(
                 if not isinstance(parsed_allowed, list):
                     raise ValueError("mcp_tools must be a JSON array")
                 allowed_tools = {str(item).strip() for item in parsed_allowed if isinstance(item, str) and str(item).strip()}
+                from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
+                allowed_tools = fully_clean_tool_names(allowed_tools)
                 allowed_tools = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(allowed_tools))
                 allowed_tools.update(MCP_INTROSPECTION_TOOLS)
                 allowed_tools.update(endpoint_bridge_tools_for_config(ai_config_id, user.id))

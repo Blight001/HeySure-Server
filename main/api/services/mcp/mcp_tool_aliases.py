@@ -77,6 +77,15 @@ TOOL_BUNDLE_EXPANSIONS: Dict[str, Set[str]] = {
     },
 }
 
+# Consolidated tools retired from the registry.  Old AI configs and saved role
+# policies may still contain them; they must disappear from runtime prompts and
+# UI catalogs instead of being rendered as unknown placeholder tools.
+RETIRED_TOOL_NAMES: Set[str] = {
+    "admin.manage",
+    "task.manage",
+    "prompt.manage",
+}
+
 
 def normalize_legacy_tool_name(name: str) -> str:
     """把单个旧工具名映射到当前名；非旧名原样返回。"""
@@ -103,7 +112,10 @@ def fully_clean_tool_names(names: Iterable[str]) -> Set[str]:
     for name in normalized:
         expanded.update(TOOL_BUNDLE_EXPANSIONS.get(name, set()))
     legacy_old_names = set(LEGACY_TOOL_RENAMES.keys())
-    cleaned = {n for n in expanded if n not in legacy_old_names}
+    cleaned = {
+        n for n in expanded
+        if n not in legacy_old_names and n not in RETIRED_TOOL_NAMES
+    }
     return cleaned
 
 
