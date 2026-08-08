@@ -338,7 +338,7 @@ def _resolve_mcp_tool_name(
     the call outright. The candidates must be the full effective execution
     allow-list, not only the progressively exposed schema subset: text-protocol
     providers do not receive native schemas and may encode an allowed dynamic
-    endpoint tool such as ``aifree.windows_tab`` as ``aifree_windows_tab``.
+    endpoint tool such as ``aifree.windows+tab`` as ``aifree_windows_tab``.
     """
     name = str(tool or "").strip()
     if not name:

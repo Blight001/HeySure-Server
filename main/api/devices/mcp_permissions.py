@@ -58,6 +58,26 @@ def _decode_tools(raw: str) -> Set[str]:
     return {str(item).strip() for item in parsed if isinstance(item, str) and str(item).strip()}
 
 
+def _reconcile_saved_scope_names(saved: Set[str], live_caps: Set[str]) -> Set[str]:
+    """Match a saved scope onto the device's current naming generation.
+
+    AI-FREE changed action separators from ``_`` to ``+``. Resolve only against
+    capabilities the device actually reports, so a reconnect migrates the
+    saved scope without granting any new tool or breaking rolling upgrades.
+    """
+    from api.services.mcp.mcp_tool_aliases import resolve_tool_name
+
+    reconciled: Set[str] = set()
+    for name in saved:
+        if name in live_caps:
+            reconciled.add(name)
+            continue
+        resolved = resolve_tool_name(name, live_caps)
+        if resolved in live_caps:
+            reconciled.add(resolved)
+    return reconciled
+
+
 def _load_scope_rows(session: Session, user_id: int, device_id: str):
     return session.exec(
         select(DeviceTypeMcpPermission)
@@ -173,9 +193,11 @@ def reconcile_scope_with_capabilities(
         # Preserve the operator's saved subset, including an explicit empty
         # selection. Reconnect/refresh may prune stale tools but must not grant
         # tools that the operator did not select.
-        reconciled = sorted(_decode_tools(row.tools_json) & live_caps)
-        if set(reconciled) != _decode_tools(row.tools_json):
-            row.tools_json = json.dumps(reconciled, ensure_ascii=False)
+        saved_scope = _decode_tools(row.tools_json)
+        reconciled = sorted(_reconcile_saved_scope_names(saved_scope, live_caps))
+        encoded = json.dumps(reconciled, ensure_ascii=False)
+        if encoded != row.tools_json:
+            row.tools_json = encoded
             row.updated_at = time.time()
             dirty = True
         if cfg is not None and row.ai_config_id != cfg:

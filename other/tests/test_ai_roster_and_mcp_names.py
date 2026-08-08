@@ -81,8 +81,8 @@ def test_text_protocol_dynamic_endpoint_name_resolves_against_full_allowlist():
     assert core._resolve_mcp_tool_name(
         "aifree_windows_tab",
         {},
-        {"mcp.describe+tool", "aifree.windows_tab"},
-    ) == "aifree.windows_tab"
+        {"mcp.describe+tool", "aifree.windows+tab"},
+    ) == "aifree.windows+tab"
 
 
 def test_registered_mcp_names_do_not_contain_internal_underscores():

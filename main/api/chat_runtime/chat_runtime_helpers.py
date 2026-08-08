@@ -323,6 +323,14 @@ def build_runtime_system_prompt_and_tools(
         selected = fully_clean_tool_names({
             str(name).strip() for name in selected_mcp_tools if str(name).strip()
         })
+        # A browser tab opened before an endpoint naming upgrade may submit the
+        # old underscore spelling. Resolve it against the current effective
+        # names, while retaining exact names for rolling-upgrade compatibility.
+        from api.services.mcp.mcp_tool_aliases import resolve_tool_name
+        selected.update(
+            resolve_tool_name(name, effective_tool_allowlist)
+            for name in tuple(selected)
+        )
         selected.update(MCP_INTROSPECTION_TOOLS)
         if is_task_runtime:
             selected.update(TASK_RUNTIME_REQUIRED_TOOLS)
