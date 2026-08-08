@@ -261,7 +261,6 @@ async def call_mcp_tool(
         try:
             from mcp_runtime.mcp import registry as _reg
             from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS as _lib
-            from connector_runtime.dispatch.desktop_device_tools import is_endpoint_agent_tool
             _sys_direct = {str(t.get("name") or "").strip() for t in _reg.list_tools() if t.get("name")}
             _sys_direct -= set(_lib or ())
             allowed_tools |= _sys_direct
