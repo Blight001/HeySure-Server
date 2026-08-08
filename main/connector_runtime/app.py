@@ -59,6 +59,16 @@ class FeishuSendRequest(BaseModel):
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     create_db_and_tables()
+    # This process owns endpoint-agent sockets in split deployments. Its
+    # in-memory socket registry is empty after a restart, so clear stale shared
+    # presence before surviving agents reconnect and register themselves.
+    from api.devices.socket_owner import should_reset_endpoint_presence
+    if should_reset_endpoint_presence(settings.service_role, settings.connector_runtime_url):
+        try:
+            from api.devices.presence import mark_all_offline
+            mark_all_offline()
+        except Exception:
+            logger.exception("failed to reset endpoint agent presence on startup")
     # Register Socket.IO handlers on the local server. Only agent-side
     # events live here; user-side (ui:join) stays on api-gateway.
     register_agent_socket_events()

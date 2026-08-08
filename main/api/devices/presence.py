@@ -244,8 +244,12 @@ def update_binding(device_id, ai_config_id) -> None:
 
 
 def mark_all_offline() -> None:
-    """Reset presence on a fresh gateway boot — sockets re-register and flip
-    their own rows back online."""
+    """Reset presence when the endpoint-socket owner starts.
+
+    Connector-runtime owns that lifecycle in split deployments; gateway owns
+    it only in the legacy monolith. Sockets re-register and flip their rows
+    back online after their owner restarts.
+    """
     with Session(engine) as session:
         rows = session.exec(
             select(DevicePresence).where(DevicePresence.online == True)  # noqa: E712

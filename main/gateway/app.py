@@ -50,14 +50,17 @@ register_restart_command([sys.executable, "-m", "gateway.main"])
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_db_and_tables()
-    # Endpoint agents register their sockets here; a fresh boot starts with an
-    # empty in-memory registry, so reset the shared presence snapshot — agents
-    # flip their own rows back online as they reconnect.
-    try:
-        from api.devices.presence import mark_all_offline
-        mark_all_offline()
-    except Exception:
-        logger.exception("failed to reset endpoint agent presence on startup")
+    # Reset endpoint presence only in the legacy monolith where gateway owns
+    # agent sockets. In split deployments connector-runtime owns those live
+    # sockets; resetting here would mark still-connected agents offline every
+    # time gateway alone restarts.
+    from api.devices.socket_owner import should_reset_endpoint_presence
+    if should_reset_endpoint_presence(settings.service_role, settings.connector_runtime_url):
+        try:
+            from api.devices.presence import mark_all_offline
+            mark_all_offline()
+        except Exception:
+            logger.exception("failed to reset endpoint agent presence on startup")
     try:
         result = migrate_legacy_switch_files_to_db()
         if result.get("imported") or result.get("removed"):
