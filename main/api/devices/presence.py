@@ -466,12 +466,12 @@ def online_device_display_names(user_id) -> Dict[str, str]:
 
 
 def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict]:
-    """Endpoint-agent rows the Workshop panel should still list while offline.
+    """Persisted endpoint rows not covered by this process's live sockets.
 
     One row per ``device_id`` this user has ever registered (last-known name /
-    platform / capabilities), skipping ids already covered by the live socket
-    snapshot. Lets an operator save an AI assignment for a device that isn't
-    currently connected; the binding takes effect on its next register."""
+    platform / capabilities), skipping ids already covered by the local socket
+    snapshot. In split deployments the Connector owns endpoint sockets while the
+    Gateway serves this list, so the persisted ``online`` value must be preserved."""
     uid = _int(user_id)
     if uid is None:
         return []
@@ -492,6 +492,7 @@ def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict
             device_type = str(row.device_type or "").strip()
             if device_type in ("workshop", "toolbox"):
                 continue  # built-ins are synthesized live, never persisted offline rows
+            is_online = bool(row.online)
             out.append({
                 "id": device_id,
                 "name": str(row.name or "").strip() or device_id,
@@ -506,8 +507,9 @@ def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict
                 "isAndroid": device_type == "android",
                 "capabilities": sorted(mcp_capabilities(_decode(row))),
                 "version": "",
-                "lifecycle": "offline",
-                "online": False,
+                "lifecycle": "registered" if is_online else "offline",
+                "online": is_online,
+                "dispatchable": is_online,
                 "connectedAt": None,
                 "lastTaskId": None,
                 "lastTaskStatus": None,
