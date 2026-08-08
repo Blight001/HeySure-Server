@@ -18,12 +18,34 @@ def _bubble(result: str) -> str:
     )
 
 
+def _device_bubble(result: str) -> str:
+    return (
+        "[MCP工具]\n"
+        "工具: shell.run\n"
+        "状态: 成功\n"
+        "设备: A 服务器\n"
+        "设备号: linux-a\n\n"
+        "[参数]\n"
+        '{"command":"uptime"}\n\n'
+        "[结果]\n"
+        f"{result}"
+    )
+
+
 def test_parse_mcp_tool_bubble_preserves_arguments():
     parsed = parse_mcp_tool_bubble(_bubble("ok"))
     assert parsed is not None
     assert parsed["tool"] == "workspace.search"
     assert parsed["arguments"] == {"query": "保留完整参数", "limit": 5}
     assert parsed["result"] == "ok"
+
+
+def test_parse_mcp_tool_bubble_preserves_exact_device_identity():
+    parsed = parse_mcp_tool_bubble(_device_bubble("ok"))
+    assert parsed is not None
+    assert parsed["device_id"] == "linux-a"
+    assert parsed["device_name"] == "A 服务器"
+    assert parsed["status"] == "成功"
 
 
 def test_compact_history_keeps_native_call_and_limits_only_result():

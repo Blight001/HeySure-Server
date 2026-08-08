@@ -102,7 +102,7 @@ def parse_mcp_tool_bubble(content: str) -> Dict[str, Any] | None:
         return None
     try:
         tool_line, remainder = text[len(prefix):].split("\n", 1)
-        status_part, remainder = remainder.split("\n\n[参数]\n", 1)
+        metadata_part, remainder = remainder.split("\n\n[参数]\n", 1)
         arguments_text, result = remainder.split("\n\n[结果]\n", 1)
     except ValueError:
         return None
@@ -112,9 +112,18 @@ def parse_mcp_tool_bubble(content: str) -> Dict[str, Any] | None:
         arguments = json.loads(arguments_text)
     except Exception:
         arguments = {}
+    metadata: Dict[str, str] = {}
+    for line in metadata_part.splitlines():
+        key, separator, value = line.partition(":")
+        if not separator:
+            key, separator, value = line.partition("：")
+        if separator:
+            metadata[key.strip()] = value.strip()
     return {
         "tool": tool_line.strip(),
-        "status": status_part.removeprefix("状态:").strip(),
+        "status": metadata.get("状态", ""),
+        "device_id": metadata.get("设备号", ""),
+        "device_name": metadata.get("设备", ""),
         "arguments": arguments if isinstance(arguments, dict) else {},
         "result": result,
     }

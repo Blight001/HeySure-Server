@@ -513,6 +513,10 @@ async def _dispatch_endpoint_via_runtime(
                 return {
                     "success": bool(row.get("success", status == "completed")),
                     "taskId": task_id,
+                    # Preserve the exact dispatch target. Multiple bound devices
+                    # may advertise the same MCP name, so callers must never
+                    # recover device identity by searching the tool catalog.
+                    "deviceId": row.get("device_id") or row.get("deviceId"),
                     "tool": row.get("tool") or tool,
                     "summary": row.get("summary"),
                     "result": row.get("result"),
@@ -771,18 +775,61 @@ def _append_missing_tool_responses(convo: List[Dict], error_text: str) -> List[s
 _SCREENSHOT_BUBBLE_MARKER = "[截图]"
 
 
+def _mcp_tool_device_identity(
+    tool: str,
+    user_id: int,
+    tool_result: Optional[Dict[str, object]],
+) -> tuple[str, str]:
+    """Return the exact endpoint ``(device_id, display_name)`` for one call.
+
+    Identity comes only from the completed dispatch envelope. Looking up an
+    agent by ``tool`` is intentionally forbidden: several devices can expose
+    the same MCP name and a catalog lookup would attribute A's result to B.
+    """
+    if not tool_result or not is_endpoint_agent_tool(tool):
+        return "", ""
+    payload = tool_result.get("result", tool_result)
+    if not isinstance(payload, dict):
+        return "", ""
+    device_id = str(payload.get("deviceId") or payload.get("device_id") or "").strip()
+    if not device_id:
+        return "", ""
+    reported_name = str(payload.get("deviceName") or payload.get("device_name") or "").strip()
+    if reported_name:
+        return device_id, " ".join(reported_name.split())
+    try:
+        from api.devices.live import connected_agent_rows_for_user
+
+        for row in connected_agent_rows_for_user(user_id):
+            candidate_id = str(row.get("id") or row.get("deviceId") or row.get("device_id") or "").strip()
+            if candidate_id != device_id:
+                continue
+            label = str(row.get("remark") or row.get("name") or "").strip()
+            return device_id, " ".join(label.split()) or device_id
+    except Exception:
+        logger.debug("endpoint device display-name lookup skipped device=%s", device_id, exc_info=True)
+    return device_id, device_id
+
+
 def _build_mcp_tool_bubble_content(
     tool: str,
     arguments: dict,
     result_text: str,
     failed: bool = False,
     image_url: str = "",
+    *,
+    device_id: str = "",
+    device_name: str = "",
 ) -> str:
     status = "失败" if failed else "成功"
+    device_meta = ""
+    if device_id:
+        device_meta = f"设备: {device_name or device_id}\n设备号: {device_id}\n"
     content = (
         "[MCP工具]\n"
         f"工具: {tool}\n"
-        f"状态: {status}\n\n"
+        f"状态: {status}\n"
+        f"{device_meta}\n"
         "[参数]\n"
         f"{_safe_json(arguments or {})}\n\n"
         "[结果]\n"
@@ -813,12 +860,21 @@ def _save_mcp_tool_bubble(
     latency: Optional[float] = None,
 ) -> None:
     bot_delivery: Dict[str, object] = {}
+    device_id, device_name = _mcp_tool_device_identity(tool, user_id, tool_result)
     saved = _save_message(
         bg,
         user_id,
         ChatMessageCreate(
             role="system",
-            content=_build_mcp_tool_bubble_content(tool, arguments, result_text, failed, image_url),
+            content=_build_mcp_tool_bubble_content(
+                tool,
+                arguments,
+                result_text,
+                failed,
+                image_url,
+                device_id=device_id,
+                device_name=device_name,
+            ),
             tags="mcp_tool_call",
             ai_config_id=ai_config_id,
             ai_kind=ai_kind,
@@ -841,6 +897,8 @@ def _save_mcp_tool_bubble(
                 result_text,
                 failed,
                 message_media_url(media),
+                device_id=device_id,
+                device_name=device_name,
             )
             bg.add(saved)
             bg.commit()
@@ -856,6 +914,8 @@ def _save_mcp_tool_bubble(
                     f"{result_text}\n\n[机器人发送]\n{_safe_json(bot_delivery)}",
                     failed,
                     _extract_screenshot_bubble_url(saved.content) or image_url,
+                    device_id=device_id,
+                    device_name=device_name,
                 )
                 bg.add(saved)
                 bg.commit()
