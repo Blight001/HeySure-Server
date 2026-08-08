@@ -46,7 +46,7 @@ def capability_names() -> List[str]:
 
 
 def library_capability_names() -> List[str]:
-    """图书馆治理类 MCP（prompt / admin / device / knowledge.manage），与
+    """图书馆治理类 MCP（member / device / knowledge.manage），与
     现已并入「传承技能」作为独立设备（library）。"""
     try:
         from mcp_runtime.mcp import registry

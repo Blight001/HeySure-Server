@@ -45,10 +45,9 @@ def _presence_tool_defs() -> Dict[str, Dict[str, Any]]:
 
 
 
-# ``admin.manage`` is a *server* bridge tool surfaced whenever any endpoint
-# agent is connected — not a device-side tool — so it stays a fixed set. The AI
-# calls it with action=list_agents to enumerate the connected agents.
-ENDPOINT_BRIDGE_MCP_TOOLS = {"admin.manage"}
+# No server tool is exposed merely because an endpoint is connected. Member and
+# device inventory now comes from the library-bound ``member.manage`` tool.
+ENDPOINT_BRIDGE_MCP_TOOLS: Set[str] = set()
 
 # The endpoint (desktop / browser) tool surface is no longer a hardcoded
 # whitelist. Each connected agent advertises its own tools in the
@@ -382,10 +381,23 @@ def _iter_agents_for_config(ai_config_id: Optional[int], user_id: Optional[int] 
     for agent in list(agents.values()):
         if not isinstance(agent, dict):
             continue
-        agent_config_id = _parse_int(agent.get("aiConfigId") or agent.get("ai_config_id"))
+        # A library MCP may update the persistent binding in another process.
+        # Resolve it from the shared DB at dispatch time so the live socket does
+        # not stay routed to the previous member until its next reconnect.
+        agent_user_id = _parse_int(agent.get("userId") or agent.get("user_id"))
+        agent_config_id = None
+        binding_resolved = False
+        if agent_user_id:
+            try:
+                from api.devices.bindings import get_binding
+                agent_config_id = _parse_int(get_binding(agent_user_id, agent.get("id")))
+                binding_resolved = True
+            except Exception:
+                agent_config_id = None
+        if not binding_resolved:
+            agent_config_id = _parse_int(agent.get("aiConfigId") or agent.get("ai_config_id"))
         if agent_config_id != config_id:
             continue
-        agent_user_id = _parse_int(agent.get("userId") or agent.get("user_id"))
         if expected_user_id and agent_user_id and agent_user_id != expected_user_id:
             continue
         yield agent
@@ -469,8 +481,7 @@ def online_runtimes(user_id: Optional[int], device_type: str = "desktop") -> Dic
 
 
 def endpoint_bridge_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Set[str]:
-    """Bridge MCP tools (e.g. ``admin.manage``) granted when an endpoint executor
-    (desktop / android / browser) is online and bound to this AI config.
+    """Server bridge MCP tools granted when an endpoint executor is online.
 
     Resolved from the shared DB presence snapshot (``api.devices.presence``) — not
     the in-memory ``agents`` registry — so every process (gateway, ai-runtime,

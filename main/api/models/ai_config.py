@@ -5,9 +5,8 @@ from sqlmodel import Field, SQLModel
 
 _DEFAULT_MCP_TOOLS = (
     '["mcp.describe+tool","workspace.search","workspace.run+command",'
-    '"admin.manage","device+mcp.manage",'
-    '"task.manage","todo.manage",'
-    '"prompt.manage","knowledge.manage",'
+    '"member.manage","device+mcp.manage",'
+    '"todo.manage","knowledge.manage",'
     '"message.send+to","conversation.manage",'
     '"automation.list","automation.get","automation.run","automation.status","automation.cancel"]'
 )

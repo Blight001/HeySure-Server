@@ -50,12 +50,11 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     "workspace.run+command": ROLE_MEMBER,
     # Library tools use library binding as their only authorization boundary.
     # Every bound AI may use every action, regardless of its role tier.
-    "task.manage": ROLE_MEMBER,
+    "member.manage": ROLE_MEMBER,
     # 统一计划管理：create/get/edit/delete 全部走 todo.manage；edit 完成当前阶段，
     # 最后阶段更新后由系统自动收尾。
     "todo.manage": ROLE_MEMBER,
     # Prompt/knowledge actions are all open once the AI is library-bound.
-    "prompt.manage": ROLE_MEMBER,
     "knowledge.manage": ROLE_MEMBER,
     # Read-only semantic recall for the knowledge base.
     "knowledge.search": ROLE_MEMBER,
@@ -64,7 +63,6 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # Unified conversation tool (list/detail/create/delete/rename/clear/compress/
     # switch/new) — every tier can manage its own scoped sessions.
     "conversation.manage": ROLE_MEMBER,
-    "admin.manage": ROLE_MEMBER,
     "device+mcp.manage": ROLE_MEMBER,
     "automation.list": ROLE_MEMBER,
     "automation.get": ROLE_MEMBER,
@@ -82,9 +80,7 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
 # 的门面早已在 workshop 引擎内校验绑定，这里一并登记以表达完整的图书馆工具集，
 # 中央分发处的绑定校验对它是幂等的；知识库具体操作经 knowledge.manage action 分发。
 LIBRARY_BOUND_TOOLS: Set[str] = {
-    "task.manage",
-    "prompt.manage",
-    "admin.manage",
+    "member.manage",
     "device+mcp.manage",
     "knowledge.manage",
     "automation.manage",

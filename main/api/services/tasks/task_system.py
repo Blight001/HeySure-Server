@@ -32,9 +32,8 @@ TASK_FLOW_PROMPT_KEYS = (
 )
 
 TASK_RUNTIME_REQUIRED_TOOLS = {
-    # ``task.list`` was folded into the unified ``task.manage`` tool; the runtime
-    # needs it for action=list; every action is open to a library-bound AI.
-    "task.manage",
+    # Background-task actions are folded into the library-bound member tool.
+    "member.manage",
     "message.send+to",
     # Planned task flow: create/get/edit/delete all use one MCP. Editing the
     # final phase automatically closes the plan.

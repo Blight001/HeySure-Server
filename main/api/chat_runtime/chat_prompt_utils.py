@@ -215,8 +215,9 @@ def _render_mcp_tool_item(tool_info: Dict[str, Any]) -> str:
     field_limit = 100 if name in _TASK_CREATE_TOOL_NAMES else (30 if name.startswith("task.") else 6)
 
     example_args: Dict[str, Any] = {}
-    if name == "task.manage":
-        example_args["action"] = "create"
+    if name == "member.manage":
+        example_args["action"] = "task_create"
+        example_args["member_id"] = 2
         example_args["mode"] = "scheduled"
         if "title" in props:
             example_args["title"] = "两小时后执行代码健康巡检"
@@ -237,10 +238,10 @@ def _render_mcp_tool_item(tool_info: Dict[str, Any]) -> str:
         separators=(",", ":"),
     )
     format_hint = ""
-    if name == "task.manage":
+    if name == "member.manage":
         format_hint = (
             "\n"
-            "  action: `list`/`create`/`update`/`delete`；绑定图书馆后所有身份均可执行。\n"
+            "  action: `list`/`get`/`create`/`update` 管成员；`task_list`/`task_create`/`task_update`/`task_delete` 管成员任务；不提供成员删除。\n"
             "  mode: `immediate` 立即执行；`scheduled` 一次性定时；`recurring` 循环运行。\n"
             "  时间格式: mode=scheduled 的 `schedule_at` 仅支持 Unix 秒或带时区 ISO-8601（必须包含 `+08:00` 或 `Z`）；"
             "mode=recurring 不传 `schedule_at`，仅使用 `schedule_duration_minutes`（分钟间隔）。"
@@ -395,7 +396,7 @@ def _filter_tools_for_current_bindings(
 ) -> set[str]:
     """Filter out tools that the AI cannot actually use because of missing bindings.
 
-    - LIBRARY_BOUND_TOOLS (知识工坊/图书馆任务管理与治理工具: task.manage, knowledge.manage, prompt.manage 等)
+    - LIBRARY_BOUND_TOOLS (知识工坊/图书馆成员与治理工具: member.manage, knowledge.manage 等)
       require library (workshop) binding. They are now force-included by the
       runtime allowlist builder (chat_runtime_helpers) so they survive task overrides
       and narrow mcp_tools selections; this filter only removes them when unbound.

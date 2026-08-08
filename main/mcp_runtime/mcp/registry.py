@@ -2,21 +2,11 @@ from .core import MCPRegistry, MCPTool
 from tools.introspection import (
     _mcp_describe_tool,
 )
-from tools.workspace import (
-    _admin_manage,
-    _run_command,
-)
-from tools.tasks import (
-    _task_manage,
-    TASK_MANAGE_SCHEMA,
-)
+from tools.workspace import _run_command
+from tools.members import _member_manage, MEMBER_MANAGE_SCHEMA
 from tools.task_plan import (
     _todo_manage,
     TODO_MANAGE_SCHEMA,
-)
-from tools.prompts import (
-    _prompt_manage,
-    PROMPT_MANAGE_SCHEMA,
 )
 from tools.communication import (
     _send_to,
@@ -144,35 +134,14 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         destructive=True,
     ))
     registry.register(MCPTool(
-        name="admin.manage",
+        name="member.manage",
         description=(
-            "管理员/治理统一工具：用 action 选择 overview 获取系统总览（工作区状态 + "
-            "已连接端侧 Agent 与受管 AI 配置）/ list_agents 仅列出已连接端侧 Agent 与受管 AI 配置。"
+            "AI 数字成员统一管理工具：查询、创建和编辑成员的名称、身份、平台、模型、"
+            "人格 Prompt、Token 上限、实体设备绑定及成员后台任务。成员删除不对 AI 开放，"
+            "必须由人在控制台确认。图书馆/工具箱自身的绑定也只允许人在作坊界面修改。"
         ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["overview", "list_agents"],
-                    "description": "overview 系统总览；list_agents 仅列出 Agent。",
-                },
-            },
-            "required": ["action"],
-        },
-        handler=_admin_manage,
-    ))
-    registry.register(MCPTool(
-        name="task.manage",
-        description=(
-            "任务管理统一工具（任务=定时/无人值守、在独立会话中运行的后台工作）："
-            "用 action 选择 list 列出 / create 创建 / update 接管更新 / delete 删除。"
-            "本工具属于图书馆 MCP，调用 AI 必须已绑定图书馆。"
-            "绑定后所有身份均可执行全部操作。"
-            "复杂长动作用 todo.manage 创建和推进计划。"
-        ),
-        input_schema=TASK_MANAGE_SCHEMA,
-        handler=_task_manage,
+        input_schema=MEMBER_MANAGE_SCHEMA,
+        handler=_member_manage,
         destructive=True,
     ))
 
@@ -314,18 +283,6 @@ def _register_builtin_tools(registry: MCPRegistry) -> None:
         ),
         input_schema=KNOWLEDGE_SEARCH_SCHEMA,
         handler=_knowledge_search,
-    ))
-
-    registry.register(MCPTool(
-        name="prompt.manage",
-        description=(
-            "Prompt 统一工具：用 action 选择 list_targets 列目标 / read_ai 读 AI 人格 prompt / "
-            "write_ai 改 AI 人格 prompt / read_system 读系统 prompt / write_system 改系统 prompt。"
-            "需要该 AI 已绑定图书馆，绑定后不区分身份。prompt 正文存放在 KnowledgeBase 的 md 文件里。"
-        ),
-        input_schema=PROMPT_MANAGE_SCHEMA,
-        handler=_prompt_manage,
-        destructive=True,
     ))
 
     registry.register(MCPTool(
