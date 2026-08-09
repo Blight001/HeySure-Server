@@ -29,6 +29,7 @@ from ai_runtime.inference import tool_media
 from ai_runtime.inference import tool_metadata
 from ai_runtime.inference import tool_persistence
 from ai_runtime.inference import tool_rejections
+from ai_runtime.inference import turn_result
 from ai_runtime.inference.debug_support import (
     ai_color as _ai_color,
     ai_debug_enabled as _ai_debug_enabled,
@@ -90,7 +91,6 @@ from api.chat_runtime.chat_prompt_utils import (
     _build_mcp_stream_warning,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
-    _safe_json,
     _set_run_live_meta,
     _set_run_live_phase,
     _set_run_live_text,
@@ -907,88 +907,35 @@ def _run_worker_impl(request: WorkerRequest):
                     return
 
                 assistant_text = sr.assistant_text
-                reasoning_content = sr.reasoning_content
-                usage = sr.usage
-                finish_reason = sr.finish_reason
                 _has_native_tc = sr.has_native_tc
                 latency = time.time() - start_at
-
-                # Every tool call this turn produced. The batch runs to completion
-                # before the next inference step, so a model that plans several
-                # independent actions pays one round trip instead of N.
-                turn_calls: List[Dict[str, Any]] = []
-                for _raw_call in sr.tool_calls:
-                    _resolved_call = dict(_raw_call)
-                    _resolved_call["tool"] = _resolve_mcp_tool_name(
-                        _raw_call.get("tool", ""), native_tool_name_map, effective_tool_allowlist
-                    )
-                    turn_calls.append(_resolved_call)
-
-                token_triplet = (
-                    f"{int(usage.get('prompt_tokens') or 0)}/"
-                    f"{int(usage.get('completion_tokens') or 0)}/"
-                    f"{int(usage.get('total_tokens') or 0)}"
+                persisted_turn = turn_result.persist_assistant_turn(
+                    turn_result.AssistantTurnContext(
+                        session=bg, conversation=convo, user_id=user_id,
+                        ai_config_id=ai_config_id, ai_kind=ai_kind,
+                        session_id=session_id, session_name=session_name,
+                        model=model, system_prompt=system_prompt,
+                        native_tool_name_map=native_tool_name_map,
+                        allowed_tools=frozenset(effective_tool_allowlist),
+                    ),
+                    sr,
+                    latency,
                 )
+                turn_calls = persisted_turn.tool_calls
+                saved = persisted_turn.saved_message
+                turn_convo_start = persisted_turn.conversation_start
                 _ai_debug_stage(
                     "DONE",
                     f"{_ai_short_run_id(run_id)} #{step_label} "
-                    f"{finish_reason or 'stop'} {int(latency * 1000)}ms tok={token_triplet} "
+                    f"{sr.finish_reason or 'stop'} {int(latency * 1000)}ms "
+                    f"tok={persisted_turn.token_triplet} "
                     f"tc={'native:' if _has_native_tc else ''}"
                     f"{_ai_short(', '.join(c['tool'] for c in turn_calls) or '-', 48)}",
                     "32",
                 )
-
-                saved = _save_message(
-                    bg,
-                    user_id,
-                    ChatMessageCreate(
-                        role="assistant",
-                        content=assistant_text,
-                        think=reasoning_content or None,
-                        tags="mcp_assistant_call" if turn_calls else "",
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        session_name=session_name,
-                        model=model,
-                        prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                        completion_tokens=int(usage.get("completion_tokens") or 0),
-                        total_tokens=int(usage.get("total_tokens") or 0),
-                        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0) or None,
-                        system_prompt=system_prompt,
-                        finish_reason=finish_reason,
-                        latency=latency,
-                    ),
-                )
-
-                # Where this turn starts in the live conversation. Screenshot
-                # pruning is bounded by it, so two captures inside one batch both
-                # survive while older ones still get dropped.
-                turn_convo_start = len(convo)
                 # Screenshot images captured by this turn's tools, held back until
                 # every tool response is appended (see _flush_turn_screenshots).
                 turn_screenshot_messages: List[Dict] = []
-                if _has_native_tc and turn_calls:
-                    assistant_item = {
-                        "role": "assistant",
-                        "content": assistant_text or None,
-                        "tool_calls": [
-                            {
-                                "id": call["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": call["native_name"] or call["tool"],
-                                    "arguments": call["raw_arguments"] or _safe_json(call["arguments"]),
-                                },
-                            }
-                            for call in turn_calls
-                        ],
-                    }
-                else:
-                    assistant_item = {"role": "assistant", "content": assistant_text}
-                if reasoning_content:
-                    assistant_item["reasoning_content"] = reasoning_content
-                convo.append(assistant_item)
                 _set_run_live_text(run_id, "")
                 _set_run_live_usage(run_id, 0, 0, 0)
 
