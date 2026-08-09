@@ -127,6 +127,29 @@ def _load_presence_rows(session: Session, device_id: str):
     ).all()
 
 
+def capabilities_for_device(user_id, device_id) -> Optional[Set[str]]:
+    """Return the last MCP capability snapshot for one owned device.
+
+    Registration callers read this before overwriting presence so permission
+    reconciliation can distinguish a fully-selected capability surface from a
+    user-customized subset when the device later exposes new tools.
+    """
+    uid = _int(user_id)
+    aid = str(device_id or "").strip()
+    if uid is None or not aid:
+        return None
+    with Session(engine) as session:
+        row = next(
+            (
+                item
+                for item in _load_presence_rows(session, aid)
+                if _int(getattr(item, "user_id", None)) == uid
+            ),
+            None,
+        )
+        return mcp_capabilities(_decode(row)) if row else None
+
+
 def display_overrides_for_user(user_id, device_ids: Optional[Set[str]] = None) -> Dict[str, dict]:
     """User-owned UI customizations keyed by ``device_id``.
 

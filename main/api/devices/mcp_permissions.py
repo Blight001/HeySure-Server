@@ -9,9 +9,11 @@ Scope is keyed by ``(user_id, device_id)`` — each individual connected agent h
 its own allow-list.
 
 A missing row means the agent has never had a scope initialized (treated as
-closed / no tools at runtime dispatch). On first connect, ``reconcile_scope_with_capabilities`` initializes the scope
-to the full live capability set. On later reconnects it preserves the user's
-saved allow-list and only removes capabilities that no longer exist.
+closed / no tools at runtime dispatch). On first connect,
+``reconcile_scope_with_capabilities`` initializes the scope to the full live
+capability set. On later reconnects it preserves the user's saved allow-list,
+including tools that are temporarily absent while endpoint MCP is disabled.
+Runtime dispatch always intersects this saved intent with live capabilities.
 
 ``get_scope`` returns ``None`` only for "no record ever"; a row with ``[]``
 means explicitly none allowed. User saves therefore survive refreshes and
@@ -64,6 +66,13 @@ def _reconcile_saved_scope_names(saved: Set[str], live_caps: Set[str]) -> Set[st
     AI-FREE changed action separators from ``_`` to ``+``. Resolve only against
     capabilities the device actually reports, so a reconnect migrates the
     saved scope without granting any new tool or breaking rolling upgrades.
+
+    Keep names that are not currently reported. A device may temporarily
+    advertise no MCP capabilities when its local MCP switch is off; removing
+    those names would destroy the operator's saved permission intent and make
+    the tools stay disabled after the device turns MCP back on. Callers narrow
+    this persisted scope against live capabilities before exposing or
+    dispatching tools, so retaining an unavailable name does not grant access.
     """
     from api.services.mcp.mcp_tool_aliases import resolve_tool_name
 
@@ -75,7 +84,57 @@ def _reconcile_saved_scope_names(saved: Set[str], live_caps: Set[str]) -> Set[st
         resolved = resolve_tool_name(name, live_caps)
         if resolved in live_caps:
             reconciled.add(resolved)
+        else:
+            reconciled.add(name)
     return reconciled
+
+
+def reconcile_saved_scope_for_capability_change(
+    saved: Set[str],
+    live_caps: Set[str],
+    previous_capabilities: Optional[Set[str]] = None,
+) -> Set[str]:
+    """Preserve custom scopes while auto-expanding a previously full scope.
+
+    If every capability from the device's previous snapshot was selected, the
+    operator had effectively chosen "all" and newly exposed capabilities are
+    selected too. A partial or explicitly empty saved scope never widens.
+    Temporarily missing capabilities remain dormant via the name reconciler.
+    """
+    reconciled = _reconcile_saved_scope_names(saved, live_caps)
+    previous = {
+        str(item).strip()
+        for item in (previous_capabilities or set())
+        if str(item).strip()
+    }
+    if previous:
+        saved_on_previous_surface = _reconcile_saved_scope_names(saved, previous)
+        if previous.issubset(saved_on_previous_surface):
+            reconciled.update(live_caps)
+    return reconciled
+
+
+def saved_scope_was_full(
+    saved: Optional[Set[str]],
+    previous_capabilities: Optional[Set[str]],
+) -> bool:
+    """Return whether a saved scope represents the prior full capability set.
+
+    ``None`` is a never-initialized device: its default is full access, so
+    workspace tools pushed later in the same registration should be included.
+    An explicit empty scope remains a user choice and is never considered full.
+    """
+    if saved is None:
+        return True
+    previous = {
+        str(item).strip()
+        for item in (previous_capabilities or set())
+        if str(item).strip()
+    }
+    if not previous:
+        return False
+    saved_on_previous_surface = _reconcile_saved_scope_names(saved, previous)
+    return previous.issubset(saved_on_previous_surface)
 
 
 def _load_scope_rows(session: Session, user_id: int, device_id: str):
@@ -164,9 +223,10 @@ def reconcile_scope_with_capabilities(
     """Reconcile a saved scope with the agent's current capabilities.
 
     A first-time device defaults to all reported tools. Existing rows preserve
-    the user's explicit selection (including an empty set) and only prune tools
-    the device no longer reports. This function is called on reconnect and after
-    dynamic tool pushes, so it must never widen an already-saved scope.
+    the user's explicit selection (including an empty set) even when tools are
+    temporarily absent. Callers that have the preceding device capability
+    snapshot may use ``reconcile_saved_scope_for_capability_change`` before this
+    persistence step to auto-expand a previously full scope.
     """
     uid = _coerce_int(user_id)
     aid = _device_id(device_id)
@@ -191,8 +251,9 @@ def reconcile_scope_with_capabilities(
             return None
 
         # Preserve the operator's saved subset, including an explicit empty
-        # selection. Reconnect/refresh may prune stale tools but must not grant
-        # tools that the operator did not select.
+        # selection and temporarily unavailable tools. Runtime readers intersect
+        # this saved intent with live capabilities, so reconnect must not erase it
+        # or grant tools that the operator did not select.
         saved_scope = _decode_tools(row.tools_json)
         reconciled = sorted(_reconcile_saved_scope_names(saved_scope, live_caps))
         encoded = json.dumps(reconciled, ensure_ascii=False)

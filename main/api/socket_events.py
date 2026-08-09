@@ -151,6 +151,8 @@ def register_agent_socket_events():
             f"Agent registered: {device_id} user={owner_user_id} "
             f"ai={agents[sid].get('aiConfigId')}"
         )
+        previous_capabilities = None
+        previous_scope_was_full = False
         # Mirror this endpoint agent into the shared DB presence snapshot so
         # ai-runtime / mcp-runtime (separate processes) can discover and
         # classify its tools. Never let a presence write break registration.
@@ -160,8 +162,14 @@ def register_agent_socket_events():
                 agent_endpoint_tools,
                 agent_endpoint_tool_defs,
             )
-            from api.devices.presence import upsert_presence
-            from api.devices.mcp_permissions import reconcile_scope_with_capabilities
+            from api.devices.presence import capabilities_for_device, upsert_presence
+            from api.devices.mcp_permissions import (
+                get_scope,
+                reconcile_saved_scope_for_capability_change,
+                reconcile_scope_with_capabilities,
+                saved_scope_was_full,
+                set_scope,
+            )
 
             atype = device_type_of(agents[sid])
             if atype:
@@ -169,6 +177,27 @@ def register_agent_socket_events():
                 # it (custom devices have no is* flag the web could infer from).
                 agents[sid]['deviceType'] = atype
                 capabilities = sorted(agent_endpoint_tools(agents[sid]))
+                if owner_user_id is not None:
+                    previous_capabilities = capabilities_for_device(owner_user_id, device_id)
+                    saved_scope = get_scope(owner_user_id, device_id)
+                    previous_scope_was_full = saved_scope_was_full(
+                        saved_scope,
+                        previous_capabilities,
+                    )
+                    if saved_scope is not None:
+                        expanded_scope = reconcile_saved_scope_for_capability_change(
+                            saved_scope,
+                            set(capabilities),
+                            previous_capabilities,
+                        )
+                        if expanded_scope != saved_scope:
+                            set_scope(
+                                owner_user_id,
+                                device_id,
+                                expanded_scope,
+                                ai_config_id=claimed_ai,
+                                device_type=atype,
+                            )
                 upsert_presence(
                     owner_user_id,
                     device_id,
@@ -240,6 +269,15 @@ def register_agent_socket_events():
                     agent_caps = list(agent_endpoint_tools(agents[sid]) or [])
                     full_caps = sorted(set(agent_caps) | set(pushed))
                     if full_caps:
+                        if previous_scope_was_full:
+                            saved_scope = get_scope(owner_user_id, device_id) or set()
+                            set_scope(
+                                owner_user_id,
+                                device_id,
+                                set(saved_scope) | set(full_caps),
+                                ai_config_id=claimed_ai,
+                                device_type=push_type,
+                            )
                         reconcile_scope_with_capabilities(
                             owner_user_id,
                             device_id,
