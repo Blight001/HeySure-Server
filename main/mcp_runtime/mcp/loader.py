@@ -107,18 +107,3 @@ def reload_registry() -> Dict[str, Any]:
             "plugin_errors": [],
             "error": f"reload failed: {exc}",
         }
-
-
-def load_plugins_on_startup() -> Dict[str, Any]:
-    """No-op kept for backward compatibility.
-
-    Builtin tools are registered at ``mcp_runtime.mcp.registry`` import time.
-    The plugins extension point has been removed.
-    """
-    registry_module = importlib.import_module(_REGISTRY_MODULE)
-    return {
-        "loaded": 0,
-        "version": registry_module.registry.version,
-        "tools": len(registry_module.registry._tools),
-        "plugin_errors": [],
-    }

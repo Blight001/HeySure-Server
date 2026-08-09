@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict
 
@@ -15,7 +16,11 @@ SERVER_ROOT = Path(__file__).resolve().parents[2]
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from other.tests.fixtures.simulated_agent import SimulatedAgent, SimulatedAgentConfig
+from other.tests.fixtures.simulated_agent import (
+    AgentBehavior,
+    SimulatedAgent,
+    SimulatedAgentConfig,
+)
 
 
 TERMINAL = {"completed", "error", "timeout", "cancelled"}
@@ -62,6 +67,7 @@ async def _agent_round_trip(
     internal_headers: Dict[str, str],
     login: Dict[str, Any],
     timeout: float,
+    fault_matrix: bool,
 ) -> None:
     token = str(login["access_token"])
     user_id = int(login["user"]["id"])
@@ -95,41 +101,108 @@ async def _agent_round_trip(
     await agent.connect(connector, token=token)
     await agent.wait_until_registered(timeout=min(timeout, 10.0))
     try:
-        dispatched = await asyncio.to_thread(
-            _request,
-            "POST",
-            f"{connector}/internal/agent/dispatch",
-            headers=internal_headers,
-            json={
-                "user_id": user_id,
-                "ai_config_id": ai_config_id,
-                "tool": "browser_navigate",
-                "arguments": {"url": "https://example.test"},
-                "timeout_seconds": 10,
-            },
+        payload = await _dispatch_and_wait(
+            connector,
+            internal_headers,
+            user_id,
+            ai_config_id,
+            timeout,
         )
-        dispatched.raise_for_status()
-        task_id = str(dispatched.json()["task_id"])
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            outcome = await asyncio.to_thread(
-                _request,
-                "GET",
-                f"{connector}/internal/agent/dispatch/result/{task_id}",
-                headers=internal_headers,
-            )
-            outcome.raise_for_status()
-            payload = outcome.json()
-            if payload["status"] in TERMINAL:
-                if payload["status"] != "completed" or not payload["success"]:
-                    raise RuntimeError(f"simulated dispatch failed: {payload}")
-                if payload.get("result", {}).get("echo", {}).get("url") != "https://example.test":
-                    raise RuntimeError(f"unexpected dispatch result: {payload}")
-                return
-            await asyncio.sleep(0.25)
-        raise RuntimeError(f"dispatch {task_id} did not reach a terminal state")
+        _assert_success(payload)
     finally:
         await agent.disconnect()
+
+    if not fault_matrix:
+        return
+    silent = SimulatedAgent(replace(config, behavior=AgentBehavior.NO_RESPONSE))
+    await silent.connect(connector, token=token)
+    await silent.wait_until_registered(timeout=min(timeout, 10.0))
+    try:
+        timed_out = await _dispatch_and_wait(
+            connector,
+            internal_headers,
+            user_id,
+            ai_config_id,
+            timeout,
+            expire=True,
+        )
+        if timed_out["status"] != "timeout" or timed_out["success"] is not False:
+            raise RuntimeError(f"silent dispatch did not time out: {timed_out}")
+    finally:
+        await silent.disconnect()
+
+    recovered = SimulatedAgent(config)
+    await recovered.connect(connector, token=token)
+    await recovered.wait_until_registered(timeout=min(timeout, 10.0))
+    try:
+        payload = await _dispatch_and_wait(
+            connector,
+            internal_headers,
+            user_id,
+            ai_config_id,
+            timeout,
+        )
+        _assert_success(payload)
+    finally:
+        await recovered.disconnect()
+
+
+async def _dispatch_and_wait(
+    connector: str,
+    internal_headers: Dict[str, str],
+    user_id: int,
+    ai_config_id: int,
+    timeout: float,
+    *,
+    expire: bool = False,
+) -> Dict[str, Any]:
+    dispatched = await asyncio.to_thread(
+        _request,
+        "POST",
+        f"{connector}/internal/agent/dispatch",
+        headers=internal_headers,
+        json={
+            "user_id": user_id,
+            "ai_config_id": ai_config_id,
+            "tool": "browser_navigate",
+            "arguments": {"url": "https://example.test"},
+            "timeout_seconds": 10,
+        },
+    )
+    dispatched.raise_for_status()
+    task_id = str(dispatched.json()["task_id"])
+    if expire:
+        expired = await asyncio.to_thread(
+            _request,
+            "POST",
+            f"{connector}/internal/agent/dispatch/expire/{task_id}",
+            headers=internal_headers,
+            json={"reason": "fault exercise network timeout"},
+        )
+        expired.raise_for_status()
+        if not expired.json().get("expired"):
+            raise RuntimeError(f"dispatch {task_id} was not expired")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        outcome = await asyncio.to_thread(
+            _request,
+            "GET",
+            f"{connector}/internal/agent/dispatch/result/{task_id}",
+            headers=internal_headers,
+        )
+        outcome.raise_for_status()
+        payload = outcome.json()
+        if payload["status"] in TERMINAL:
+            return payload
+        await asyncio.sleep(0.25)
+    raise RuntimeError(f"dispatch {task_id} did not reach a terminal state")
+
+
+def _assert_success(payload: Dict[str, Any]) -> None:
+    if payload["status"] != "completed" or not payload["success"]:
+        raise RuntimeError(f"simulated dispatch failed: {payload}")
+    if payload.get("result", {}).get("echo", {}).get("url") != "https://example.test":
+        raise RuntimeError(f"unexpected dispatch result: {payload}")
 
 
 def main() -> int:
@@ -140,6 +213,7 @@ def main() -> int:
     parser.add_argument("--account", default="runtime-smoke")
     parser.add_argument("--password", default="runtime-smoke")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--fault-matrix", action="store_true")
     args = parser.parse_args()
     gateway = args.gateway.rstrip("/")
     connector = args.connector.rstrip("/")
@@ -148,11 +222,21 @@ def main() -> int:
         _wait_ready(f"{gateway}/internal/health/ready", headers, args.timeout)
         _wait_ready(f"{connector}/internal/health/ready", headers, args.timeout)
         login = _login_or_register(gateway, args.account, args.password)
-        asyncio.run(_agent_round_trip(gateway, connector, headers, login, args.timeout))
+        asyncio.run(
+            _agent_round_trip(
+                gateway,
+                connector,
+                headers,
+                login,
+                args.timeout,
+                args.fault_matrix,
+            )
+        )
     except Exception as exc:
         print(f"four-runtime smoke failed: {exc}")
         return 1
-    print("four-runtime smoke passed: login + simulated endpoint dispatch")
+    suffix = " + timeout/disconnect/reconnect" if args.fault_matrix else ""
+    print(f"four-runtime smoke passed: login + simulated endpoint dispatch{suffix}")
     return 0
 
 

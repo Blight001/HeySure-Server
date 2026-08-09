@@ -2,6 +2,7 @@ import time
 
 import pytest
 from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError
 
 from api.core.settings import settings
 from api.database import create_db_and_tables, engine, get_session
@@ -35,6 +36,27 @@ def test_long_read_transaction_does_not_block_runtime_schema_guard():
         create_db_and_tables()
         elapsed = time.monotonic() - started
         transaction.rollback()
+    assert elapsed < 2.0
+
+
+def test_database_lock_wait_is_bounded_by_connection_policy():
+    lock_key = 7_314_159
+    with engine.connect() as blocker, engine.connect() as waiter:
+        blocker.execute(text("SELECT pg_advisory_lock(:key)"), {"key": lock_key})
+        try:
+            started = time.monotonic()
+            with pytest.raises(DBAPIError):
+                waiter.execute(
+                    text("SELECT pg_advisory_lock(:key)"),
+                    {"key": lock_key},
+                )
+            elapsed = time.monotonic() - started
+            waiter.rollback()
+        finally:
+            blocker.execute(
+                text("SELECT pg_advisory_unlock(:key)"),
+                {"key": lock_key},
+            )
     assert elapsed < 2.0
 
 
