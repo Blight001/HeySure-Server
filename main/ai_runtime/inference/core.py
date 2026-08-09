@@ -14,9 +14,9 @@ import requests
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.runtime import async_bridge, http_client, run_context
-run_async, ai_http_post = async_bridge.run_async, http_client.ai_http_post
-from mcp_runtime.mcp import get_project_root, registry
+from api.runtime import http_client, run_context
+ai_http_post = http_client.ai_http_post
+from mcp_runtime.mcp import get_project_root
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
 from api.services.chat import chat_inject, conversation_compress, mcp_session_context
@@ -64,16 +64,13 @@ from ai_runtime.inference.tool_resolution import (
     track_repeated_tool_call as _track_repeated_tool_call,
     to_native_tool_name as _to_native_tool_name,
 )
-from ai_runtime.inference.runtime_clients import (
-    call_mcp_via_runtime as _call_mcp_via_runtime,
-    dispatch_endpoint_in_process as _dispatch_endpoint_in_process,
-    dispatch_endpoint_via_runtime as _dispatch_endpoint_via_runtime,
-    endpoint_dispatch_timeout as _endpoint_dispatch_timeout,
-)
 from ai_runtime.inference.run_request import (
     WorkerRequest,
     resolve_session_preset_entry,
     start_worker_run,
+)
+from ai_runtime.inference.tool_execution import (
+    execute_tool_call as _execute_tool_call,
 )
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
@@ -81,7 +78,6 @@ from connector_runtime.dispatch.desktop_device_tools import (
     endpoint_bridge_tools_for_config,
     endpoint_tools_for_config,
     is_endpoint_agent_tool,
-    is_workshop_tool,
 )
 from api.services.tasks.task_system import (
     TASK_PLAN_FLOW_PROMPT,
@@ -170,74 +166,6 @@ def _raise_for_upstream_error(response: requests.Response) -> None:
     raise RuntimeError(_format_upstream_error(response))
 
 
-async def _call_mcp_or_endpoint_tool(
-    tool: str,
-    user_id: int,
-    arguments: dict,
-    ai_config_id: Optional[int],
-) -> Dict[str, object]:
-    if is_workshop_tool(tool):
-        return {
-            "tool": tool,
-            "destructive": True,
-            "result": await _dispatch_endpoint_in_process(
-                user_id=user_id,
-                ai_config_id=ai_config_id,
-                tool=tool,
-                arguments=arguments,
-            ),
-        }
-    if is_endpoint_agent_tool(tool):
-        # Dispatch through the process that owns endpoint-agent sockets. In a
-        # split deployment that is connector-runtime; legacy monoliths either
-        # use api-gateway or dispatch in-process when both URLs are empty.
-        from api.devices.socket_owner import endpoint_dispatch_url
-        # Bot-originated runs execute inside connector-runtime itself. That
-        # process owns the endpoint Socket.IO registry but intentionally has no
-        # CONNECTOR_RUNTIME_URL, so falling back to api-gateway would dispatch
-        # in the wrong process and return "no agent connected for this tool".
-        # Use the in-process path when this worker is the socket owner.
-        agent_host_url = (
-            ""
-            if str(settings.service_role or "").strip().lower() == "connector"
-            else endpoint_dispatch_url(
-                settings.api_gateway_url,
-                settings.connector_runtime_url,
-            )
-        )
-        dispatch_timeout = _endpoint_dispatch_timeout(tool, arguments)
-        if agent_host_url:
-            return {
-                "tool": tool,
-                "destructive": True,
-                "result": await _dispatch_endpoint_via_runtime(
-                    agent_host_url, tool, user_id, arguments, ai_config_id,
-                    timeout_seconds=dispatch_timeout,
-                ),
-            }
-        return {
-            "tool": tool,
-            "destructive": True,
-            "result": await _dispatch_endpoint_in_process(
-                user_id=user_id,
-                ai_config_id=ai_config_id,
-                tool=tool,
-                arguments=arguments,
-                timeout_seconds=dispatch_timeout,
-            ),
-        }
-    # Web search is a direct outbound API call. Keep it in-process so an
-    # unavailable split MCP runtime cannot turn a healthy search API into a
-    # 127.0.0.1:3001 proxy failure.
-    if tool == "workspace.search":
-        return await registry.call(tool, user_id, arguments, ai_config_id)
-
-    runtime_url = settings.mcp_runtime_url
-    if runtime_url:
-        return await _call_mcp_via_runtime(runtime_url, tool, user_id, arguments, ai_config_id)
-    return await registry.call(tool, user_id, arguments, ai_config_id)
-
-
 def _record_mcp_call(
     *, tool, user_id, ai_config_id, session_id, run_id, message_id, failed, error
 ) -> None:
@@ -260,25 +188,6 @@ def _record_mcp_call(
         )
     except Exception:
         pass
-
-
-def _tool_result_failed(tool_result: Dict[str, object]) -> tuple[bool, str]:
-    result = tool_result.get("result") if isinstance(tool_result, dict) else None
-    if isinstance(result, dict) and result.get("success") is False:
-        detail = (
-            result.get("error")
-            or result.get("summary")
-            or result.get("stderr")
-            or result.get("output")
-            or result.get("failure_type")
-            or "Tool returned success=false"
-        )
-        if result.get("failure_type") and result.get("exit_code") is not None:
-            detail = f"{result.get('failure_type')} (exit_code={result.get('exit_code')}): {detail}"
-        elif result.get("failure_type"):
-            detail = f"{result.get('failure_type')}: {detail}"
-        return True, str(detail)
-    return False, ""
 
 
 def _duplicate_call_flags(turn_calls: List[Dict[str, Any]]) -> List[bool]:
@@ -1420,44 +1329,21 @@ def _run_worker_impl(request: WorkerRequest):
                                 ok=False,
                                 error_message=item_error,
                             )
+                            _split_latency = time.perf_counter() - _split_started_at
                         else:
                             _set_run_live_phase(run_id, "waiting_mcp", split_tool)
-                            try:
-                                # Same bridge-timeout widening as the single-tool path below:
-                                # endpoint-agent tools may run for minutes; let their inner
-                                # result-wait deadline govern instead of the 120s bridge cap.
-                                _split_bridge_timeout = None
-                                if is_endpoint_agent_tool(split_tool):
-                                    _split_bridge_timeout = _endpoint_dispatch_timeout(split_tool, arguments) + 30
-                                item_result = run_async(
-                                    _call_mcp_or_endpoint_tool(split_tool, user_id, arguments, ai_config_id),
-                                    timeout=_split_bridge_timeout,
-                                )
-                                endpoint_failed, endpoint_error = _tool_result_failed(item_result)
-                                if endpoint_failed:
-                                    item_failed = True
-                                    compound_failed = True
-                                    item_error = endpoint_error
-                                    item_result_text = _build_mcp_display_result(
-                                        split_tool,
-                                        item_result,
-                                        ok=False,
-                                        error_message=item_error,
-                                    )
-                                else:
-                                    item_result_text = _build_mcp_display_result(split_tool, item_result, ok=True)
-                            except Exception as mcp_exc:
-                                item_failed = True
-                                compound_failed = True
-                                item_error = _extract_mcp_error(mcp_exc)
-                                item_result = {"result": {"success": False, "error": item_error}}
-                                item_result_text = _build_mcp_display_result(
-                                    split_tool,
-                                    item_result,
-                                    ok=False,
-                                    error_message=item_error,
-                                )
-                        _split_latency = time.perf_counter() - _split_started_at
+                            execution = _execute_tool_call(
+                                split_tool,
+                                user_id,
+                                arguments,
+                                ai_config_id,
+                            )
+                            item_result = execution.result
+                            item_failed = execution.failed
+                            item_error = execution.error
+                            item_result_text = execution.display_text
+                            compound_failed = compound_failed or item_failed
+                            _split_latency = execution.latency
                         _record_mcp_call(
                             tool=split_tool, user_id=user_id, ai_config_id=ai_config_id,
                             session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
@@ -1574,37 +1460,16 @@ def _run_worker_impl(request: WorkerRequest):
                     return TurnCallAction.NEXT_CALL
 
                 _set_run_live_phase(run_id, "waiting_mcp", tool)
-                tool_failed = False
-                tool_error = ""
-                _tool_started_at = time.perf_counter()
-                try:
-                    # The async bridge caps every tool call at _DEFAULT_TIMEOUT (120s)
-                    # and, when it fires, raises a bare concurrent.futures.TimeoutError
-                    # that surfaces to the model as just "TimeoutError". Endpoint-agent
-                    # tools (browser/desktop "run") legitimately run for minutes, so give
-                    # the bridge a window past their own result-wait deadline — the inner
-                    # deadline then wins and returns a structured, readable result (and the
-                    # device has time to finish and send back the full execution trace).
-                    _bridge_timeout = None
-                    if is_endpoint_agent_tool(tool):
-                        _bridge_timeout = _endpoint_dispatch_timeout(tool, arguments) + 30
-                    tool_result = run_async(
-                        _call_mcp_or_endpoint_tool(tool, user_id, arguments, ai_config_id),
-                        timeout=_bridge_timeout,
-                    )
-                    endpoint_failed, endpoint_error = _tool_result_failed(tool_result)
-                    if endpoint_failed:
-                        tool_failed = True
-                        tool_error = endpoint_error
-                        result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
-                    else:
-                        result_text = _build_mcp_display_result(tool, tool_result, ok=True)
-                except Exception as mcp_exc:
-                    tool_failed = True
-                    tool_error = _extract_mcp_error(mcp_exc)
-                    tool_result = {"result": {"success": False, "error": tool_error}}
-                    result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
-                _tool_latency = time.perf_counter() - _tool_started_at
+                execution = _execute_tool_call(
+                    tool,
+                    user_id,
+                    arguments,
+                    ai_config_id,
+                )
+                tool_result = execution.result
+                tool_failed = execution.failed
+                tool_error = execution.error
+                result_text = execution.display_text
                 _record_mcp_call(
                     tool=tool, user_id=user_id, ai_config_id=ai_config_id,
                     session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
@@ -1643,7 +1508,7 @@ def _run_worker_impl(request: WorkerRequest):
                     image_url=screenshot_ref.get("url", ""),
                     image_data_url=screenshot_ref.get("data_url", ""),
                     tool_result=tool_result if isinstance(tool_result, dict) else None,
-                    latency=_tool_latency,
+                    latency=execution.latency,
                 )
 
                 if (not tool_failed) and tool == "mcp.describe+tool":

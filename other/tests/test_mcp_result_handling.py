@@ -1,8 +1,8 @@
-from ai_runtime.inference.core import _tool_result_failed
+from ai_runtime.inference.tool_execution import tool_result_failed
 
 
 def test_tool_result_failed_preserves_structured_failure_detail():
-    failed, detail = _tool_result_failed({
+    failed, detail = tool_result_failed({
         "tool": "workspace.run+command",
         "result": {
             "success": False,

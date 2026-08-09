@@ -1,6 +1,7 @@
 import asyncio
 
 from ai_runtime.inference import core
+from ai_runtime.inference.runtime_clients import dispatch_endpoint_via_runtime
 
 
 def test_split_runtime_preserves_completed_dispatch_device_id(monkeypatch):
@@ -42,7 +43,7 @@ def test_split_runtime_preserves_completed_dispatch_device_id(monkeypatch):
     monkeypatch.setattr("httpx.AsyncClient", _Client)
     monkeypatch.setattr("api.runtime.internal_http.internal_headers", lambda: {})
 
-    result = asyncio.run(core._dispatch_endpoint_via_runtime(
+    result = asyncio.run(dispatch_endpoint_via_runtime(
         "http://connector",
         "shell.run",
         1,

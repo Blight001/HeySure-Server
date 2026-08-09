@@ -1,0 +1,128 @@
+import asyncio
+
+from ai_runtime.inference import tool_execution
+
+
+def test_call_routes_regular_tool_to_split_mcp_runtime(monkeypatch):
+    observed = {}
+
+    async def fake_runtime_call(runtime_url, tool, user_id, arguments, ai_config_id):
+        observed["call"] = (runtime_url, tool, user_id, arguments, ai_config_id)
+        return {"result": {"success": True}}
+
+    monkeypatch.setattr(tool_execution, "is_workshop_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution.settings, "mcp_runtime_url", "http://mcp:3001")
+    monkeypatch.setattr(tool_execution, "call_mcp_via_runtime", fake_runtime_call)
+
+    result = asyncio.run(
+        tool_execution.call_mcp_or_endpoint_tool(
+            "workspace.read",
+            9,
+            {"path": "README.md"},
+            3,
+        )
+    )
+
+    assert result["result"]["success"] is True
+    assert observed["call"] == (
+        "http://mcp:3001",
+        "workspace.read",
+        9,
+        {"path": "README.md"},
+        3,
+    )
+
+
+def test_call_keeps_workspace_search_in_process(monkeypatch):
+    observed = {}
+
+    async def fake_registry_call(tool, user_id, arguments, ai_config_id):
+        observed["tool"] = tool
+        return {"result": {"success": True, "items": []}}
+
+    async def unexpected_runtime_call(*args, **kwargs):
+        raise AssertionError("workspace.search must not use split MCP runtime")
+
+    monkeypatch.setattr(tool_execution, "is_workshop_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution.settings, "mcp_runtime_url", "http://mcp:3001")
+    monkeypatch.setattr(tool_execution.registry, "call", fake_registry_call)
+    monkeypatch.setattr(tool_execution, "call_mcp_via_runtime", unexpected_runtime_call)
+
+    result = asyncio.run(
+        tool_execution.call_mcp_or_endpoint_tool("workspace.search", 9, {"q": "x"}, None)
+    )
+
+    assert observed["tool"] == "workspace.search"
+    assert result["result"]["items"] == []
+
+
+def test_execute_tool_call_returns_normalized_success(monkeypatch):
+    async def fake_call(tool, user_id, arguments, ai_config_id):
+        return {"tool": tool, "result": {"success": True, "value": 7}}
+
+    monkeypatch.setattr(tool_execution, "call_mcp_or_endpoint_tool", fake_call)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: False)
+    monkeypatch.setattr(
+        tool_execution,
+        "run_async",
+        lambda awaitable, timeout=None: asyncio.run(awaitable),
+    )
+
+    execution = tool_execution.execute_tool_call(
+        "workspace.read",
+        9,
+        {"path": "README.md"},
+        3,
+    )
+
+    assert execution.failed is False
+    assert execution.error == ""
+    assert execution.result["result"]["value"] == 7
+    assert '"value": 7' in execution.display_text
+    assert execution.latency >= 0
+
+
+def test_execute_tool_call_uses_extended_endpoint_bridge_timeout(monkeypatch):
+    observed = {}
+
+    async def fake_call(tool, user_id, arguments, ai_config_id):
+        return {"result": {"success": False, "error": "device offline"}}
+
+    def fake_run_async(awaitable, timeout=None):
+        observed["timeout"] = timeout
+        return asyncio.run(awaitable)
+
+    monkeypatch.setattr(tool_execution, "call_mcp_or_endpoint_tool", fake_call)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: True)
+    monkeypatch.setattr(tool_execution, "endpoint_dispatch_timeout", lambda _tool, _args: 420)
+    monkeypatch.setattr(tool_execution, "run_async", fake_run_async)
+
+    execution = tool_execution.execute_tool_call("run_card", 9, {}, None)
+
+    assert observed["timeout"] == 450
+    assert execution.failed is True
+    assert execution.error == "device offline"
+    assert "device offline" in execution.display_text
+
+
+def test_execute_tool_call_converts_bridge_exception_to_result(monkeypatch):
+    async def fake_call(tool, user_id, arguments, ai_config_id):
+        return {"result": {"success": True}}
+
+    def fail_bridge(awaitable, timeout=None):
+        awaitable.close()
+        raise TimeoutError("bridge deadline")
+
+    monkeypatch.setattr(tool_execution, "call_mcp_or_endpoint_tool", fake_call)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution, "run_async", fail_bridge)
+
+    execution = tool_execution.execute_tool_call("workspace.read", 9, {}, None)
+
+    assert execution.failed is True
+    assert "bridge deadline" in execution.error
+    assert execution.result == {
+        "result": {"success": False, "error": execution.error}
+    }
