@@ -18,9 +18,10 @@ ai_http_post = http_client.ai_http_post
 from mcp_runtime.mcp import get_project_root
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
-from api.services.chat import chat_inject, conversation_compress, mcp_session_context
+from api.services.chat import chat_inject, mcp_session_context
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
+from ai_runtime.inference import compression_flow
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
 from ai_runtime.inference import tool_media
@@ -114,7 +115,6 @@ from api.chat_runtime.chat_runtime_helpers import (
     _resolve_ai_runtime,
     _run_set_status,
     _run_should_stop,
-    _session_total_tokens,
     build_runtime_system_prompt_and_tools,
 )
 
@@ -1279,87 +1279,32 @@ def _run_worker_impl(request: WorkerRequest):
                 _set_run_live_text(run_id, "")
                 _set_run_live_usage(run_id, 0, 0, 0)
 
-                # AI 主动压缩上下文：复用自动压缩机制，但不看 token 阈值，立即把
-                # 较早的对话历史折叠成摘要并重建当前会话，让本轮就用上压缩结果。
-                # 该调用整体重建 convo，因此被拦截、不下发到工具层，并且必须独占
-                # 一轮——同轮其余调用一律不执行。
-                _compress_call = next(
-                    (
-                        call for call in turn_calls
-                        if call["tool"] == "conversation.manage"
-                        and str((call["arguments"] or {}).get("action") or "").strip().lower() == "compress"
-                    ),
-                    None,
+                compression_context = compression_flow.CompressionContext(
+                    session=bg, user=user, config=cfg, user_id=user_id,
+                    ai_config_id=ai_config_id, ai_kind=ai_kind,
+                    session_id=session_id, session_name=session_name, model=model,
+                    api_key=api_key, base_url=base_url, system_prompt=system_prompt,
+                    compression_prompt=str(auto_ctl.get("compression_prompt") or ""),
+                    plan_state=plan_state,
+                    reset_live_usage=lambda: _set_run_live_usage(run_id, 0, 0, 0),
+                    set_generating=lambda: _set_run_live_phase(run_id, "generating"),
+                    inject_flow_directive=_inject_flow_directive,
                 )
-                if _compress_call is not None:
-                    _compress_args = _compress_call["arguments"] or {}
-                    try:
-                        _keep_recent = int(_compress_args.get("keep_recent", 4))
-                    except Exception:
-                        _keep_recent = 4
-                    _keep_recent = max(0, min(_keep_recent, 20))
-                    rebuilt_convo = None
-                    try:
-                        rebuilt_convo = conversation_compress.compress_session(
-                            bg,
-                            convo=convo,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            model=model,
-                            api_key=api_key,
-                            base_url=base_url,
-                            system_prompt=system_prompt,
-                            compression_prompt=str(auto_ctl.get("compression_prompt") or ""),
-                            session_tokens=0,
-                            threshold=0,
-                            keep_recent=_keep_recent,
-                        )
-                    except Exception:
-                        logger.exception("conversation.compress (manual) failed")
-                        rebuilt_convo = None
-                    if rebuilt_convo:
-                        _compress_note = (
-                            "已完成上下文压缩；详细摘要已写入对话记录。"
-                            "请严格继承摘要中的目标、约束、进度、关键数据、待办与风险继续执行。"
-                        )
-                        convo = rebuilt_convo
-                        convo.append({"role": "user", "content": _compress_note})
-                        _set_run_live_usage(run_id, 0, 0, 0)
-                        # Conversation was rebuilt; reset the phase boundary so
-                        # phase compaction never splices against a stale index.
-                        if plan_state is not None:
-                            phase_start_convo_index = len(convo)
-                            phase_started_at = time.time()
-                            phase_mcp_statuses = []
-                    else:
-                        _compress_note = "当前对话历史较短，暂无需压缩，请直接继续。"
-                        if _has_native_tc:
-                            convo.append({
-                                "role": "tool",
-                                "tool_call_id": _compress_call["id"],
-                                "content": _safe_json(
-                                    {"success": True, "compressed": False, "note": _compress_note}
-                                ),
-                            })
-                            _answer_pending_calls(
-                                convo,
-                                [call for call in turn_calls if call is not _compress_call],
-                                {
-                                    "success": False,
-                                    "error": "not_executed",
-                                    "note": (
-                                        "conversation.manage(compress) rewrites the whole context, "
-                                        "so it runs on its own. Re-issue this call afterwards."
-                                    ),
-                                },
-                                native=True,
-                            )
-                        else:
-                            convo.append({"role": "user", "content": _compress_note})
-                    _set_run_live_phase(run_id, "generating")
+                compression_state = compression_flow.CompressionState(
+                    conversation=convo, compression_failed=compression_failed,
+                    phase_start_convo_index=phase_start_convo_index,
+                    phase_started_at=phase_started_at,
+                    phase_mcp_statuses=phase_mcp_statuses,
+                )
+                compression = compression_flow.handle_manual_compression(
+                    compression_context, compression_state, turn_calls, _has_native_tc
+                )
+                if compression.handled:
+                    convo = compression.state.conversation
+                    compression_failed = compression.state.compression_failed
+                    phase_start_convo_index = compression.state.phase_start_convo_index
+                    phase_started_at = compression.state.phase_started_at
+                    phase_mcp_statuses = compression.state.phase_mcp_statuses
                     continue
 
                 if is_task_runtime:
@@ -1367,61 +1312,20 @@ def _run_worker_impl(request: WorkerRequest):
                     if latest_task_job:
                         task_job = latest_task_job
 
-                # Automatic conversation compression: when a digital member's
-                # session token count reaches its threshold, summarize the older
-                # part of the conversation into a compact summary and CONTINUE the
-                # same session (no new generation, no agent death).
                 task_is_finished = bool(task_job and _is_task_finished_status(str(task_job.status or "")))
-                if (
-                    cfg
-                    and cfg.ai_role == "digital_member"
-                    and bool(getattr(user, "conversation_auto_compress_enabled", True))
-                    and not task_is_finished
-                    and not compression_failed
-                    and not any(call["tool"] == "todo.manage" for call in turn_calls)
-                ):
-                    threshold = max(1, int(cfg.token_limit or 1))
-                    session_tokens = _session_total_tokens(bg, user_id, ai_kind, session_id, ai_config_id)
-                    if session_tokens >= threshold:
-                        rebuilt_convo = None
-                        try:
-                            rebuilt_convo = conversation_compress.compress_session(
-                                bg,
-                                convo=convo,
-                                user_id=user_id,
-                                ai_config_id=ai_config_id,
-                                ai_kind=ai_kind,
-                                session_id=session_id,
-                                session_name=session_name,
-                                model=model,
-                                api_key=api_key,
-                                base_url=base_url,
-                                system_prompt=system_prompt,
-                                compression_prompt=str(auto_ctl.get("compression_prompt") or ""),
-                                session_tokens=session_tokens,
-                                threshold=threshold,
-                            )
-                        except Exception:
-                            logger.exception("conversation_compress.compress_session failed")
-                            rebuilt_convo = None
-                        if rebuilt_convo:
-                            convo = rebuilt_convo
-                            # Reset live pending token state so the threshold is not
-                            # immediately re-hit on the next loop step.
-                            _set_run_live_usage(run_id, 0, 0, 0)
-                            if plan_state is not None:
-                                # Compression rebuilt convo as system+summary+recent
-                                # and dropped the live phase directive. Re-anchor the
-                                # model on the current phase so it does not re-plan
-                                # from phase 1 after the context shrinks.
-                                phase_start_convo_index = len(convo)
-                                _inject_flow_directive(convo)
-                                phase_started_at = time.time()
-                                phase_mcp_statuses = []
-                            continue
-                        # Compression failed or not enough history to compress:
-                        # don't retry-loop forever; fall through this turn.
-                        compression_failed = True
+                compression = compression_flow.maybe_auto_compress(
+                    compression_context,
+                    compression.state,
+                    turn_calls,
+                    task_is_finished,
+                )
+                convo = compression.state.conversation
+                compression_failed = compression.state.compression_failed
+                phase_start_convo_index = compression.state.phase_start_convo_index
+                phase_started_at = compression.state.phase_started_at
+                phase_mcp_statuses = compression.state.phase_mcp_statuses
+                if compression.continue_loop:
+                    continue
 
                 # Plan-mode gate: once a plan exists, reject a turn whose calls do
                 # not move the current plan forward. The assistant tool_call message
