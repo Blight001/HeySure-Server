@@ -13,11 +13,8 @@ from sqlmodel import Session
 from api.database import engine
 from api.runtime import run_context
 from mcp_runtime.mcp import get_project_root
-from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import ChatMessageCreate
 from api.services.tasks import task_plan as plan_service
-from ai_runtime.inference import compression_flow
-from ai_runtime.inference import final_response_flow
 from ai_runtime.inference import model_gateway
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
@@ -25,6 +22,7 @@ from ai_runtime.inference import tool_media
 from ai_runtime.inference import tool_batch_flow
 from ai_runtime.inference import turn_call_flow
 from ai_runtime.inference import worker_lifecycle
+from ai_runtime.inference import worker_post_turn_flow
 from ai_runtime.inference import worker_setup
 from ai_runtime.inference import worker_turn_flow
 from ai_runtime.inference.debug_support import (
@@ -44,11 +42,9 @@ from ai_runtime.inference.plan_flow import (
     PlanFinalizeContext,
     append_plan_directive,
     finalize_plan,
-    send_task_completion_notification as _notify_task_completion,
 )
 from ai_runtime.inference.tool_resolution import (
     TurnCallAction,
-    append_pending_call_responses as _answer_pending_calls,
     flush_screenshot_messages as _flush_screenshot_messages,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
 )
@@ -64,8 +60,6 @@ from api.chat_runtime.chat_prompt_utils import (
 )
 from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.chat_runtime_helpers import (
-    _is_task_finished_status,
-    _load_task_job_by_session,
     _parse_allowed_tools,
     _run_set_status,
     _run_should_stop,
@@ -129,15 +123,12 @@ def _run_worker_impl(request: WorkerRequest):
     try:
         with Session(engine) as bg:
             setup = worker_setup.prepare_worker(bg, request)
-            user = setup.user
             max_steps = setup.max_steps
             cfg = setup.config
             api_key = setup.api_key
             base_url = setup.base_url
             model = setup.model
             system_prompt = setup.system_prompt
-            mcp_warning_template = setup.warning_template
-            auto_ctl = setup.auto_control
             task_job = setup.task_job
             is_task_runtime = setup.is_task_runtime
             effective_tool_allowlist = setup.effective_tool_allowlist
@@ -259,17 +250,6 @@ def _run_worker_impl(request: WorkerRequest):
             elif is_task_runtime and ai_config_id is not None and not _was_awaiting_finish_on_load:
                 convo.append({"role": "user", "content": phase_context.render_plan_required_notice()})
 
-            def _flow_allowed_tool(tool_name: str) -> bool:
-                """Hard gate: which tools the planned flow permits right now."""
-                if plan_state is None:
-                    return True
-                name = str(tool_name or "")
-                if name in MCP_INTROSPECTION_TOOLS:
-                    return True
-                if flow_awaiting_finish:
-                    return name == "todo.manage"
-                return True
-
             # The configured step limit protects ordinary conversations from
             # runaway loops. Once a todo exists, completion (or an explicit
             # user stop) becomes the terminal condition: a model-side natural
@@ -356,109 +336,57 @@ def _run_worker_impl(request: WorkerRequest):
                 # every tool response is appended (see _flush_turn_screenshots).
                 turn_screenshot_messages: List[Dict] = []
 
-                compression_context = compression_flow.CompressionContext(
-                    session=bg, user=user, config=cfg, user_id=user_id,
-                    ai_config_id=ai_config_id, ai_kind=ai_kind,
-                    session_id=session_id, session_name=session_name, model=model,
-                    api_key=api_key, base_url=base_url, system_prompt=system_prompt,
-                    compression_prompt=str(auto_ctl.get("compression_prompt") or ""),
-                    plan_state=plan_state,
-                    reset_live_usage=lambda: _set_run_live_usage(run_id, 0, 0, 0),
-                    set_generating=lambda: _set_run_live_phase(run_id, "generating"),
-                    inject_flow_directive=_inject_flow_directive,
-                )
-                compression_state = compression_flow.CompressionState(
-                    conversation=convo, compression_failed=compression_failed,
-                    phase_start_convo_index=phase_start_convo_index,
-                    phase_started_at=phase_started_at,
-                    phase_mcp_statuses=phase_mcp_statuses,
-                )
-                compression = compression_flow.handle_manual_compression(
-                    compression_context, compression_state, turn_calls, _has_native_tc
-                )
-                if compression.handled:
-                    convo = compression.state.conversation
-                    compression_failed = compression.state.compression_failed
-                    phase_start_convo_index = compression.state.phase_start_convo_index
-                    phase_started_at = compression.state.phase_started_at
-                    phase_mcp_statuses = compression.state.phase_mcp_statuses
-                    continue
-
-                if is_task_runtime:
-                    latest_task_job = _load_task_job_by_session(bg, user_id, ai_config_id, session_id)
-                    if latest_task_job:
-                        task_job = latest_task_job
-
-                task_is_finished = bool(task_job and _is_task_finished_status(str(task_job.status or "")))
-                compression = compression_flow.maybe_auto_compress(
-                    compression_context,
-                    compression.state,
-                    turn_calls,
-                    task_is_finished,
-                )
-                convo = compression.state.conversation
-                compression_failed = compression.state.compression_failed
-                phase_start_convo_index = compression.state.phase_start_convo_index
-                phase_started_at = compression.state.phase_started_at
-                phase_mcp_statuses = compression.state.phase_mcp_statuses
-                if compression.continue_loop:
-                    continue
-
-                # Plan-mode gate: once a plan exists, reject a turn whose calls do
-                # not move the current plan forward. The assistant tool_call message
-                # was already appended above, so answer every id (native) / reply
-                # (text) and steer back.
-                if (
-                    turn_calls
-                    and is_task_runtime
-                    and plan_state is not None
-                    and any(not _flow_allowed_tool(call["tool"]) for call in turn_calls)
-                ):
-                    if flow_awaiting_finish:
-                        _flow_block_text = phase_context.render_finish_required_notice(plan_state.goal)
-                    else:
-                        _flow_block_text = phase_context.render_continue_phase_notice()
-                    if _has_native_tc:
-                        _answer_pending_calls(
-                            convo,
-                            turn_calls,
-                            {"success": False, "error": "flow_violation", "note": _flow_block_text},
-                            native=True,
-                        )
-                    else:
-                        convo.append({"role": "user", "content": _flow_block_text})
-                    _set_run_live_phase(run_id, "generating")
-                    continue
-
-                if not turn_calls:
-                    final_response = final_response_flow.handle_final_response(
-                        final_response_flow.FinalResponseContext(
-                            session=bg, conversation=convo, saved_message=saved,
-                            user_id=user_id, ai_config_id=ai_config_id,
-                            ai_kind=ai_kind, session_id=session_id,
-                            session_name=session_name, model=model, config=cfg,
-                            warning_template=mcp_warning_template,
-                            assistant_text=assistant_text,
-                            native_tool_calls=_has_native_tc,
-                            phase_started_at=phase_started_at,
-                            set_live_phase=lambda phase: _set_run_live_phase(run_id, phase),
-                            auto_finalize_plan=_auto_finalize_plan,
-                            notify_task_completion=_notify_task_completion,
+                post_turn = worker_post_turn_flow.handle_post_turn(
+                    worker_post_turn_flow.PostTurnContext(
+                        session=bg,
+                        request=request,
+                        setup=setup,
+                        reset_live_usage=lambda: _set_run_live_usage(
+                            run_id, 0, 0, 0
                         ),
-                        final_response_flow.FinalResponseState(
-                            markup_fallback_available=markup_fallback_available,
-                            pending_ai_reply_message_id=pending_ai_reply_message_id,
-                            plan_state=plan_state,
-                            awaiting_finish=flow_awaiting_finish,
-                            task_job=task_job,
+                        set_live_phase=lambda phase: _set_run_live_phase(
+                            run_id, phase
                         ),
-                    )
-                    markup_fallback_available = final_response.state.markup_fallback_available
-                    pending_ai_reply_message_id = final_response.state.pending_ai_reply_message_id
-                    plan_state = final_response.state.plan_state
-                    flow_awaiting_finish = final_response.state.awaiting_finish
-                    if final_response.action is final_response_flow.FinalResponseAction.NEXT_TURN:
-                        continue
+                        inject_flow_directive=_inject_flow_directive,
+                        auto_finalize_plan=_auto_finalize_plan,
+                    ),
+                    worker_post_turn_flow.PostTurnState(
+                        conversation=convo,
+                        session_name=session_name,
+                        plan_state=plan_state,
+                        awaiting_finish=flow_awaiting_finish,
+                        phase_start_convo_index=phase_start_convo_index,
+                        phase_started_at=phase_started_at,
+                        phase_mcp_statuses=phase_mcp_statuses,
+                        compression_failed=compression_failed,
+                        task_job=task_job,
+                        markup_fallback_available=markup_fallback_available,
+                        pending_reply_message_id=pending_ai_reply_message_id,
+                    ),
+                    worker_post_turn_flow.PostTurnData(
+                        saved_message=saved,
+                        assistant_text=assistant_text,
+                        native_tool_calls=_has_native_tc,
+                        turn_calls=turn_calls,
+                    ),
+                )
+                convo = post_turn.state.conversation
+                plan_state = post_turn.state.plan_state
+                flow_awaiting_finish = post_turn.state.awaiting_finish
+                phase_start_convo_index = post_turn.state.phase_start_convo_index
+                phase_started_at = post_turn.state.phase_started_at
+                phase_mcp_statuses = post_turn.state.phase_mcp_statuses
+                compression_failed = post_turn.state.compression_failed
+                task_job = post_turn.state.task_job
+                markup_fallback_available = (
+                    post_turn.state.markup_fallback_available
+                )
+                pending_ai_reply_message_id = (
+                    post_turn.state.pending_reply_message_id
+                )
+                if post_turn.action is worker_post_turn_flow.PostTurnAction.NEXT_TURN:
+                    continue
+                if post_turn.action is worker_post_turn_flow.PostTurnAction.COMPLETE_RUN:
                     _run_set_status(run_id, "completed", finished=True)
                     return
 
