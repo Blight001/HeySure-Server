@@ -1,5 +1,11 @@
 from tools.introspection import _mcp_describe_tool
 from fastapi import HTTPException
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _without_online_device_tools(monkeypatch):
+    monkeypatch.setattr("tools.introspection.online_tool_defs_for_user", lambda _user_id: {})
 
 
 class _DisabledConfig:

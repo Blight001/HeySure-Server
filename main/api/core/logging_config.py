@@ -106,6 +106,8 @@ class RingBufferHandler(logging.Handler):
                     "level": record.levelname,
                     "logger": redact_secrets(record.name),
                     "msg": message,
+                    "service_role": getattr(record, "service_role", ""),
+                    "instance_id": getattr(record, "instance_id", ""),
                 }
             )
 
@@ -121,6 +123,25 @@ class RingBufferHandler(logging.Handler):
 
 
 _ring_buffer_handler: Optional[RingBufferHandler] = None
+
+
+class RuntimeContextFilter(logging.Filter):
+    """Attach stable process identity to every application log record."""
+
+    def __init__(self, service_role: str, instance_id: str) -> None:
+        super().__init__()
+        self.service_role = service_role
+        self.instance_id = instance_id
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.service_role = getattr(record, "service_role", self.service_role)
+        record.instance_id = getattr(record, "instance_id", self.instance_id)
+        from api.runtime.log_context import values
+
+        for key, value in values().items():
+            if not hasattr(record, key):
+                setattr(record, key, value)
+        return True
 
 
 def get_recent_logs(limit: int = 200, level: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -182,7 +203,7 @@ class _ConsoleFormatter(logging.Formatter):
 
     def __init__(self, use_color: bool) -> None:
         super().__init__(
-            fmt="%(asctime)s %(levelname)-7s %(name)s — %(message)s",
+            fmt="%(asctime)s %(levelname)-7s [%(service_role)s %(instance_id)s] %(name)s — %(message)s",
             datefmt="%H:%M:%S",
         )
         self._use_color = use_color
@@ -237,6 +258,13 @@ def configure_logging() -> None:
 
     # In-memory tail consumed by the admin panel's service console view.
     _ring_buffer_handler = RingBufferHandler()
+    from api.runtime.health import state_for
+
+    context_filter = RuntimeContextFilter(
+        settings.service_role, state_for(settings.service_role).instance_id
+    )
+    handler.addFilter(context_filter)
+    _ring_buffer_handler.addFilter(context_filter)
 
     root = logging.getLogger()
     root.setLevel(settings.log_level)

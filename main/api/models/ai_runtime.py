@@ -55,6 +55,11 @@ class AgentDispatchTask(SQLModel, table=True):
     error: Optional[str] = None
     created_at: float = Field(default_factory=time.time, index=True)
     completed_at: Optional[float] = None
+    updated_at: float = Field(default_factory=time.time)
+    deadline_at: Optional[float] = Field(default=None, index=True)
+    owner_instance_id: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[float] = Field(default=None, index=True)
+    attempt: int = Field(default=0)
 
 
 class TaskPlan(SQLModel, table=True):

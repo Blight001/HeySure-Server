@@ -5,6 +5,6 @@ api-gateway and ai-runtime can call tools without holding a direct
 Python reference. Shared library code lives in ``api``.
 """
 
-from .app import create_app
-
-__all__ = ["create_app"]
+# Keep package import side-effect free. Entrypoints import ``mcp_runtime.app``
+# explicitly; importing a helper such as ``mcp_runtime.mcp.core`` must not build
+# a FastAPI application or initialize the tool registry.

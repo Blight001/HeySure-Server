@@ -15,13 +15,9 @@ Results are persisted into the originating chat session and broadcast to the
 user's UI room so the frontend updates live.
 """
 
-import contextvars
 import asyncio
 import json
 import logging
-import os
-import re
-import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -43,175 +39,25 @@ from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
 from api.models import AgentDispatchTask, ChatMessageCreate, DeviceAiBinding, DevicePresence
 from api.sio import agents, sio
 from api.services.chat.chat_persistence import _save_message
+from api.runtime.run_context import get_run_session_context, set_run_session_context
+from connector_runtime.dispatch import models as dispatch_models, repository as dispatch_repository
+from connector_runtime.dispatch.result_payloads import (
+    normalize_screenshot_result_for_delivery as _normalize_screenshot_result_for_delivery,
+    omit_screenshot_bytes as _omit_screenshot_bytes,
+    persist_cookies_result as _persist_cookies_result,
+)
 
 
 logger = logging.getLogger(__name__)
-_DISPATCH_QUEUE_LOCK = threading.Lock()
-
-
-def _persist_dispatch(
-    *,
-    task_id: str,
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-    session_name: Optional[str],
-    device_id: str,
-    tool: str,
-    instruction: str,
-    args: Optional[Dict[str, Any]] = None,
-    suppress_session_message: bool = False,
-    status: str = "pending",
-) -> None:
-    """Insert a ``pending`` row so connector-runtime restarts can still
-    deliver the eventual result to whoever is polling by ``task_id``."""
-    try:
-        with Session(engine) as session:
-            session.add(AgentDispatchTask(
-                task_id=task_id,
-                user_id=user_id,
-                ai_config_id=ai_config_id,
-                ai_kind=ai_kind or "assistant",
-                session_id=session_id,
-                session_name=session_name,
-                device_id=device_id,
-                tool=tool or "",
-                instruction=instruction or "",
-                args_json=json.dumps(args or {}, ensure_ascii=False, default=str),
-                suppress_session_message=bool(suppress_session_message),
-                status=status,
-            ))
-            session.commit()
-    except Exception as exc:
-        # Persistence failure is non-fatal for the in-memory dispatch path,
-        # but it does defeat the restart-resilience guarantee. Log loudly.
-        logger.exception(f"persist failed task={task_id}: {exc}")
-
-
-def _enqueue_dispatch_row(
-    *,
-    task_id: str,
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-    session_name: Optional[str],
-    device_id: str,
-    tool: str,
-    instruction: str,
-    args: Optional[Dict[str, Any]],
-    suppress_session_message: bool,
-) -> str:
-    """Atomically choose ``pending`` or ``queued`` for one device.
-
-    The gateway owns endpoint sockets, so this process lock closes the race
-    between concurrent chat workers checking and inserting dispatch rows.
-    """
-    with _DISPATCH_QUEUE_LOCK:
-        with Session(engine) as session:
-            ahead = session.exec(
-                select(AgentDispatchTask).where(
-                    AgentDispatchTask.device_id == device_id,
-                    AgentDispatchTask.status.in_(["pending", "queued"]),
-                )
-            ).first()
-            status = "queued" if ahead else "pending"
-            session.add(AgentDispatchTask(
-                task_id=task_id,
-                user_id=user_id,
-                ai_config_id=ai_config_id,
-                ai_kind=ai_kind or "assistant",
-                session_id=session_id,
-                session_name=session_name,
-                device_id=device_id,
-                tool=tool or "",
-                instruction=instruction or "",
-                args_json=json.dumps(args or {}, ensure_ascii=False, default=str),
-                suppress_session_message=bool(suppress_session_message),
-                status=status,
-            ))
-            session.commit()
-            return status
-
-
-def _finalize_dispatch_row(
-    task_id: str,
-    *,
-    status: str,
-    success: Optional[bool] = None,
-    summary: Optional[str] = None,
-    result: Any = None,
-    error: Optional[str] = None,
-) -> None:
-    """Mark a dispatch row finished.
-
-    Idempotent for rows that already terminated as ``completed`` or ``error``
-    (real result of an agent reply). Allows overwriting a ``timeout`` row —
-    if the agent eventually replies after the orphan sweep marked it timed
-    out, we preserve the actual result for audit even though the chat_worker
-    has already moved on.
-    """
-    try:
-        with Session(engine) as session:
-            row = session.exec(
-                select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
-            ).first()
-            if not row:
-                return
-            if row.status in {"completed", "error"}:
-                return  # Real outcome already recorded; don't overwrite.
-            row.status = status
-            row.success = success
-            row.summary = summary
-            if result is not None:
-                try:
-                    row.result_json = json.dumps(result, ensure_ascii=False, default=str)
-                except Exception:
-                    row.result_json = str(result)
-            row.error = error
-            row.completed_at = time.time()
-            session.add(row)
-            session.commit()
-    except Exception as exc:
-        logger.exception(f"finalize failed task={task_id}: {exc}")
-
-
-def expire_orphan_dispatches(older_than_seconds: float = 300.0) -> int:
-    """Mark pending/queued rows that have been waiting too long as ``timeout``.
-
-    Called on connector-runtime startup (and periodically) to clean up rows
-    whose original Future died with a previous process — pollers were stuck
-    looking at them. Queued rows are expired too: replaying a minutes-old
-    click/navigate once the queue unblocks does more harm than dropping it.
-    """
-    cutoff = time.time() - older_than_seconds
-    expired = 0
-    try:
-        with Session(engine) as session:
-            rows = session.exec(
-                select(AgentDispatchTask).where(
-                    AgentDispatchTask.status.in_(["pending", "queued"])
-                )
-            ).all()
-            for row in rows:
-                if (row.created_at or 0) < cutoff:
-                    stale_kind = row.status
-                    row.status = "timeout"
-                    row.error = row.error or (
-                        "orphaned across connector-runtime restart"
-                        if stale_kind == "pending"
-                        else "expired in device queue before dispatch"
-                    )
-                    row.completed_at = time.time()
-                    session.add(row)
-                    expired += 1
-            if expired:
-                session.commit()
-    except Exception as exc:
-        logger.exception(f"orphan sweep failed: {exc}")
-    return expired
-
+CONNECTOR_INSTANCE_ID = dispatch_repository.CONNECTOR_INSTANCE_ID
+_enqueue_dispatch_row = dispatch_repository.enqueue_dispatch_row
+_claim_next_queued = dispatch_repository.claim_next_queued
+expire_orphan_dispatches = dispatch_repository.expire_orphan_dispatches
+_finalize_dispatch_row = dispatch_repository.finalize_dispatch_row
+_lease_deadline = dispatch_repository.lease_deadline
+_persist_dispatch = dispatch_repository.persist_dispatch
+_requeue_pending = dispatch_repository.requeue_pending
+TERMINAL_DISPATCH_STATUSES = dispatch_models.TERMINAL_DISPATCH_STATUSES
 
 async def expire_dispatch(task_id: str, reason: str = "result wait timed out") -> bool:
     """Finalize one unfinished dispatch as ``timeout`` and unblock its device queue.
@@ -235,23 +81,18 @@ async def expire_dispatch(task_id: str, reason: str = "result wait timed out") -
         except Exception as exc:
             logger.exception(f"expire lookup failed task={task_id}: {exc}")
             return False
-    _finalize_dispatch_row(task_id, status="timeout", success=False, error=reason)
-    if device_id:
+    expired = _finalize_dispatch_row(task_id, status="timeout", success=False, error=reason)
+    if expired and device_id:
         try:
             await resume_device_dispatch_queue(device_id)
         except Exception:
             logger.exception(f"queue resume after expire failed device={device_id}")
-    return True
+    return expired
 
 # Per-run session context so MCP tools (running inside the worker thread) can
 # attach dispatched-task results to the correct chat session. asyncio.run()
 # copies the current context, so a value set before the tool call is visible
 # inside the (async) MCP handler.
-_RUN_SESSION_CONTEXT: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
-    "run_session_context",
-    default=None,
-)
-
 # taskId -> dispatch context (for routing results back to a session).
 _PENDING_DISPATCHES: Dict[str, Dict[str, Any]] = {}
 _PENDING_DISPATCH_WAITERS: Dict[str, Dict[str, Any]] = {}
@@ -267,8 +108,9 @@ def dispatch_has_recorded_outcome(task_id: str) -> bool:
     Result delivery is ACK/retry based. If the server committed a result but
     its Socket.IO ACK was lost, the agent sends the same task again. Treat that
     retry as an idempotent acknowledgement instead of writing a duplicate chat
-    message or advancing the device queue twice. A timeout is intentionally not
-    terminal here: a late real outcome is still allowed to replace it.
+    message or advancing the device queue twice. Timeout/cancellation are also
+    immutable terminal decisions: a late side-effect result is audited by the
+    agent logs but cannot resurrect a caller that already moved on.
     """
     if not task_id:
         return False
@@ -277,7 +119,8 @@ def dispatch_has_recorded_outcome(task_id: str) -> bool:
             row = session.exec(
                 select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
             ).first()
-            return bool(row and row.status in {"completed", "error"})
+            terminal = {state.value for state in TERMINAL_DISPATCH_STATUSES}
+            return bool(row and row.status in terminal)
     except Exception as exc:
         logger.exception(f"recorded outcome lookup failed task={task_id}: {exc}")
         return False
@@ -304,14 +147,6 @@ def _update_agent_task_state(device_id: str, *, status: str, task_id: str, error
             agent["lastSeenAt"] = time.time()
             agent["lastError"] = error
             break
-
-
-def set_run_session_context(ctx: Optional[Dict[str, Any]]):
-    return _RUN_SESSION_CONTEXT.set(ctx or None)
-
-
-def get_run_session_context() -> Optional[Dict[str, Any]]:
-    return _RUN_SESSION_CONTEXT.get()
 
 
 def _find_agent_sid(device_id: str) -> Optional[str]:
@@ -363,35 +198,32 @@ def _context_from_dispatch_row(row: AgentDispatchTask) -> Dict[str, Any]:
     }
 
 
+def _dispatch_record(task_id: str, ctx: Dict[str, Any]) -> dispatch_models.DispatchRecord:
+    return dispatch_models.DispatchRecord(
+        task_id=task_id,
+        user_id=int(ctx.get("user_id") or 0),
+        ai_config_id=ctx.get("ai_config_id"),
+        ai_kind=str(ctx.get("ai_kind") or "assistant"),
+        session_id=str(ctx.get("session_id") or ""),
+        session_name=ctx.get("session_name"),
+        device_id=str(ctx.get("device_id") or ""),
+        tool=str(ctx.get("tool") or ""),
+        instruction=str(ctx.get("instruction") or ""),
+        args=ctx.get("args") if isinstance(ctx.get("args"), dict) else {},
+        suppress_session_message=bool(ctx.get("suppress_session_message")),
+    )
+
+
 async def resume_device_dispatch_queue(device_id: str) -> Optional[str]:
     """Dispatch the oldest queued task when ``device_id`` has no active task."""
     target_sid = _find_agent_sid(device_id)
     if not target_sid:
         return None
 
-    with _DISPATCH_QUEUE_LOCK:
-        with Session(engine) as session:
-            active = session.exec(
-                select(AgentDispatchTask).where(
-                    AgentDispatchTask.device_id == device_id,
-                    AgentDispatchTask.status == "pending",
-                )
-            ).first()
-            if active:
-                return None
-            row = session.exec(
-                select(AgentDispatchTask).where(
-                    AgentDispatchTask.device_id == device_id,
-                    AgentDispatchTask.status == "queued",
-                ).order_by(AgentDispatchTask.created_at, AgentDispatchTask.id)
-            ).first()
-            if not row:
-                return None
-            row.status = "pending"
-            session.add(row)
-            session.commit()
-            session.refresh(row)
-            ctx = _context_from_dispatch_row(row)
+    row = _claim_next_queued(device_id)
+    if not row:
+        return None
+    ctx = _context_from_dispatch_row(row)
 
     task_id = str(row.task_id)
     _PENDING_DISPATCHES[task_id] = ctx
@@ -409,14 +241,7 @@ async def resume_device_dispatch_queue(device_id: str) -> Optional[str]:
         await sio.emit("task:dispatch", payload, to=target_sid)
     except Exception:
         _PENDING_DISPATCHES.pop(task_id, None)
-        with Session(engine) as session:
-            failed = session.exec(
-                select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
-            ).first()
-            if failed and failed.status == "pending":
-                failed.status = "queued"
-                session.add(failed)
-                session.commit()
+        _requeue_pending(task_id)
         raise
     return task_id
 
@@ -504,19 +329,8 @@ async def dispatch_task_to_agent(
         "created_at": time.time(),
         "suppress_session_message": bool(suppress_session_message),
     }
-    dispatch_status = _enqueue_dispatch_row(
-        task_id=task_id,
-        user_id=user_id,
-        ai_config_id=ai_config_id,
-        ai_kind=ai_kind,
-        session_id=session_id,
-        session_name=session_name,
-        device_id=device_id,
-        tool=tool or "",
-        instruction=instruction or "",
-        args=args or {},
-        suppress_session_message=suppress_session_message,
-    )
+    dispatch_record = _dispatch_record(task_id, dispatch_ctx)
+    dispatch_status = _enqueue_dispatch_row(dispatch_record, timeout_seconds=timeout_seconds)
     _PENDING_DISPATCHES[task_id] = dispatch_ctx
     waiter = None
     if wait_for_result:
@@ -543,7 +357,7 @@ async def dispatch_task_to_agent(
             # Finalize the row and let the device queue continue right away.
             # Leaving it "pending" would block every later dispatch to this
             # device until the orphan sweep (~5 min). A late agent reply still
-            # overwrites the timeout row for audit (see _finalize_dispatch_row).
+            # is ignored after the timeout because terminal rows are immutable.
             _PENDING_DISPATCHES.pop(task_id, None)
             _finalize_dispatch_row(
                 task_id,
@@ -640,170 +454,6 @@ def _save_agent_message(ctx: Dict[str, Any], content: str, tags: str) -> None:
         )
 
 
-_IMAGE_DATA_URL_KEYS = {"dataUrl", "data_url", "imageDataUrl", "screenshotDataUrl", "screenshot"}
-
-
-def _explicit_send_disabled(args: Any) -> bool:
-    if not isinstance(args, dict):
-        return False
-    return any(
-        key in args and args.get(key) is False
-        for key in ("send_to_user", "bot_send_to_user", "deliver_to_user")
-    )
-
-
-def _should_send_screenshot_to_user(tool: str, result: Any, args: Any = None) -> bool:
-    if _explicit_send_disabled(args):
-        return False
-    tool_kind = canonical_screenshot_tool_name(tool)
-    requested_by_args = isinstance(args, dict) and any(
-        args.get(key) is True
-        for key in ("send_to_user", "bot_send_to_user", "deliver_to_user")
-    )
-    return (
-        requested_by_args
-        or (isinstance(result, dict) and (
-            result.get("send_to_user") is True
-            or result.get("bot_send_to_user") is True
-            or result.get("deliver_to_user") is True
-        ))
-        or tool_kind in {"vision_capture", "vision_capture_mouse", "screen_capture", "screen_capture_region"}
-    )
-
-
-def _normalize_screenshot_result_for_delivery(tool: str, result: Any, args: Any = None) -> Any:
-    if not isinstance(result, dict):
-        return result
-    if not _should_send_screenshot_to_user(tool, result, args):
-        return result
-    next_result = dict(result)
-    next_result["send_to_user"] = True
-    next_result["save_to_server"] = True
-    return next_result
-
-
-def _omit_screenshot_bytes(value: Any) -> Any:
-    if isinstance(value, dict):
-        out: Dict[str, Any] = {}
-        for key, item in value.items():
-            if key in _IMAGE_DATA_URL_KEYS and isinstance(item, str) and item.startswith("data:image/"):
-                out[key] = f"<image data URL omitted, {len(item)} chars>"
-            elif key in {"server_path", "workspace_path"}:
-                out[key] = item
-            else:
-                out[key] = _omit_screenshot_bytes(item)
-        return out
-    if isinstance(value, list):
-        return [_omit_screenshot_bytes(item) for item in value]
-    return value
-
-
-def _persist_cookies_result(
-    *,
-    user_id: int,
-    ai_config_id: Optional[int],
-    result: Any,
-) -> Any:
-    """If the browser agent returned full cookie data (when save_to_server=true),
-    write a JSON snapshot into the AI's per-directory cookies/ folder on server.
-    Clean the bulk arrays out of the result so chat logs stay small.
-    """
-    if not isinstance(result, dict):
-        return result
-    # data may be under "data" (from client) or top level for flexibility
-    cookies = result.get("cookies")
-    browser_storage = result.get("browserStorage") or result.get("browser_storage")
-    data_block = result.get("data") if isinstance(result.get("data"), dict) else result
-    has_cookies = bool(cookies) or bool(data_block and (data_block.get("cookies") or data_block.get("browserStorage")))
-    if not has_cookies:
-        return result
-    if not user_id:
-        return result
-
-    try:
-        # Resolve the target directory for this AI (per-user / per-AI layout).
-        # Mirrors logic in mcp_runtime/mcp/core.py so cookies land where AI tools expect.
-        from api.core.config import user_workspace_dir, ai_workspace_dirname
-        user_root = user_workspace_dir(int(user_id))
-        workspace_dir = user_root
-        if ai_config_id:
-            try:
-                with Session(engine) as session:
-                    from api.models import AssistantAIConfig
-                    cfg = session.exec(
-                        select(AssistantAIConfig).where(
-                            AssistantAIConfig.id == ai_config_id,
-                            AssistantAIConfig.user_id == int(user_id),
-                        )
-                    ).first()
-                if cfg:
-                    ai_role = str(getattr(cfg, "ai_role", "") or "").strip().lower()
-                    member_role = str(getattr(cfg, "digital_member_role", "") or "").strip().lower()
-                    if not (ai_role == "digital_member" and member_role == "manager"):
-                        dirname = ai_workspace_dirname(cfg.id, cfg.name, cfg.ai_role)
-                        workspace_dir = os.path.abspath(os.path.join(user_root, dirname))
-            except Exception:
-                workspace_dir = os.path.abspath(os.path.join(user_root, f"{int(ai_config_id)}-ai"))
-        os.makedirs(workspace_dir, exist_ok=True)
-
-        cookies_dir = os.path.join(workspace_dir, "cookies")
-        os.makedirs(cookies_dir, exist_ok=True)
-
-        ts = int(time.time() * 1000)
-        account = str((data_block or result).get("account") or "").strip() or "unknown"
-        safe_account = re.sub(r"[^a-zA-Z0-9_-]+", "_", account)[:30]
-        filename = f"cookies_{safe_account}_{ts}.json"
-        abs_path = os.path.abspath(os.path.join(cookies_dir, filename))
-
-        payload_to_write = data_block if (isinstance(data_block, dict) and data_block.get("cookies")) else {
-            "account": (data_block or result).get("account"),
-            "password": (data_block or result).get("password"),
-            "pageUrl": result.get("pageUrl") or (data_block or {}).get("pageUrl"),
-            "pageTitle": result.get("pageTitle") or (data_block or {}).get("pageTitle"),
-            "cookies": cookies or (data_block or {}).get("cookies"),
-            "browserStorage": browser_storage or (data_block or {}).get("browserStorage"),
-            "capturedAt": (data_block or result).get("capturedAt") or time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime()),
-            "source": "save_cookies_mcp",
-        }
-
-        with open(abs_path, "w", encoding="utf-8") as fh:
-            json.dump(payload_to_write, fh, ensure_ascii=False, indent=2)
-
-        try:
-            from api.core.config import user_workspace_dir as _uwd
-            user_root = _uwd(int(user_id))
-        except Exception:
-            user_root = workspace_dir
-            parent = os.path.dirname(workspace_dir)
-            if parent and str(os.path.basename(parent)).isdigit():
-                user_root = parent
-        rel_path = os.path.relpath(abs_path, user_root).replace(os.sep, "/")
-
-        next_result: Dict[str, Any] = dict(result)
-        next_result["saved_to_server"] = True
-        next_result["server_path"] = abs_path
-        next_result["workspace_path"] = rel_path
-        next_result["file_name"] = filename
-        next_result["cookieCount"] = len(cookies) if cookies else (len(payload_to_write.get("cookies") or []) if isinstance(payload_to_write.get("cookies"), list) else next_result.get("cookieCount"))
-
-        # Strip bulk sensitive data from the result echoed to chat / stored in dispatch row.
-        for k in ("cookies", "browserStorage", "browser_storage", "data"):
-            if k in next_result:
-                del next_result[k]
-
-        return next_result
-    except Exception as exc:
-        logger.exception("persist cookie snapshot to AI workspace failed")
-        next_result = dict(result) if isinstance(result, dict) else {}
-        next_result["saved_to_server"] = False
-        next_result["save_error"] = str(exc)
-        # still strip to avoid leaking in error path if present
-        for k in ("cookies", "browserStorage", "browser_storage", "data"):
-            if k in next_result:
-                del next_result[k]
-        return next_result
-
-
 async def _emit_to_user(ctx: Dict[str, Any], event: str, payload: Dict[str, Any]) -> None:
     user_id = ctx.get("user_id")
     if user_id is None:
@@ -813,6 +463,20 @@ async def _emit_to_user(ctx: Dict[str, Any], event: str, payload: Dict[str, Any]
 
 async def handle_task_progress(data: Dict[str, Any]) -> None:
     ctx = _resolve_result_context(data)
+    task_id = str(data.get("taskId") or "")
+    if task_id:
+        try:
+            with Session(engine) as session:
+                row = session.exec(
+                    select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
+                ).first()
+                if row and row.status == "pending" and row.owner_instance_id == CONNECTOR_INSTANCE_ID:
+                    row.updated_at = time.time()
+                    row.lease_expires_at = _lease_deadline()
+                    session.add(row)
+                    session.commit()
+        except Exception:
+            logger.exception("failed to renew dispatch lease task=%s", task_id)
     await _emit_to_user(ctx, "device:task_progress", {
         "taskId": data.get("taskId"),
         "deviceId": ctx.get("device_id"),
@@ -1072,17 +736,15 @@ async def dispatch_endpoint_tool(
 
         task_id = f"atask_{uuid.uuid4().hex[:12]}"
         run_ctx = get_run_session_context() or {}
-        _persist_dispatch(
-            task_id=task_id,
-            user_id=user_id,
-            ai_config_id=ai_config_id,
-            ai_kind=str(run_ctx.get("ai_kind") or "assistant"),
-            session_id=str(run_ctx.get("session_id") or ""),
-            session_name=run_ctx.get("session_name"),
-            device_id=workshop_engine.device_id_for_user(user_id),
-            tool=tool_name,
-            instruction=f"Run workshop MCP tool {tool_name}",
-        )
+        record_ctx = {
+            **run_ctx,
+            "user_id": user_id,
+            "ai_config_id": ai_config_id,
+            "device_id": workshop_engine.device_id_for_user(user_id),
+            "tool": tool_name,
+            "instruction": f"Run workshop MCP tool {tool_name}",
+        }
+        _persist_dispatch(_dispatch_record(task_id, record_ctx))
         outcome = await _execute_workshop_inline(
             user_id=user_id, ai_config_id=ai_config_id, tool=tool_name, args=args
         )

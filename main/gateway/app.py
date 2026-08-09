@@ -24,7 +24,7 @@ from connector_runtime.bots import iter_bots
 from api.core.logging_config import configure_logging
 from api.core.settings import settings
 from api.sio import sio
-from api.socket_events import register_agent_socket_events, register_user_socket_events
+from api.socket_events import register_user_socket_events
 from api.database import create_db_and_tables
 
 from api.runtime import heartbeat as heartbeat_module
@@ -49,6 +49,10 @@ register_restart_command([sys.executable, "-m", "gateway.main"])
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from api.runtime.health import state_for
+
+    health = state_for("gateway")
+    health.mark_not_ready("schema check")
     create_db_and_tables()
     # Reset endpoint presence only in the legacy monolith where gateway owns
     # agent sockets. In split deployments connector-runtime owns those live
@@ -131,14 +135,39 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(3)
 
     task = asyncio.create_task(periodic_scan())
-    yield
-    stop_event.set()
-    task.cancel()
-    with suppress(asyncio.CancelledError):
-        await task
+    health.mark_ready()
+    try:
+        yield
+    finally:
+        health.begin_draining()
+        stop_event.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 # FastAPI App
+def _install_request_context(target_app: FastAPI) -> None:
+    from api.runtime.log_context import install_http_request_context
+
+    install_http_request_context(target_app)
+
+
 app = FastAPI(lifespan=lifespan)
+_install_request_context(app)
+
+def _install_health_routes(target: FastAPI) -> None:
+    from fastapi import APIRouter, Depends
+    from api.runtime.health import build_health_router
+    from api.runtime.internal_http import require_internal_token
+
+    health_router = APIRouter(
+        prefix="/internal", dependencies=[Depends(require_internal_token)]
+    )
+    health_router.include_router(build_health_router("gateway"))
+    target.include_router(health_router)
+
+
+_install_health_routes(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -211,14 +240,9 @@ for _bot in iter_bots():
     app.include_router(bot_router, prefix=bot_prefix)
     logger.info(f"loaded bot router: {_bot.channel} -> {bot_prefix}")
 
-# Register Socket Events. Desktop / browser agents connect to the api-gateway
-# (the single public URL they also use for REST auth), so the gateway owns the
-# agent-side handlers + the live ``agents`` registry in every deployment. Task
-# dispatch is therefore served from here too (see gateway.routers.
-# device_dispatch_internal); ai-runtime routes endpoint-tool dispatches to this
-# process via HEYSURE_API_GATEWAY_URL.
+# Browser-user events belong to Gateway; Connector Runtime is the sole endpoint
+# Agent Socket owner, so Gateway restarts cannot reset or duplicate handlers.
 register_user_socket_events()
-register_agent_socket_events()
 
 # Socket.IO App Wrapper
 sio_app = socketio.ASGIApp(sio, other_asgi_app=app)

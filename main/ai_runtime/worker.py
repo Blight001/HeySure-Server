@@ -24,6 +24,8 @@ from api.core.settings import settings
 from api.database import engine
 from api.models import ChatRun
 from api.runtime import heartbeat
+from api.runtime.health import state_for
+from api.runtime.log_context import bind as bind_log_context
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +50,8 @@ _run_slots = threading.Semaphore(_MAX_CONCURRENT_RUNS)
 # "what is this worker doing right now" to the admin panel.
 _active_runs_lock = threading.Lock()
 _active_run_ids: set[str] = set()
+_last_dispatch_at: Optional[float] = None
+WORKER_INSTANCE_ID = state_for("worker").instance_id
 
 
 def active_runs() -> Dict[str, Any]:
@@ -58,6 +62,20 @@ def active_runs() -> Dict[str, Any]:
         "active": len(run_ids),
         "max_concurrent": _MAX_CONCURRENT_RUNS,
         "run_ids": run_ids,
+    }
+
+
+def health_detail() -> Dict[str, Any]:
+    """Queue/concurrency detail for the standard health contract."""
+    with Session(engine) as session:
+        queued = len(session.exec(select(ChatRun).where(ChatRun.status == "queued")).all())
+    runs = active_runs()
+    state = state_for("worker").snapshot()
+    return {
+        "accepting_runs": bool(state["accepting_work"]),
+        "active_run_count": runs["active"],
+        "queued_run_count": queued,
+        "last_dispatch_at": _last_dispatch_at,
     }
 
 
@@ -90,6 +108,7 @@ def requeue_runs(run_ids: list[str]) -> list[str]:
             select(ChatRun).where(
                 ChatRun.run_id.in_(wanted),
                 ChatRun.status == "running",
+                ChatRun.worker_instance_id == WORKER_INSTANCE_ID,
             )
         ).all()
         for row in rows:
@@ -97,6 +116,8 @@ def requeue_runs(run_ids: list[str]) -> list[str]:
             row.error_message = None
             row.finished_at = None
             row.heartbeat_at = None
+            row.worker_instance_id = None
+            row.lease_expires_at = None
             row.updated_at = now
             session.add(row)
             recovered.append(row.run_id)
@@ -149,10 +170,16 @@ def _claim_one_queued_run() -> Optional[ChatRun]:
         run.status = "running"
         run.started_at = run.started_at or now
         run.heartbeat_at = now
+        run.worker_instance_id = WORKER_INSTANCE_ID
+        run.lease_expires_at = now + max(10, settings.ai_run_lease_seconds)
+        run.attempt = int(run.attempt or 0) + 1
         run.updated_at = now
         session.add(run)
         session.commit()
         session.refresh(run)
+        global _last_dispatch_at
+        _last_dispatch_at = now
+        state_for("worker").activity()
         return run
 
 
@@ -255,7 +282,8 @@ def _execute_run_with_slot(run: ChatRun) -> None:
     with _active_runs_lock:
         _active_run_ids.add(run.run_id)
     try:
-        _execute_run(run)
+        with bind_log_context(run_id=run.run_id, user_id=run.user_id, ai_config_id=run.ai_config_id):
+            _execute_run(run)
     finally:
         with _active_runs_lock:
             _active_run_ids.discard(run.run_id)
@@ -345,6 +373,8 @@ def run_dispatcher_forever(stop_evt: Optional[threading.Event] = None) -> None:
     Designed to be called from ``ai_runtime/main.py``.
     """
     evt = stop_evt or threading.Event()
+    runtime_health = state_for("worker")
+    runtime_health.mark_ready()
     logger.info(
         f"dispatcher starting (dialect=postgresql, db={DATABASE_URL.split('@')[-1]})"
     )
@@ -357,4 +387,7 @@ def run_dispatcher_forever(stop_evt: Optional[threading.Event] = None) -> None:
             logger.warning(f"boot recovery requeued {len(reaped)} stale runs")
     except Exception:
         logger.exception("boot reap failed")
-    _listen_postgres(evt)
+    try:
+        _listen_postgres(evt)
+    finally:
+        runtime_health.begin_draining()

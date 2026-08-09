@@ -2,6 +2,7 @@
 
 import pytest
 from fastapi import HTTPException
+from unittest.mock import AsyncMock
 
 from api.runtime.async_bridge import run_async
 from mcp_runtime.mcp.loader import reload_registry
@@ -20,7 +21,16 @@ def _call(action: str, **extra):
 
 
 @pytest.fixture(autouse=True)
-def _reload_registry():
+def _reload_registry(monkeypatch):
+    monkeypatch.setattr("mcp_runtime.mcp.core._set_runtime_status", AsyncMock())
+    monkeypatch.setattr(
+        "api.services.knowledge.librarian_builtins._system_prompts_payload",
+        lambda _user_id: {"description": "test", "total": 0, "sections": []},
+    )
+    monkeypatch.setattr(
+        "api.services.knowledge.librarian_builtins._intrinsic_personas_payload",
+        lambda _user_id: {"description": "test", "total": 0, "agents": []},
+    )
     reload_registry()
 
 

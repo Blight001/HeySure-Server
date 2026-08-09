@@ -122,6 +122,9 @@ class ChatRun(SQLModel, table=True):
     # watchdog in api-gateway marks rows with status='running' and a stale
     # heartbeat as 'error' so dead workers don't leave ghost runs.
     heartbeat_at: Optional[float] = None
+    worker_instance_id: Optional[str] = Field(default=None, index=True)
+    lease_expires_at: Optional[float] = Field(default=None, index=True)
+    attempt: int = Field(default=0)
     # JSON-encoded kwargs that the dispatcher (start_chat_run / Feishu /
     # scheduler) wanted to hand to _run_worker — e.g. ``merged_system_prompt``
     # built with Feishu-runtime guidance, or ``max_steps`` overridden for a

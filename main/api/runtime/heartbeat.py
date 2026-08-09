@@ -17,6 +17,7 @@ from sqlmodel import Session, select
 
 from ..database import engine
 from ..models import ChatRun
+from ..core.settings import settings
 
 
 # A worker must call ``tick`` at least every TICK_INTERVAL_SECONDS while a
@@ -33,6 +34,7 @@ def tick(run_id: str) -> None:
         if not row or row.status != "running":
             return
         row.heartbeat_at = time.time()
+        row.lease_expires_at = row.heartbeat_at + max(10, settings.ai_run_lease_seconds)
         session.add(row)
         session.commit()
 
@@ -50,19 +52,24 @@ def reap_stale_runs() -> List[str]:
     Returns the run IDs that were requeued.
     """
     now = time.time()
-    threshold = now - STALE_AFTER_SECONDS
     reaped: List[str] = []
     with Session(engine) as session:
         rows = session.exec(
             select(ChatRun).where(ChatRun.status == "running")
         ).all()
         for row in rows:
-            last = row.heartbeat_at or row.started_at or row.updated_at or row.created_at
-            if last is None or last < threshold:
+            legacy_last = row.heartbeat_at or row.started_at or row.updated_at or row.created_at
+            lease_expired = row.lease_expires_at is not None and row.lease_expires_at < now
+            legacy_stale = row.lease_expires_at is None and (
+                legacy_last is None or legacy_last < now - STALE_AFTER_SECONDS
+            )
+            if lease_expired or legacy_stale:
                 row.status = "queued"
                 row.error_message = None
                 row.finished_at = None
                 row.heartbeat_at = None
+                row.worker_instance_id = None
+                row.lease_expires_at = None
                 row.updated_at = now
                 session.add(row)
                 reaped.append(row.run_id)

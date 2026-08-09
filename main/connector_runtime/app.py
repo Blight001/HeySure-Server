@@ -32,7 +32,7 @@ from connector_runtime.bots import iter_bots
 from api.database import create_db_and_tables
 from api.models import AssistantAIConfig
 from api.sio import sio
-from api.socket_events import register_agent_socket_events
+from connector_runtime.socket_handlers.assembly import register_agent_socket_events
 from api.runtime.internal_http import require_internal_token
 from api.core.settings import settings
 
@@ -62,6 +62,10 @@ class FeishuSendRequest(BaseModel):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    from api.runtime.health import state_for
+
+    health = state_for("connector")
+    health.mark_not_ready("schema check")
     create_db_and_tables()
     # This process owns endpoint-agent sockets in split deployments. Its
     # in-memory socket registry is empty after a restart, so clear stale shared
@@ -135,9 +139,11 @@ async def _lifespan(app: FastAPI):
         )
     bot_channels = ",".join(bot.channel for bot in iter_bots()) or "no bots"
     logger.info(f"ready (Socket.IO + /internal/* + bot keepalive: {bot_channels})")
+    health.mark_ready()
     try:
         yield
     finally:
+        health.begin_draining()
         stop_event.set()
         background_tasks = [*keepalive_tasks, sweep_task]
         if workflow_task is not None:
@@ -148,15 +154,22 @@ async def _lifespan(app: FastAPI):
                 await task
 
 
-def create_app() -> FastAPI:
+def _new_fastapi_app() -> FastAPI:
     fastapi_app = FastAPI(title="HeySure Connector Runtime", lifespan=_lifespan)
+    from api.runtime.log_context import install_http_request_context
+    install_http_request_context(fastapi_app)
+    return fastapi_app
+
+
+def create_app() -> FastAPI:
+    fastapi_app = _new_fastapi_app()
 
     router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
 
-    @router.get("/health")
-    def health() -> Dict[str, Any]:
-        from api.sio import agents
-        return {"ok": True, "agents": len(agents)}
+    from api.runtime.health import build_health_router
+    from connector_runtime.health_detail import connector_health_detail
+
+    router.include_router(build_health_router("connector", detail_provider=connector_health_detail))
 
     @router.get("/logs")
     def logs(limit: int = 200, level: Optional[str] = None) -> Dict[str, Any]:

@@ -12,7 +12,7 @@ from api.database import engine
 from api.models import AssistantAIConfig, BotSessionRoute, ChatMessage, ChatSession, User
 from api.services.chat.chat_media import delete_message_media
 from api.services.chat.chat_persistence import _rebuild_usage_snapshots
-from connector_runtime.dispatch.device_dispatch import get_run_session_context
+from api.runtime.run_context import get_run_session_context
 
 
 def _coerce_int(value: Any) -> Optional[int]:

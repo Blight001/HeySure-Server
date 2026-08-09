@@ -27,7 +27,7 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import AITaskJob
 from api.services.tasks import task_plan as plan_service
-from connector_runtime.dispatch.device_dispatch import get_run_session_context
+from api.runtime.run_context import get_run_session_context
 
 
 def _run_context() -> Dict[str, Any]:

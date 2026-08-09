@@ -6,6 +6,5 @@ ai-runtime uses to fan work out to connected endpoints. Shared library
 code lives in ``api``.
 """
 
-from .app import create_app
-
-__all__ = ["create_app"]
+# Keep package import side-effect free. Socket ownership begins only when
+# ``connector_runtime.app`` is imported by the connector process entrypoint.

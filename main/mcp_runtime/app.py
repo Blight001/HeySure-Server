@@ -24,6 +24,7 @@ from api.database import create_db_and_tables
 from mcp_runtime.mcp import registry
 from mcp_runtime.mcp.loader import reload_registry
 from api.runtime.internal_http import require_internal_token
+from api.runtime.health import build_health_router, state_for
 
 
 logger = logging.getLogger(__name__)
@@ -50,20 +51,34 @@ def _tool_catalog() -> Dict[str, Any]:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    health = state_for("mcp")
+    health.mark_not_ready("schema check")
     create_db_and_tables()
     # Built-in tools are registered when the registry module is imported.
     from mcp_runtime.mcp import registry as _mcp_registry
     logger.info(f"ready: {len(_mcp_registry._tools)} tools (version {_mcp_registry.version})")
-    yield
+    health.mark_ready()
+    try:
+        yield
+    finally:
+        health.begin_draining()
 
 
 def create_app() -> FastAPI:
     app = FastAPI(title="HeySure MCP Runtime", lifespan=_lifespan)
+    from api.runtime.log_context import install_http_request_context
+    install_http_request_context(app)
     router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
 
-    @router.get("/health")
-    def health() -> Dict[str, Any]:
-        return {"ok": True, "tools": len(registry._tools), "version": registry.version}
+    router.include_router(
+        build_health_router(
+            "mcp",
+            detail_provider=lambda: {
+                "registered_tool_count": len(registry._tools),
+                "registry_version": registry.version,
+            },
+        )
+    )
 
     @router.get("/logs")
     def logs(limit: int = 200, level: Optional[str] = None) -> Dict[str, Any]:
@@ -98,23 +113,22 @@ def create_app() -> FastAPI:
         # Re-establish the caller's run session context so tools that rely on
         # get_run_session_context() (conversation.*, communication.*) work in
         # the split (remote HTTP) deployment, then restore the previous value.
-        from connector_runtime.dispatch.device_dispatch import set_run_session_context
+        from api.runtime.run_context import reset_run_session_context, set_run_session_context
+        from api.runtime.log_context import bind as bind_log_context
 
         token = set_run_session_context(req.session_context or None)
         try:
-            return await registry.call(
-                req.tool,
-                req.user_id,
-                req.arguments or {},
-                req.ai_config_id,
-            )
+            with bind_log_context(
+                tool=req.tool, user_id=req.user_id, ai_config_id=req.ai_config_id, stage="execute"
+            ):
+                return await registry.call(
+                    req.tool,
+                    req.user_id,
+                    req.arguments or {},
+                    req.ai_config_id,
+                )
         finally:
-            try:
-                from connector_runtime.dispatch.device_dispatch import _RUN_SESSION_CONTEXT
-
-                _RUN_SESSION_CONTEXT.reset(token)
-            except Exception:
-                set_run_session_context(None)
+            reset_run_session_context(token)
 
     @router.post("/mcp/reload")
     def reload_tools() -> Dict[str, Any]:

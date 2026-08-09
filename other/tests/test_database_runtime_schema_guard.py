@@ -1,5 +1,8 @@
 import pytest
+from unittest.mock import Mock
 
+from api import database
+from api.core.settings import settings
 from api.database import _require_assistant_avatar_column
 
 
@@ -58,3 +61,26 @@ def test_runtime_schema_guard_fails_fast_instead_of_running_ddl():
 
     assert len(engine.connection.statements) == 1
     assert "ALTER TABLE" not in engine.connection.statements[0]
+
+
+def test_runtime_startup_rejects_schema_revision_mismatch(monkeypatch):
+    monkeypatch.setattr(settings, "db_auto_migrate", False)
+    monkeypatch.setattr("api.db._db_state", lambda _engine: (True, True))
+    monkeypatch.setattr("api.db.expected_schema_revisions", lambda: {"head-new"})
+    monkeypatch.setattr("api.db.current_schema_revisions", lambda _engine: {"head-old"})
+
+    with pytest.raises(RuntimeError, match="current=.*head-old.*expected=.*head-new"):
+        database.create_db_and_tables()
+
+
+def test_runtime_startup_accepts_exact_schema_revision(monkeypatch):
+    monkeypatch.setattr(settings, "db_auto_migrate", False)
+    monkeypatch.setattr("api.db._db_state", lambda _engine: (True, True))
+    monkeypatch.setattr("api.db.expected_schema_revisions", lambda: {"head"})
+    monkeypatch.setattr("api.db.current_schema_revisions", lambda _engine: {"head"})
+    avatar_guard = Mock()
+    monkeypatch.setattr(database, "_require_assistant_avatar_column", avatar_guard)
+
+    database.create_db_and_tables()
+
+    avatar_guard.assert_called_once_with(database.engine)

@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import inspect
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from api.database import engine
 from api.models import AIRuntimeStatus, AssistantAIConfig
 from api.sio import sio
 
+logger = logging.getLogger(__name__)
 MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
 _IGNORED_WORKSPACE_DIRS = {".git", "__pycache__", "venv", "node_modules", ".aider"}
 
@@ -157,6 +159,7 @@ class MCPRegistry:
         arguments: Optional[Dict[str, Any]] = None,
         ai_config_id: Optional[int] = None,
     ) -> Dict[str, Any]:
+        started_at = time.monotonic()
         tool = self.get(name)
         args = arguments or {}
         _enforce_workshop_binding(tool.name, user_id, ai_config_id)
@@ -191,10 +194,25 @@ class MCPRegistry:
             }
             await _set_runtime_status(user_id, ai_config_id, "idle", tool.name)
             await _emit_mcp_status(user_id, ai_config_id, "idle", tool.name)
+            logger.info(
+                "MCP call completed",
+                extra={
+                    "tool": tool.name, "user_id": user_id, "ai_config_id": ai_config_id,
+                    "stage": "execute", "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
+                },
+            )
             return payload
-        except Exception:
+        except Exception as exc:
             await _set_runtime_status(user_id, ai_config_id, "error", tool.name)
             await _emit_mcp_status(user_id, ai_config_id, "error", tool.name)
+            logger.warning(
+                "MCP call failed",
+                extra={
+                    "tool": tool.name, "user_id": user_id, "ai_config_id": ai_config_id,
+                    "stage": "execute", "elapsed_ms": round((time.monotonic() - started_at) * 1000, 2),
+                    "error_code": type(exc).__name__,
+                },
+            )
             raise
 
 def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Optional[int]) -> None:

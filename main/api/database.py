@@ -1,14 +1,14 @@
 """SQLModel engine + session dependency.
 
 Schema is owned by Alembic (see ``api.db`` / ``other/migrations/`` /
-``doc/db-migrations.md``). This module only builds the engine and exposes the
-session dependency; bringing the schema up to date is delegated to
-``api.db.ensure_schema`` via :func:`create_db_and_tables`.
+``doc/db-migrations.md``). Runtime startup only verifies that the configured
+database is already at the code version's Alembic head.
 """
 
 import contextlib
 import logging
 import time
+from typing import Iterator
 
 from sqlmodel import Session, create_engine
 
@@ -88,10 +88,28 @@ def _pool_kwargs() -> dict:
         return {}
 
 
+def _connect_args() -> dict:
+    from .core.settings import settings
+
+    options = " ".join(
+        [
+            f"-c lock_timeout={max(1, settings.db_lock_timeout_ms)}ms",
+            f"-c statement_timeout={max(1, settings.db_statement_timeout_ms)}ms",
+            "-c idle_in_transaction_session_timeout="
+            f"{max(1, settings.db_idle_transaction_timeout_ms)}ms",
+        ]
+    )
+    return {
+        "connect_timeout": max(1, settings.db_connect_timeout_seconds),
+        "options": options,
+    }
+
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=300,
+    connect_args=_connect_args(),
     **_pool_kwargs(),
 )
 
@@ -125,34 +143,45 @@ def _require_assistant_avatar_column(db_engine) -> None:
 
 
 def create_db_and_tables() -> None:
-    """Ensure the database schema is current. Called by each runtime at startup.
+    """Read-only runtime schema guard (historical name kept for callers).
 
-    Backwards-compatible entry point. By default it runs Alembic
-    ``upgrade head`` (adopting pre-Alembic databases on first boot). Set
-    ``HEYSURE_DB_AUTO_MIGRATE=0`` to decouple migration from startup — run
-    ``python -m api.db migrate`` as a separate deploy step instead, and the
-    app will only verify the schema is present.
+    Runtime processes are never migration owners. Even when the deprecated
+    ``HEYSURE_DB_AUTO_MIGRATE`` switch is set, startup fails with an actionable
+    error instead of attempting DDL and blocking normal database traffic.
     """
     from .core.settings import settings
     from . import db as _db
 
-    logger.info("create_db_and_tables starting (auto_migrate=%s)", settings.db_auto_migrate)
     if settings.db_auto_migrate:
-        _db.ensure_schema()
-        logger.info("create_db_and_tables completed via ensure_schema")
-    else:
-        has_version, has_core = _db._db_state(engine)
-        if not (has_version or has_core):
-            raise RuntimeError(
-                "database schema is not initialized and HEYSURE_DB_AUTO_MIGRATE is off; "
-                "run `python -m api.db migrate` before starting the app"
-            )
-        logger.info("create_db_and_tables completed (no auto migrate)")
+        raise RuntimeError(
+            "HEYSURE_DB_AUTO_MIGRATE is no longer supported by runtime services; "
+            "run `python -m api.db migrate` as a separate deployment step and set it to 0"
+        )
+    has_version, has_core = _db._db_state(engine)
+    if not (has_version and has_core):
+        raise RuntimeError(
+            "database schema is unversioned or incomplete; run `python -m api.db migrate` "
+            "before starting runtime services"
+        )
+
+    expected = _db.expected_schema_revisions()
+    current = _db.current_schema_revisions(engine)
+    if current != expected:
+        raise RuntimeError(
+            "database schema revision mismatch: "
+            f"current={sorted(current)} expected={sorted(expected)}; "
+            "run `python -m api.db migrate` before starting runtime services"
+        )
 
     _require_assistant_avatar_column(engine)
-    logger.info("create_db_and_tables: verified 'avatar' column")
+    logger.info("runtime schema guard passed (read-only, revision=%s)", sorted(current))
 
 
-def get_session():
+def get_session() -> Iterator[Session]:
+    """FastAPI dependency with an explicit rollback boundary."""
     with Session(engine) as session:
-        yield session
+        try:
+            yield session
+        except BaseException:
+            session.rollback()
+            raise

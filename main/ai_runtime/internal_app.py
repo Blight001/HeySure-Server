@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, FastAPI
 
 from api.runtime.internal_http import require_internal_token
+from api.runtime.health import build_health_router
 
 
 logger = logging.getLogger(__name__)
@@ -26,14 +27,13 @@ logger = logging.getLogger(__name__)
 
 def create_status_app() -> FastAPI:
     app = FastAPI(title="HeySure AI Runtime Status")
+    from api.runtime.log_context import install_http_request_context
+    install_http_request_context(app)
     router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
 
-    @router.get("/health")
-    def health() -> Dict[str, Any]:
-        from ai_runtime.worker import active_runs
+    from ai_runtime.worker import health_detail
 
-        runs = active_runs()
-        return {"ok": True, "role": "worker", **runs}
+    router.include_router(build_health_router("worker", detail_provider=health_detail))
 
     @router.get("/logs")
     def logs(limit: int = 200, level: Optional[str] = None) -> Dict[str, Any]:

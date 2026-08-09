@@ -35,6 +35,7 @@ import sys
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 
 from .core.config import SERVER_DIR
@@ -57,6 +58,20 @@ def alembic_config() -> Config:
     cfg = Config(_ALEMBIC_INI)
     cfg.set_main_option("script_location", _MIGRATIONS_DIR)
     return cfg
+
+
+def expected_schema_revisions() -> set[str]:
+    """Return the code version's Alembic heads without touching the database."""
+    return set(ScriptDirectory.from_config(alembic_config()).get_heads())
+
+
+def current_schema_revisions(engine) -> set[str]:
+    """Read the database revision set; this function never runs migration SQL."""
+    from sqlalchemy import text
+
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT version_num FROM alembic_version")).all()
+    return {str(row[0]) for row in rows}
 
 
 def _db_state(engine) -> tuple[bool, bool]:

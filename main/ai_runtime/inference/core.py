@@ -2,26 +2,20 @@ IS_ROUTER_ENTRY = False
 
 import asyncio
 import base64
-import copy
-import hashlib
 import json
 import logging
-import os
-import re
-import sys
 import time
 
 
 logger = logging.getLogger(__name__)
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
 
 import requests
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.runtime.async_bridge import run_async
-from api.runtime.http_client import ai_http_post
+from api.runtime import async_bridge, http_client, run_context
+run_async, ai_http_post = async_bridge.run_async, http_client.ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
@@ -30,14 +24,47 @@ from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
+from ai_runtime.inference.communication_prompt import (
+    AIMessagePrompt,
+    normalize_ai_message_type as _normalize_ai_message_type,
+    render_ai_message_system_prompt as _render_ai_message_system_prompt,
+    should_replay_system_notice_as_user as _should_replay_system_notice_as_user,
+)
+from ai_runtime.inference.debug_support import (
+    ai_color as _ai_color,
+    ai_debug_enabled as _ai_debug_enabled,
+    ai_debug_log as _ai_debug_log,
+    ai_debug_stage as _ai_debug_stage,
+    ai_short as _ai_short,
+    ai_short_base_url as _ai_short_base_url,
+    ai_short_run_id as _ai_short_run_id,
+    heysure_provider_session_id as _heysure_provider_session_id,
+)
+from ai_runtime.inference.policies import (
+    can_start_inference_step as _can_start_inference_step,
+    coerce_max_steps as _coerce_max_steps,
+    has_active_todo_plan as _has_active_todo_plan,
+)
+from ai_runtime.inference.tool_resolution import (
+    build_native_tools_payload as _build_native_tools_payload,
+    joined_tool_skip_reason as _joined_tool_skip_reason,
+    missing_required_mcp_args as _missing_required_mcp_args,
+    resolve_mcp_tool_name as _resolve_mcp_tool_name,
+    split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
+    to_native_tool_name as _to_native_tool_name,
+)
+from ai_runtime.inference.runtime_clients import (
+    call_mcp_via_runtime as _call_mcp_via_runtime,
+    dispatch_endpoint_via_runtime as _dispatch_endpoint_via_runtime,
+    endpoint_dispatch_timeout as _endpoint_dispatch_timeout,
+)
 from connector_runtime.dispatch.device_dispatch import (
     dispatch_endpoint_tool_and_wait,
-    get_run_session_context,
-    set_run_session_context,
 )
+get_run_session_context = run_context.get_run_session_context
+set_run_session_context = run_context.set_run_session_context
 from api.services.tasks.task_completion_notify import notify_task_completion
 from connector_runtime.dispatch.desktop_device_tools import (
-    build_endpoint_tools_payload,
     endpoint_bridge_tools_for_config,
     endpoint_tools_for_config,
     is_endpoint_agent_tool,
@@ -85,168 +112,6 @@ from api.core.config import DEFAULT_CHAT_MAX_STEPS
 from api.core.settings import settings
 
 
-def _ai_debug_enabled() -> bool:
-    return bool(settings.ai_debug)
-
-
-def _ai_debug_color_enabled() -> bool:
-    # ai_debug_color defaults True, so honor NO_COLOR (standard convention)
-    # and TTY autodetect on top of the explicit setting.
-    if not settings.ai_debug_color:
-        return False
-    if os.environ.get("NO_COLOR"):
-        return False
-    try:
-        return bool(sys.stdout.isatty())
-    except Exception:
-        return False
-
-
-def _ai_color(text: str, code: str) -> str:
-    if not _ai_debug_color_enabled():
-        return text
-    return f"\033[{code}m{text}\033[0m"
-
-
-def _ai_short(value: Any, limit: int = 48) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "-"
-    if len(text) <= limit:
-        return text
-    return f"{text[: max(1, limit - 1)]}…"
-
-
-def _ai_short_run_id(run_id: str) -> str:
-    text = str(run_id or "").strip()
-    if not text:
-        return "-"
-    if text.startswith("run_") and len(text) > 12:
-        return f"run_{text[4:12]}"
-    return _ai_short(text, 16)
-
-
-def _ai_short_base_url(base_url: str) -> str:
-    text = str(base_url or "").strip()
-    if not text:
-        return "-"
-    parsed = urlparse(text)
-    if not parsed.netloc:
-        return _ai_short(text, 48)
-    path = parsed.path.rstrip("/")
-    if path:
-        return f"{parsed.netloc}{path}"
-    return parsed.netloc
-
-
-def _heysure_provider_session_id(
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-) -> str:
-    """Build an anonymous stable identifier for stateful local gateways."""
-    raw = f"{int(user_id)}\0{ai_config_id or 0}\0{ai_kind or ''}\0{session_id or ''}"
-    return "heysure-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _ai_debug_log(message: str) -> None:
-    if _ai_debug_enabled():
-        logger.debug(message)
-
-
-def _ai_debug_stage(stage: str, message: str, color: str = "36") -> None:
-    _ai_debug_log(f"{_ai_color(stage, color)} {message}")
-
-
-def _normalize_ai_message_type(value: Any, require_reply: bool) -> str:
-    text = str(value or "").strip().lower()
-    if text in {"inquiry", "reply", "chitchat", "notify"}:
-        return text
-    return "inquiry" if require_reply else "notify"
-
-
-_SYSTEM_NOTICE_USER_REPLAY_TAG_PREFIXES = (
-    "ai_message_inbound:",
-    "task_completion_notice:",
-    # The library auto-review briefing is persisted as a system bubble so the
-    # UI can distinguish it from a real user message.  Providers only receive
-    # the runtime persona as ``system``, however, so this briefing must be
-    # replayed as ``user`` when a fresh worker rebuilds the conversation.
-    "kb_review_request",
-)
-
-
-def _should_replay_system_notice_as_user(tags: str) -> bool:
-    """Whether a persisted system notice is actionable model context."""
-    normalized = str(tags or "").strip()
-    return any(normalized.startswith(prefix) for prefix in _SYSTEM_NOTICE_USER_REPLAY_TAG_PREFIXES)
-
-
-def _render_ai_message_system_prompt(
-    *,
-    from_ai_name: str,
-    from_ai_config_id: int,
-    target_ai_name: str,
-    target_ai_config_id: int,
-    message_id: str,
-    current_session_id: str,
-    content: str,
-    message_type: str,
-    require_reply: bool,
-) -> str:
-    should_reply = bool(require_reply) or message_type == "inquiry"
-    message_type_guide = (
-        "- inquiry（询问）：发送方在提问、请求状态或请求结果，通常需要你答复。\n"
-        "- reply（回复）：发送方在答复你之前发出的 inquiry，通常不需要再答复，除非内容明确提出新问题。\n"
-        "- notify（通知）：发送方在单向告知状态、结果或提醒，不期待你回复。\n"
-        "- chitchat（闲聊）：非任务型闲聊，可自然继续多轮。"
-    )
-    reply_rule = (
-        "这条消息需要你回复。回复时调用 MCP 工具 `message.send+to`，"
-        f"参数必须包含 `to=\"{from_ai_config_id}\"`、`message_type=\"reply\"`、"
-        "`require_reply=false`、"
-        f"`reply_to_message_id=\"{message_id}\"`、`current_session_id=\"{current_session_id}\"`。"
-        if should_reply
-        else "这条消息不要求回复。除非内容明确要求你另起一个新问题，否则不要回信。"
-    )
-    return (
-        "[系统提示]\n"
-        "[AI 间通信 · 强制插入]\n"
-        "当前 AI 运行已被这条消息打断。你必须先处理这条系统提示，再继续原本任务。\n\n"
-        f"- 收件方（你）: {target_ai_name}（ai_config_id={target_ai_config_id}）\n"
-        f"- 发送方: {from_ai_name}（ai_config_id={from_ai_config_id}）\n"
-        f"- 消息编号: {message_id}\n"
-        f"- 当前会话: {current_session_id}\n"
-        f"- 消息类型: {message_type}\n"
-        f"- 是否要求回复: {'是' if should_reply else '否'}\n\n"
-        "[消息内容]\n"
-        f"{content}\n\n"
-        "[发送类型说明]\n"
-        f"{message_type_guide}\n\n"
-        "[处理规则]\n"
-        "你以后调用 MCP 工具 `message.send+to` 给其他 AI 发消息时，`message_type` 是必填字段，不能省略。\n"
-        f"{reply_rule}"
-    )
-
-
-def _coerce_max_steps(value: object, default: int = 48) -> int:
-    try:
-        return max(1, min(999, int(value or default)))
-    except Exception:
-        return max(1, min(999, int(default)))
-
-
-def _has_active_todo_plan(plan_state: object) -> bool:
-    """An unfinished todo keeps its inference run alive until completion."""
-    return plan_state is not None
-
-
-def _can_start_inference_step(completed_steps: int, max_steps: int, plan_state: object) -> bool:
-    """Apply the ordinary step budget unless an unfinished todo owns the run."""
-    return completed_steps < max_steps or _has_active_todo_plan(plan_state)
-
-
 def _resolve_ai_name_safe(session: Session, ai_config_id: Optional[int]) -> str:
     if not ai_config_id:
         return ""
@@ -291,305 +156,6 @@ def _raise_for_upstream_error(response: requests.Response) -> None:
     if response.ok:
         return
     raise RuntimeError(_format_upstream_error(response))
-
-
-def _to_native_tool_name(name: str) -> str:
-    # 原生 function 名只允许 [a-zA-Z0-9_-]。可逆编码：域分隔符 . → _，
-    # 名字内部的 + → -（真实工具名内部不再用下划线，见 mcp_tool_aliases），
-    # 模型回吐 mcp_describe-tool 时可经 resolve_tool_name 唯一还原。
-    safe = str(name or "").strip().replace(".", "_").replace("+", "-")
-    safe = re.sub(r"[^a-zA-Z0-9_-]", "-", safe)
-    safe = safe.strip("_-") or "tool"
-    return safe[:64]
-
-
-def _build_native_tools_payload(allowed_tools: Optional[set] = None) -> tuple[List[Dict], Dict[str, str]]:
-    tools = []
-    native_to_mcp: Dict[str, str] = {}
-    used_names = set()
-    tool_payloads = registry.build_tools_payload(allowed_tools)
-    tool_payloads.extend(build_endpoint_tools_payload(allowed_tools))
-    for tool in tool_payloads:
-        native_tool = copy.deepcopy(tool)
-        original_name = str(native_tool.get("function", {}).get("name") or "").strip()
-        native_name = _to_native_tool_name(original_name)
-        if native_name in used_names and native_to_mcp.get(native_name) != original_name:
-            suffix = 2
-            base = native_name[:58]
-            while f"{base}_{suffix}" in used_names:
-                suffix += 1
-            native_name = f"{base}_{suffix}"
-        native_tool["function"]["name"] = native_name
-        native_to_mcp[native_name] = original_name
-        used_names.add(native_name)
-        tools.append(native_tool)
-    return tools, native_to_mcp
-
-
-def _resolve_mcp_tool_name(
-    tool: str,
-    native_tool_name_map: Dict[str, str],
-    allowed_tools: Optional[set] = None,
-) -> str:
-    """Map whatever name the model emitted back onto a real MCP tool name.
-
-    Native calls arrive already mapped through ``native_tool_name_map``. Models
-    on the text protocol routinely mix separators (``mcp_xxx`` / ``mcp__xxx`` /
-    superseded names), so fall back to the alias resolver rather than failing
-    the call outright. The candidates must be the full effective execution
-    allow-list, not only the progressively exposed schema subset: text-protocol
-    providers do not receive native schemas and may encode an allowed dynamic
-    endpoint tool such as ``aifree.windows+tab`` as ``aifree_windows_tab``.
-    """
-    name = str(tool or "").strip()
-    if not name:
-        return ""
-    if name in native_tool_name_map:
-        return native_tool_name_map[name]
-
-    from api.services.mcp.mcp_tool_aliases import resolve_tool_name
-
-    candidates = set(native_tool_name_map.values())
-    candidates.update(allowed_tools or set())
-    try:
-        candidates.update(
-            str(item.get("name") or "").strip()
-            for item in registry.list_tools()
-            if item.get("name")
-        )
-    except Exception:
-        pass
-    return resolve_tool_name(name, candidates) or name
-
-
-def _split_concatenated_native_tool_name(name: str, native_tool_name_map: Dict[str, str]) -> List[str]:
-    """Return native tool names when a model accidentally joins multiple names."""
-    remaining = str(name or "").strip()
-    if not remaining or remaining in native_tool_name_map:
-        return []
-    native_names = sorted(native_tool_name_map.keys(), key=len, reverse=True)
-    parts: List[str] = []
-    while remaining:
-        matched = next((candidate for candidate in native_names if remaining.startswith(candidate)), "")
-        if not matched:
-            return []
-        parts.append(matched)
-        remaining = remaining[len(matched):]
-    return parts if len(parts) > 1 else []
-
-
-def _missing_required_mcp_args(tool_name: str, arguments: dict) -> List[str]:
-    tool = registry.get(tool_name)
-    schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
-    required = schema.get("required") if isinstance(schema, dict) else []
-    if not isinstance(required, list):
-        return []
-    args = arguments if isinstance(arguments, dict) else {}
-    return [
-        str(name)
-        for name in required
-        if str(name) not in args or args.get(str(name)) in (None, "")
-    ]
-
-
-def _joined_tool_skip_reason(tool_name: str, arguments: dict, allowed_tools: set) -> str:
-    if tool_name not in allowed_tools:
-        return f"Tool not allowed for this task: {tool_name}"
-    if is_endpoint_agent_tool(tool_name):
-        return ""
-    tool = registry.get(tool_name)
-    missing = _missing_required_mcp_args(tool_name, arguments)
-    if missing:
-        return f"Missing required argument(s) for {tool_name}: {', '.join(missing)}"
-    if tool.destructive and not str(tool_name).startswith("prompt."):
-        return f"Cannot safely execute destructive tool from a joined MCP call: {tool_name}"
-    return ""
-
-
-async def _call_mcp_via_runtime(
-    runtime_url: str,
-    tool: str,
-    user_id: int,
-    arguments: dict,
-    ai_config_id: Optional[int],
-) -> Dict[str, object]:
-    """Forward an MCP tool call to ``mcp-runtime`` over HTTP.
-
-    Lazy-imports httpx so the in-process path keeps zero overhead. Uses the
-    INTERNAL_TOKEN Bearer header from ``runtime.internal_http.internal_headers``.
-    """
-    from api.runtime.internal_http import internal_post
-
-    # Carry the current run's session context across the process boundary so
-    # tools in mcp-runtime can resolve the active session_id / channel /
-    # identity even though they run in a separate process where the worker's
-    # contextvar is not set. None in the in-process path; harmless to send.
-    body = {
-        "tool": tool,
-        "user_id": user_id,
-        "ai_config_id": ai_config_id,
-        "arguments": arguments,
-    }
-    run_ctx = get_run_session_context()
-    if run_ctx:
-        body["session_context"] = run_ctx
-
-    return await internal_post(runtime_url, "/internal/mcp/call", json=body, timeout=120.0)
-
-
-async def _dispatch_endpoint_via_runtime(
-    runtime_url: str,
-    tool: str,
-    user_id: int,
-    arguments: dict,
-    ai_config_id: Optional[int],
-    timeout_seconds: int = 120,
-    poll_interval: float = 0.25,
-) -> Dict[str, object]:
-    """Forward an endpoint-agent tool dispatch to ``connector-runtime`` and
-    poll the persisted task row until it finishes.
-
-    Polling (vs blocking HTTP) is what makes the dispatch survive a
-    connector-runtime restart: once the row is in the DB, any subsequent
-    poll picks up the agent's eventual reply even if the original wait
-    process was wiped.
-    """
-    import asyncio as _asyncio
-    import httpx
-    from api.runtime.internal_http import internal_headers
-
-    headers = internal_headers()
-    base = runtime_url.rstrip("/")
-
-    async with httpx.AsyncClient(base_url=base, timeout=30.0) as client:
-        post_resp = await client.post(
-            "/internal/agent/dispatch",
-            headers=headers,
-            json={
-                "user_id": user_id,
-                "ai_config_id": ai_config_id,
-                "tool": tool,
-                "arguments": arguments,
-            },
-        )
-        post_resp.raise_for_status()
-        post_body = post_resp.json()
-        task_id = str(post_body.get("task_id") or "")
-        if not task_id:
-            return {
-                "success": False,
-                "tool": tool,
-                "error": "connector-runtime returned no task_id",
-            }
-
-        deadline = _asyncio.get_running_loop().time() + max(1, int(timeout_seconds))
-        consecutive_missing = 0
-        while True:
-            row: Dict[str, Any]
-            try:
-                resp = await client.get(
-                    f"/internal/agent/dispatch/result/{task_id}",
-                    headers=headers,
-                )
-                if resp.status_code == 404:
-                    # Row should exist (we just POSTed) — a 404 means the
-                    # connector-runtime restart wiped our row between the
-                    # POST and our first GET, or some other race we should
-                    # not paper over indefinitely.
-                    consecutive_missing += 1
-                    if consecutive_missing >= 3:
-                        return {
-                            "success": False,
-                            "taskId": task_id,
-                            "tool": tool,
-                            "error": "dispatch row missing after retries (connector-runtime restart?)",
-                        }
-                    row = {"status": "pending"}
-                else:
-                    resp.raise_for_status()
-                    row = resp.json()
-                    consecutive_missing = 0
-            except Exception as exc:
-                # Transient HTTP failure: keep polling until the deadline.
-                row = {"status": "pending", "error": f"poll error: {exc}"}
-            status = str(row.get("status") or "pending")
-            if status not in {"pending", "queued"}:
-                return {
-                    "success": bool(row.get("success", status == "completed")),
-                    "taskId": task_id,
-                    # Preserve the exact dispatch target. Multiple bound devices
-                    # may advertise the same MCP name, so callers must never
-                    # recover device identity by searching the tool catalog.
-                    "deviceId": row.get("device_id") or row.get("deviceId"),
-                    "tool": row.get("tool") or tool,
-                    "summary": row.get("summary"),
-                    "result": row.get("result"),
-                    "error": row.get("error"),
-                }
-            if _asyncio.get_running_loop().time() >= deadline:
-                # Tell the socket-owning process to finalize the row and
-                # resume the device queue — a row left "pending" blocks every
-                # later dispatch to that device until the orphan sweep.
-                try:
-                    await client.post(
-                        f"/internal/agent/dispatch/expire/{task_id}",
-                        headers=headers,
-                        json={"reason": f"Endpoint agent result timeout after {timeout_seconds}s"},
-                    )
-                except Exception:
-                    pass  # best-effort; the periodic orphan sweep is the backstop
-                return {
-                    "success": False,
-                    "taskId": task_id,
-                    "tool": tool,
-                    "error": f"Endpoint agent result timeout after {timeout_seconds}s",
-                }
-            await _asyncio.sleep(poll_interval)
-
-
-# Endpoint tools that intrinsically run for minutes (browser/desktop
-# automation "run" waits on page loads, retries, and even email verification
-# codes — the browser card's wait_verification_code step alone defaults to
-# 300s). The 120s default poll deadline guarantees a premature TimeoutError
-# for these, so give them a much larger default window. A live device that
-# accepted the task keeps working; a disconnected one fails fast upstream
-# ("Agent not connected"), so the longer window only applies to real work.
-_LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT = 900
-# Device execution and result delivery are separate phases.  A command may use
-# its entire declared timeout and finish while the Gateway socket is restarting;
-# keep polling the persisted dispatch row long enough for the Agent to reconnect,
-# re-register and flush its queued terminal result.
-_ENDPOINT_RESULT_DELIVERY_GRACE = 120
-_ENDPOINT_DISPATCH_TIMEOUT_CAP = 1800
-
-
-def _endpoint_dispatch_timeout(tool: str, arguments: dict) -> int:
-    """Resolve the result-wait timeout (seconds) for an endpoint-agent tool.
-
-    Priority: an explicit ``args.timeout_seconds`` (the device execution
-    deadline) plus a separate result-delivery grace period > a per-tool long-run
-    default > the global 120s default.  The grace prevents a completed result
-    queued during a Gateway restart from racing the caller's polling deadline.
-    Always clamped to a sane ceiling so a hung device can't wedge the run
-    indefinitely.
-    """
-    args = arguments if isinstance(arguments, dict) else {}
-    raw = args.get("timeout_seconds")
-    if raw is not None:
-        try:
-            execution_timeout = max(5, int(raw))
-            return min(
-                execution_timeout + _ENDPOINT_RESULT_DELIVERY_GRACE,
-                _ENDPOINT_DISPATCH_TIMEOUT_CAP,
-            )
-        except (TypeError, ValueError):
-            pass
-    action = str(args.get("action") or "").strip().lower()
-    # manage_card run/execute is the long browser-automation path; legacy alias
-    # run_card behaves the same. Desktop long tasks can extend via timeout_seconds.
-    if (tool == "manage_card" and action in {"run", "execute"}) or tool == "run_card":
-        return _LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT
-    return 120
 
 
 async def _call_mcp_or_endpoint_tool(
@@ -2660,7 +2226,7 @@ def _run_worker_impl(
                             getattr(_inbound, "message_type", None),
                             _requires_reply,
                         )
-                        _injected = _render_ai_message_system_prompt(
+                        _injected = _render_ai_message_system_prompt(AIMessagePrompt(
                             from_ai_name=_from_name,
                             from_ai_config_id=_inbound.from_ai_config_id,
                             target_ai_name=_target_name,
@@ -2670,7 +2236,7 @@ def _run_worker_impl(
                             content=_inbound.content,
                             message_type=_msg_type,
                             require_reply=_requires_reply,
-                        )
+                        ))
                         _save_message(
                             bg,
                             user_id,

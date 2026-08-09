@@ -33,6 +33,7 @@ os.environ.setdefault("HEYSURE_SERVICE_ROLE", "worker")
 from api.core.logging_config import configure_logging  # noqa: E402
 from api.core.settings import settings  # noqa: E402
 from api.runtime.process_control import register_restart_command  # noqa: E402
+from api.runtime.health import state_for  # noqa: E402
 
 configure_logging()
 register_restart_command([sys.executable, "-m", "ai_runtime.main"])
@@ -58,6 +59,8 @@ def main() -> int:
         )
 
     create_db_and_tables()
+    runtime_health = state_for("worker")
+    runtime_health.mark_ready()
 
     # Expose a minimal health/console-tail HTTP surface so the admin panel can
     # monitor this otherwise-headless worker. Best-effort: never fatal.
@@ -72,6 +75,7 @@ def main() -> int:
 
     def _on_signal(signum, _frame):
         logger.info(f"signal {signum} -> draining and exiting")
+        runtime_health.begin_draining()
         stop_evt.set()
 
     signal.signal(signal.SIGINT, _on_signal)
@@ -83,7 +87,7 @@ def main() -> int:
     # Docker grants five minutes (see stop_grace_period); reserve the final
     # minute to put unusually long runs back into Postgres before SIGKILL.
     logger.info("dispatcher stopped; draining active conversations")
-    unfinished = wait_for_active_runs(240.0)
+    unfinished = wait_for_active_runs(float(settings.ai_drain_timeout_seconds))
     if unfinished:
         recovered = requeue_runs(unfinished)
         logger.warning(

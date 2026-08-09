@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatRun, ChatSession
 from api.services.chat.chat_media import delete_message_media
-from connector_runtime.dispatch.device_dispatch import get_run_session_context
+from api.runtime.run_context import get_run_session_context
 from api.services.tasks import task_plan as plan_service
 from api.services.tasks.task_schedule import (
     AT_KEYS as _SCHEDULE_AT_KEYS,

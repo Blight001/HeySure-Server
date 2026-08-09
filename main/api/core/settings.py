@@ -65,12 +65,10 @@ class Settings(BaseSettings):
         description="Required PostgreSQL SQLAlchemy URL.",
     )
     db_auto_migrate: bool = Field(
-        default=True,
+        default=False,
         alias="HEYSURE_DB_AUTO_MIGRATE",
-        description="Run Alembic ``upgrade head`` on app startup. Set to false to "
-        "decouple migration from startup (run ``python -m api.db migrate`` as a "
-        "separate deploy step / init-container instead); the app then only checks "
-        "that the schema is present.",
+        description="Deprecated compatibility switch. Runtime services never run "
+        "DDL; use the db-migrate service or ``python -m api.db migrate``.",
     )
     db_pool_size: int = Field(
         default=10,
@@ -181,6 +179,34 @@ class Settings(BaseSettings):
     temp_image_max_bytes: int = Field(
         default=10 * 1024 * 1024,
         description="Maximum size accepted by the temporary image upload endpoints.",
+    )
+    ai_run_lease_seconds: int = Field(
+        default=60,
+        description="Lease duration renewed by an AI worker while a ChatRun is running.",
+    )
+    ai_drain_timeout_seconds: int = Field(
+        default=240,
+        description="Graceful AI shutdown deadline before owned runs are requeued.",
+    )
+    connector_dispatch_lease_seconds: int = Field(
+        default=180,
+        description="Lease duration for connector-owned pending/queued dispatches.",
+    )
+    db_connect_timeout_seconds: int = Field(
+        default=5,
+        description="PostgreSQL TCP/authentication connection timeout.",
+    )
+    db_lock_timeout_ms: int = Field(
+        default=5000,
+        description="PostgreSQL lock_timeout applied to every pooled connection.",
+    )
+    db_statement_timeout_ms: int = Field(
+        default=30000,
+        description="PostgreSQL statement_timeout applied to every pooled connection.",
+    )
+    db_idle_transaction_timeout_ms: int = Field(
+        default=30000,
+        description="PostgreSQL idle_in_transaction_session_timeout per connection.",
     )
 
     # ---- Workflow cards -----------------------------------------------------
