@@ -23,6 +23,7 @@ from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import tool_media
+from ai_runtime.inference import tool_persistence
 from ai_runtime.inference.communication_prompt import (
     AIMessagePrompt,
     normalize_ai_message_type as _normalize_ai_message_type,
@@ -80,7 +81,6 @@ set_run_session_context = run_context.set_run_session_context
 from connector_runtime.dispatch.desktop_device_tools import (
     endpoint_bridge_tools_for_config,
     endpoint_tools_for_config,
-    is_endpoint_agent_tool,
 )
 from api.services.tasks.task_system import (
     TASK_PLAN_FLOW_PROMPT,
@@ -168,28 +168,8 @@ def _raise_for_upstream_error(response: requests.Response) -> None:
     raise RuntimeError(_format_upstream_error(response))
 
 
-def _record_mcp_call(
-    *, tool, user_id, ai_config_id, session_id, run_id, message_id, failed, error
-) -> None:
-    """Best-effort record of a tool call outcome for the failure-rate view.
-
-    Captures the conversation location (session / run / message) so a failure can
-    be traced in chat and the responsible tool iterated. Never breaks the run."""
-    try:
-        from api.services.mcp import mcp_stats
-
-        mcp_stats.record_call(
-            user_id=user_id,
-            ai_config_id=ai_config_id,
-            tool=tool,
-            success=not failed,
-            error=error or "",
-            session_id=str(session_id or ""),
-            run_id=str(run_id or ""),
-            message_id=getattr(message_id, "id", message_id) if message_id is not None else None,
-        )
-    except Exception:
-        pass
+def _record_mcp_call(record: tool_persistence.ToolCallRecord) -> None:
+    tool_persistence.record_tool_call(record)
 
 
 def _duplicate_call_flags(turn_calls: List[Dict[str, Any]]) -> List[bool]:
@@ -277,43 +257,12 @@ def _append_missing_tool_responses(convo: List[Dict], error_text: str) -> List[s
     return repaired_ids
 
 
-_SCREENSHOT_BUBBLE_MARKER = "[截图]"
-
-
 def _mcp_tool_device_identity(
     tool: str,
     user_id: int,
     tool_result: Optional[Dict[str, object]],
 ) -> tuple[str, str]:
-    """Return the exact endpoint ``(device_id, display_name)`` for one call.
-
-    Identity comes only from the completed dispatch envelope. Looking up an
-    agent by ``tool`` is intentionally forbidden: several devices can expose
-    the same MCP name and a catalog lookup would attribute A's result to B.
-    """
-    if not tool_result or not is_endpoint_agent_tool(tool):
-        return "", ""
-    payload = tool_result.get("result", tool_result)
-    if not isinstance(payload, dict):
-        return "", ""
-    device_id = str(payload.get("deviceId") or payload.get("device_id") or "").strip()
-    if not device_id:
-        return "", ""
-    reported_name = str(payload.get("deviceName") or payload.get("device_name") or "").strip()
-    if reported_name:
-        return device_id, " ".join(reported_name.split())
-    try:
-        from api.devices.live import connected_agent_rows_for_user
-
-        for row in connected_agent_rows_for_user(user_id):
-            candidate_id = str(row.get("id") or row.get("deviceId") or row.get("device_id") or "").strip()
-            if candidate_id != device_id:
-                continue
-            label = str(row.get("remark") or row.get("name") or "").strip()
-            return device_id, " ".join(label.split()) or device_id
-    except Exception:
-        logger.debug("endpoint device display-name lookup skipped device=%s", device_id, exc_info=True)
-    return device_id, device_id
+    return tool_persistence.tool_device_identity(tool, user_id, tool_result)
 
 
 def _build_mcp_tool_bubble_content(
@@ -326,114 +275,23 @@ def _build_mcp_tool_bubble_content(
     device_id: str = "",
     device_name: str = "",
 ) -> str:
-    status = "失败" if failed else "成功"
-    device_meta = ""
-    if device_id:
-        device_meta = f"设备: {device_name or device_id}\n设备号: {device_id}\n"
-    content = (
-        "[MCP工具]\n"
-        f"工具: {tool}\n"
-        f"状态: {status}\n"
-        f"{device_meta}\n"
-        "[参数]\n"
-        f"{_safe_json(arguments or {})}\n\n"
-        "[结果]\n"
-        f"{result_text}"
+    return tool_persistence.build_tool_bubble_content(
+        tool,
+        arguments,
+        result_text,
+        failed,
+        image_url,
+        device_id=device_id,
+        device_name=device_name,
     )
-    if image_url:
-        # Trailing marker the web UI parses out to render the screenshot inline.
-        content += f"\n\n{_SCREENSHOT_BUBBLE_MARKER}\n{image_url}"
-    return content
 
 
-def _save_mcp_tool_bubble(
-    bg: Session,
-    *,
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-    session_name: str,
-    model: str,
-    tool: str,
-    arguments: dict,
-    result_text: str,
-    failed: bool = False,
-    image_url: str = "",
-    image_data_url: str = "",
-    tool_result: Optional[Dict[str, object]] = None,
-    latency: Optional[float] = None,
-) -> None:
-    bot_delivery: Dict[str, object] = {}
-    device_id, device_name = _mcp_tool_device_identity(tool, user_id, tool_result)
-    saved = _save_message(
-        bg,
-        user_id,
-        ChatMessageCreate(
-            role="system",
-            content=_build_mcp_tool_bubble_content(
-                tool,
-                arguments,
-                result_text,
-                failed,
-                image_url,
-                device_id=device_id,
-                device_name=device_name,
-            ),
-            tags="mcp_tool_call",
-            ai_config_id=ai_config_id,
-            ai_kind=ai_kind,
-            session_id=session_id,
-            session_name=session_name,
-            model=model,
-            total_tokens=0,
-            # 实测的单个工具执行时长（秒），持久化到消息上，重开对话仍可显示。
-            latency=latency,
-        ),
-    )
-    if image_data_url and saved.id:
-        try:
-            from api.services.chat.chat_media import message_media_url, save_message_image_data_url
-
-            media = save_message_image_data_url(bg, message=saved, data_url=image_data_url)
-            saved.content = _build_mcp_tool_bubble_content(
-                tool,
-                arguments,
-                result_text,
-                failed,
-                message_media_url(media),
-                device_id=device_id,
-                device_name=device_name,
-            )
-            bg.add(saved)
-            bg.commit()
-        except Exception:
-            logger.debug("screenshot chat-media persist skipped", exc_info=True)
-    if (not failed) and tool_result and _screenshot_send_to_user_enabled(tool, tool_result, arguments):
-        try:
-            bot_delivery = _deliver_screenshot_to_bot(bg, saved, tool_result=tool_result)
-            if bot_delivery:
-                saved.content = _build_mcp_tool_bubble_content(
-                    tool,
-                    arguments,
-                    f"{result_text}\n\n[机器人发送]\n{_safe_json(bot_delivery)}",
-                    failed,
-                    _extract_screenshot_bubble_url(saved.content) or image_url,
-                    device_id=device_id,
-                    device_name=device_name,
-                )
-                bg.add(saved)
-                bg.commit()
-        except Exception:
-            logger.debug("screenshot bot delivery skipped", exc_info=True)
+def _save_mcp_tool_bubble(request: tool_persistence.ToolBubbleRequest) -> None:
+    tool_persistence.save_tool_bubble(request)
 
 
 def _extract_screenshot_bubble_url(content: str) -> str:
-    marker = f"\n\n{_SCREENSHOT_BUBBLE_MARKER}\n"
-    text = str(content or "")
-    if marker not in text:
-        return ""
-    return text.rsplit(marker, 1)[-1].strip().splitlines()[0].strip()
+    return tool_persistence.extract_screenshot_bubble_url(content)
 
 
 def _load_current_user_content(
@@ -533,80 +391,11 @@ def _screenshot_send_to_user_enabled(tool: str, tool_result: Dict[str, object], 
 
 
 def _bot_target_from_route(route: object) -> Dict[str, object]:
-    target: Dict[str, object] = {}
-    if hasattr(route, "receive_id"):
-        target["receive_id"] = str(getattr(route, "receive_id", "") or "")
-        target["receive_id_type"] = str(getattr(route, "receive_id_type", "") or "")
-    if hasattr(route, "target_id"):
-        target["target_id"] = str(getattr(route, "target_id", "") or "")
-        target["target_type"] = str(getattr(route, "target_type", "") or "")
-    if hasattr(route, "source_message_id"):
-        target["msg_id"] = str(getattr(route, "source_message_id", "") or "")
-    if hasattr(route, "source_event_id"):
-        target["event_id"] = str(getattr(route, "source_event_id", "") or "")
-    if hasattr(route, "next_msg_seq"):
-        try:
-            target["msg_seq"] = max(1, int(getattr(route, "next_msg_seq") or 1))
-        except Exception:
-            pass
-    return target
+    return tool_persistence._bot_target_from_route(route)
 
 
 def _deliver_screenshot_to_bot(bg: Session, message: ChatMessage, *, tool_result: Dict[str, object]) -> Dict[str, object]:
-    payload = _find_screenshot_result_payload(tool_result)
-    image_payload = _find_image_payload(tool_result)
-    media_path = str(payload.get("server_path") or image_payload.get("path") or "").strip()
-    media_url = str(payload.get("image_url") or payload.get("public_url") or image_payload.get("url") or "").strip()
-    if not media_path and not media_url:
-        return {"delivered": False, "reason": "no media path or url"}
-    from connector_runtime.bots.messaging import MediaPayload, Recipient, dispatcher
-    from connector_runtime.bots.registry import iter_bots
-
-    media = MediaPayload(
-        url=media_url,
-        path=media_path,
-        media_type="image",
-        file_name=str(payload.get("file_name") or "screenshot.png"),
-    )
-
-    bots = list(iter_bots())
-    for bot in bots:
-        route = bot.load_session_route(bg, message)
-        if not route:
-            continue
-        target = _bot_target_from_route(route)
-        sent = dispatcher.send_media(
-            user_id=int(message.user_id),
-            ai_config_id=message.ai_config_id,
-            channel=bot.channel,
-            media=media,
-            raw_target=target,
-        ).detail
-        if hasattr(route, "row") and "msg_seq" in target:
-            try:
-                route.row.next_msg_seq = int(target["msg_seq"]) + 1
-                route.row.updated_at = time.time()
-                bg.add(route.row)
-                bg.commit()
-            except Exception:
-                logger.debug("screenshot bot route sequence bump skipped", exc_info=True)
-        return {"delivered": True, "mode": "session_route", "channel": bot.channel, "target": target, "result": sent}
-
-    cfg = bg.get(AssistantAIConfig, int(message.ai_config_id or 0)) if message.ai_config_id else None
-    channel = str(getattr(cfg, "bot_channel", "") or "").strip().lower()
-    active_bot = next((bot for bot in bots if bot.channel == channel), None)
-    if active_bot is None:
-        return {"delivered": False, "reason": "no bot session route and no active bot channel", "channel": channel}
-    if cfg is not None and not active_bot.is_enabled(cfg):
-        return {"delivered": False, "reason": "active bot is disabled", "channel": active_bot.channel}
-    sent = dispatcher.send_media(
-        user_id=int(message.user_id),
-        ai_config_id=message.ai_config_id,
-        channel=active_bot.channel,
-        media=media,
-        recipient=Recipient(),
-    ).detail
-    return {"delivered": True, "mode": "default_target", "channel": active_bot.channel, "result": sent}
+    return tool_persistence._send_screenshot_to_bot(bg, message, tool_result)
 
 
 def _model_visible_tool_result(
@@ -1108,11 +897,11 @@ def _run_worker_impl(request: WorkerRequest):
                         item_error = item_execution.error
                         item_result_text = item_execution.display_text
                         compound_failed = compound_failed or item_failed
-                        _record_mcp_call(
+                        _record_mcp_call(tool_persistence.ToolCallRecord(
                             tool=split_tool, user_id=user_id, ai_config_id=ai_config_id,
                             session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
                             failed=item_failed, error=item_error,
-                        )
+                        ))
                         if plan_state is not None:
                             phase_context.record_status(phase_mcp_statuses, split_tool, item_failed)
                         saved.tags = _append_mcp_state_to_tags(
@@ -1124,8 +913,8 @@ def _run_worker_impl(request: WorkerRequest):
                         bg.add(saved)
                         bg.commit()
                         item_screenshot_ref = {} if item_failed else _screenshot_display_ref(split_tool, item_result)
-                        _save_mcp_tool_bubble(
-                            bg,
+                        _save_mcp_tool_bubble(tool_persistence.ToolBubbleRequest(
+                            session=bg,
                             user_id=user_id,
                             ai_config_id=ai_config_id,
                             ai_kind=ai_kind,
@@ -1140,7 +929,7 @@ def _run_worker_impl(request: WorkerRequest):
                             image_data_url=item_screenshot_ref.get("data_url", ""),
                             tool_result=item_result if isinstance(item_result, dict) else None,
                             latency=item_execution.latency,
-                        )
+                        ))
                         compound_results.append({
                             "tool": split_tool,
                             "failed": item_failed,
@@ -1181,8 +970,8 @@ def _run_worker_impl(request: WorkerRequest):
                     saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
                     bg.add(saved)
                     bg.commit()
-                    _save_mcp_tool_bubble(
-                        bg,
+                    _save_mcp_tool_bubble(tool_persistence.ToolBubbleRequest(
+                        session=bg,
                         user_id=user_id,
                         ai_config_id=ai_config_id,
                         ai_kind=ai_kind,
@@ -1193,7 +982,7 @@ def _run_worker_impl(request: WorkerRequest):
                         arguments=arguments,
                         result_text=result_text,
                         failed=True,
-                    )
+                    ))
                     if _has_native_tc:
                         convo.append({
                             "role": "tool",
@@ -1234,11 +1023,11 @@ def _run_worker_impl(request: WorkerRequest):
                 tool_failed = execution.failed
                 tool_error = execution.error
                 result_text = execution.display_text
-                _record_mcp_call(
+                _record_mcp_call(tool_persistence.ToolCallRecord(
                     tool=tool, user_id=user_id, ai_config_id=ai_config_id,
                     session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
                     failed=tool_failed, error=tool_error,
-                )
+                ))
                 if plan_state is not None:
                     phase_context.record_status(phase_mcp_statuses, tool, tool_failed)
                 result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
@@ -1257,8 +1046,8 @@ def _run_worker_impl(request: WorkerRequest):
                 bg.add(saved)
                 bg.commit()
                 screenshot_ref = {} if tool_failed else _screenshot_display_ref(tool, tool_result)
-                _save_mcp_tool_bubble(
-                    bg,
+                _save_mcp_tool_bubble(tool_persistence.ToolBubbleRequest(
+                    session=bg,
                     user_id=user_id,
                     ai_config_id=ai_config_id,
                     ai_kind=ai_kind,
@@ -1273,7 +1062,7 @@ def _run_worker_impl(request: WorkerRequest):
                     image_data_url=screenshot_ref.get("data_url", ""),
                     tool_result=tool_result if isinstance(tool_result, dict) else None,
                     latency=execution.latency,
-                )
+                ))
 
                 if (not tool_failed) and tool == "mcp.describe+tool":
                     described_items, described_names = _described_tool_entries(

@@ -2,6 +2,7 @@ import asyncio
 
 from ai_runtime.inference import core
 from ai_runtime.inference.runtime_clients import dispatch_endpoint_via_runtime
+from ai_runtime.inference import tool_persistence
 
 
 def test_split_runtime_preserves_completed_dispatch_device_id(monkeypatch):
@@ -69,10 +70,10 @@ def test_device_identity_uses_completed_dispatch_id_not_shared_tool_name(monkeyp
             "capabilities": ["shell.run"],
         },
     ]
-    monkeypatch.setattr(core, "is_endpoint_agent_tool", lambda _tool: True)
+    monkeypatch.setattr(tool_persistence, "is_endpoint_agent_tool", lambda _tool: True)
     monkeypatch.setattr("api.devices.live.connected_agent_rows_for_user", lambda _user_id: agents)
 
-    device_id, device_name = core._mcp_tool_device_identity(
+    device_id, device_name = tool_persistence.tool_device_identity(
         "shell.run",
         1,
         {"result": {"success": True, "deviceId": "linux-a", "result": {"stdout": "ok"}}},
@@ -83,7 +84,7 @@ def test_device_identity_uses_completed_dispatch_id_not_shared_tool_name(monkeyp
 
 
 def test_bubble_embeds_device_metadata_for_frontend():
-    content = core._build_mcp_tool_bubble_content(
+    content = tool_persistence.build_tool_bubble_content(
         "shell.run",
         {"command": "uptime"},
         '{"success": true}',

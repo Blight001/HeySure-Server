@@ -1,11 +1,11 @@
 {
   "counts": {
-    "complexity": 127,
+    "complexity": 125,
     "dependencies": 15,
     "file_lines": 17,
     "function_lines": 49,
     "nesting": 29,
-    "parameters": 25
+    "parameters": 24
   },
   "limits": {
     "production": {
@@ -35,9 +35,7 @@
     "complexity:main/ai_runtime/inference/ai_service.py:align_token_snapshots_with_history": 30,
     "complexity:main/ai_runtime/inference/ai_service.py:migrate_legacy_switch_files_to_db": 19,
     "complexity:main/ai_runtime/inference/core.py:_append_missing_tool_responses": 18,
-    "complexity:main/ai_runtime/inference/core.py:_deliver_screenshot_to_bot": 21,
     "complexity:main/ai_runtime/inference/core.py:_format_upstream_error": 16,
-    "complexity:main/ai_runtime/inference/core.py:_mcp_tool_device_identity": 19,
     "complexity:main/ai_runtime/inference/core.py:_run_worker_impl": 253,
     "complexity:main/ai_runtime/inference/core.py:_run_worker_impl._execute_turn_call": 78,
     "complexity:main/api/chat_runtime/chat_prompt_utils.py:_build_dynamic_mcp_explanation": 35,
@@ -170,7 +168,7 @@
     "dependencies:main/gateway/routers/diagnostics.py": 18,
     "dependencies:main/gateway/routers/mcp.py": 19,
     "file_lines:main/ai_runtime/inference/ai_message_service.py": 954,
-    "file_lines:main/ai_runtime/inference/core.py": 2023,
+    "file_lines:main/ai_runtime/inference/core.py": 1822,
     "file_lines:main/api/chat_runtime/chat_prompt_utils.py": 895,
     "file_lines:main/api/chat_runtime/chat_runtime_helpers.py": 534,
     "file_lines:main/api/core/migrations.py": 1589,
@@ -267,7 +265,6 @@
     "parameters:main/ai_runtime/inference/ai_message_service.py:send": 10,
     "parameters:main/ai_runtime/inference/core.py:_append_mcp_disabled_feedback": 11,
     "parameters:main/ai_runtime/inference/core.py:_run_worker": 11,
-    "parameters:main/ai_runtime/inference/core.py:_save_mcp_tool_bubble": 15,
     "parameters:main/api/chat_runtime/chat_runtime_helpers.py:build_runtime_system_prompt_and_tools": 10,
     "parameters:main/api/core/migrations.py:_migrate_user": 20,
     "parameters:main/api/devices/presence.py:upsert_presence": 10,
