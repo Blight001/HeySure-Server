@@ -8,14 +8,14 @@ import time
 logger = logging.getLogger(__name__)
 from typing import Any, Dict, List, Optional
 
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from api.database import engine
 from api.runtime import run_context
 from mcp_runtime.mcp import get_project_root
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
-from api.models import AITaskJob, ChatMessage, ChatMessageCreate, User
-from api.services.chat import chat_inject, mcp_session_context
+from api.models import ChatMessageCreate
+from api.services.chat import mcp_session_context
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import compression_flow
 from ai_runtime.inference import final_response_flow
@@ -30,6 +30,8 @@ from ai_runtime.inference import tool_persistence
 from ai_runtime.inference import tool_rejections
 from ai_runtime.inference import tool_batch_flow
 from ai_runtime.inference import turn_result
+from ai_runtime.inference import worker_lifecycle
+from ai_runtime.inference import worker_setup
 from ai_runtime.inference.debug_support import (
     ai_color as _ai_color,
     ai_debug_enabled as _ai_debug_enabled,
@@ -40,10 +42,8 @@ from ai_runtime.inference.debug_support import (
     ai_short_run_id as _ai_short_run_id,
     heysure_provider_session_id as _heysure_provider_session_id,
 )
-from ai_runtime.inference.conversation_history import build_conversation_history
 from ai_runtime.inference.policies import (
     can_start_inference_step as _can_start_inference_step,
-    coerce_max_steps as _coerce_max_steps,
     has_active_todo_plan as _has_active_todo_plan,
 )
 from ai_runtime.inference.plan_flow import (
@@ -59,10 +59,8 @@ from ai_runtime.inference.tool_resolution import (
     append_ordinary_tool_response as _append_ordinary_tool_response,
     append_pending_call_responses as _answer_pending_calls,
     flush_screenshot_messages as _flush_screenshot_messages,
-    missing_required_mcp_args as _missing_required_mcp_args,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
     split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
-    to_native_tool_name as _to_native_tool_name,
 )
 from ai_runtime.inference.run_request import (
     WorkerRequest,
@@ -75,156 +73,50 @@ from ai_runtime.inference.tool_execution import (
 )
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
-from connector_runtime.dispatch.desktop_device_tools import (
-    endpoint_bridge_tools_for_config,
-    endpoint_tools_for_config,
-)
 from api.services.tasks.task_system import (
-    TASK_PLAN_FLOW_PROMPT,
     TASK_RUNTIME_REQUIRED_TOOLS,
-    normalize_system_auto_control,
-    with_workspace_read_by_name_compat,
 )
 from api.chat_runtime.chat_prompt_utils import (
     _append_mcp_state_to_tags,
     _append_prompt_section,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
-    _set_run_live_meta,
     _set_run_live_phase,
     _set_run_live_text,
     _set_run_live_usage,
-    _strip_prompt_section,
-    _strip_task_runtime_sections,
 )
 from api.services.chat.chat_persistence import _save_message
 from api.chat_runtime.chat_stream import _detect_provider
 from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
     _load_task_job_by_session,
-    _load_task_payload_by_session,
     _parse_allowed_tools,
-    _resolve_ai_runtime,
     _run_set_status,
     _run_should_stop,
-    build_runtime_system_prompt_and_tools,
 )
 
-from api.core.config import DEFAULT_CHAT_MAX_STEPS
-from api.core.settings import settings
 
-
-def _record_mcp_call(record: tool_persistence.ToolCallRecord) -> None:
-    tool_persistence.record_tool_call(record)
-
-
+_record_mcp_call = tool_persistence.record_tool_call
 _duplicate_call_flags = tool_batch_flow.duplicate_call_flags
-
-
-def _mcp_tool_device_identity(
-    tool: str,
-    user_id: int,
-    tool_result: Optional[Dict[str, object]],
-) -> tuple[str, str]:
-    return tool_persistence.tool_device_identity(tool, user_id, tool_result)
-
-
-def _build_mcp_tool_bubble_content(
-    tool: str,
-    arguments: dict,
-    result_text: str,
-    failed: bool = False,
-    image_url: str = "",
-    *,
-    device_id: str = "",
-    device_name: str = "",
-) -> str:
-    return tool_persistence.build_tool_bubble_content(
-        tool,
-        arguments,
-        result_text,
-        failed,
-        image_url,
-        device_id=device_id,
-        device_name=device_name,
-    )
-
-
-def _save_mcp_tool_bubble(request: tool_persistence.ToolBubbleRequest) -> None:
-    tool_persistence.save_tool_bubble(request)
-
-
-def _extract_screenshot_bubble_url(content: str) -> str:
-    return tool_persistence.extract_screenshot_bubble_url(content)
-
-
-def _is_image_input_unsupported_error(error_text: str) -> bool:
-    return tool_media.is_image_input_unsupported_error(error_text)
-
-
-def _degrade_image_messages_to_text(convo: List[Dict]) -> int:
-    return tool_media.degrade_image_messages_to_text(convo)
-
-
-def _prune_prior_runtime_screenshot_images(convo: List[Dict]) -> int:
-    return tool_media.prune_prior_runtime_screenshot_images(convo)
-
-
-def _image_input_degraded_feedback(error_text: str, removed_images: int) -> str:
-    return tool_media.image_input_degraded_feedback(error_text, removed_images)
-
-
-def _find_image_payload(value: object, depth: int = 0) -> Dict[str, str]:
-    return tool_media.find_image_payload(value, depth)
-
-
-def _image_path_to_data_url(path: str) -> str:
-    return tool_media.image_path_to_data_url(path)
-
-
-def _omit_image_fields(value: object) -> object:
-    return tool_media.omit_image_fields(value)
-
-
-def _tool_image_message(tool: str, tool_result: Dict[str, object]) -> Optional[Dict[str, object]]:
-    return tool_media.tool_image_message(tool, tool_result)
-
-
-def _browser_screenshot_image_message(tool: str, tool_result: Dict[str, object]) -> Optional[Dict[str, object]]:
-    return _tool_image_message(tool, tool_result)
-
-
-def _screenshot_display_ref(tool: str, tool_result: Dict[str, object]) -> Dict[str, str]:
-    return tool_media.screenshot_display_ref(tool, tool_result)
-
-
-def _find_screenshot_result_payload(value: object, depth: int = 0) -> Dict[str, object]:
-    return tool_media.find_screenshot_result_payload(value, depth)
-
-
-def _screenshot_send_to_user_enabled(tool: str, tool_result: Dict[str, object], args: Optional[dict] = None) -> bool:
-    return tool_media.screenshot_send_to_user_enabled(tool, tool_result, args)
-
-
-def _bot_target_from_route(route: object) -> Dict[str, object]:
-    return tool_persistence._bot_target_from_route(route)
-
-
-def _deliver_screenshot_to_bot(bg: Session, message: ChatMessage, *, tool_result: Dict[str, object]) -> Dict[str, object]:
-    return tool_persistence._send_screenshot_to_bot(bg, message, tool_result)
-
-
-def _model_visible_tool_result(
-    tool: str,
-    tool_result: Dict[str, object],
-    *,
-    image_attached: bool = True,
-) -> object:
-    return tool_media.model_visible_tool_result(
-        tool,
-        tool_result,
-        image_attached=image_attached,
-    )
+_mcp_tool_device_identity = tool_persistence.tool_device_identity
+_build_mcp_tool_bubble_content = tool_persistence.build_tool_bubble_content
+_save_mcp_tool_bubble = tool_persistence.save_tool_bubble
+_extract_screenshot_bubble_url = tool_persistence.extract_screenshot_bubble_url
+_is_image_input_unsupported_error = tool_media.is_image_input_unsupported_error
+_degrade_image_messages_to_text = tool_media.degrade_image_messages_to_text
+_prune_prior_runtime_screenshot_images = tool_media.prune_prior_runtime_screenshot_images
+_image_input_degraded_feedback = tool_media.image_input_degraded_feedback
+_find_image_payload = tool_media.find_image_payload
+_image_path_to_data_url = tool_media.image_path_to_data_url
+_omit_image_fields = tool_media.omit_image_fields
+_tool_image_message = tool_media.tool_image_message
+_browser_screenshot_image_message = tool_media.tool_image_message
+_screenshot_display_ref = tool_media.screenshot_display_ref
+_find_screenshot_result_payload = tool_media.find_screenshot_result_payload
+_screenshot_send_to_user_enabled = tool_media.screenshot_send_to_user_enabled
+_bot_target_from_route = tool_persistence._bot_target_from_route
+_deliver_screenshot_to_bot = tool_persistence._send_screenshot_to_bot
+_model_visible_tool_result = tool_media.model_visible_tool_result
 
 
 def _run_worker(
@@ -241,44 +133,8 @@ def _run_worker(
     current_user_message_id: Optional[int] = None,
     selected_mcp_tools: Optional[set[str]] = None,
 ):
-    """Public worker entry. Wraps the implementation with heartbeat lifecycle
-    so every caller (monolith thread, ai-runtime dispatcher, scheduler) gets
-    watchdog protection without needing to spawn its own heartbeat thread.
-    """
-    import threading as _threading
-    from api.runtime import heartbeat as _hb
-
-    _stop_hb = _threading.Event()
-
-    def _tick_loop() -> None:
-        while not _stop_hb.is_set():
-            try:
-                _hb.tick(run_id)
-            except Exception:
-                pass
-            if _stop_hb.wait(_hb.TICK_INTERVAL_SECONDS):
-                return
-
-    _hb_thread = _threading.Thread(target=_tick_loop, name=f"hb-{run_id}", daemon=True)
-    _hb_thread.start()
-
-    # Mirror the live answer to a QQ streaming message when applicable. The
-    # session (if any) owns final delivery for this run, so we finalize it in
-    # the finally block regardless of how the run ends.
-    try:
-        from connector_runtime.bots.qq.stream_sender import maybe_start_qq_stream
-        maybe_start_qq_stream(
-            run_id=run_id,
-            user_id=user_id,
-            ai_config_id=ai_config_id,
-            ai_kind=ai_kind,
-            session_id=session_id,
-        )
-    except Exception:
-        pass
-
-    try:
-        _run_worker_impl(WorkerRequest.create(
+    worker_lifecycle.run_worker(
+        WorkerRequest.create(
             run_id=run_id,
             user_id=user_id,
             ai_config_id=ai_config_id,
@@ -290,29 +146,9 @@ def _run_worker(
             max_steps=max_steps,
             current_user_message_id=current_user_message_id,
             selected_mcp_tools=selected_mcp_tools,
-        ))
-    finally:
-        try:
-            from connector_runtime.bots.qq.stream_sender import finish_qq_stream
-            finish_qq_stream(run_id, session_id=session_id)
-        except Exception:
-            pass
-        # Race backstop: a user-inject that landed after the loop's last drain
-        # but before this run committed "completed" would otherwise sit forever.
-        # resume_orphaned_injects self-guards (no live run + still pending) and
-        # spins up a continuation run to answer it.
-        try:
-            chat_inject.resume_orphaned_injects(
-                user_id=user_id,
-                ai_config_id=ai_config_id,
-                ai_kind=ai_kind,
-                session_id=session_id,
-                session_name=session_name,
-            )
-        except Exception:
-            logger.exception("resume orphaned user-injects failed")
-        _stop_hb.set()
-        _hb_thread.join(timeout=1.0)
+        ),
+        _run_worker_impl,
+    )
 
 
 def _run_worker_impl(request: WorkerRequest):
@@ -325,71 +161,23 @@ def _run_worker_impl(request: WorkerRequest):
     ) = request.unpack()
     try:
         with Session(engine) as bg:
-            user = bg.get(User, user_id)
-            if not user:
-                raise RuntimeError("User not found")
-            max_steps = _coerce_max_steps(
-                max_steps,
-                _coerce_max_steps(getattr(user, "mcp_max_steps", DEFAULT_CHAT_MAX_STEPS), DEFAULT_CHAT_MAX_STEPS),
-            )
-            from api.services.knowledge import kb_store
-
-            cfg, api_key, base_url, model, system_prompt = _resolve_ai_runtime(
-                bg, user, ai_kind, ai_config_id, session_id
-            )
-            # 方案 A：系统提示 / 人格自动控制直接读 KnowledgeBase 文件（缺失回退 DB）。
-            mcp_warning_template = kb_store.effective_system_value(
-                user_id, "mcp_format_error_hint", getattr(user, "mcp_format_error_hint", "")
-            ).strip()
-            # 「文本含工具类标记但一个调用都没解析出来」的兜底警告每个 run 只允许
-            # 一次：真格式错误一次提醒就够，纯讨论工具语法的正文则不该反复触发。
+            setup = worker_setup.prepare_worker(bg, request)
+            user = setup.user
+            max_steps = setup.max_steps
+            cfg = setup.config
+            api_key = setup.api_key
+            base_url = setup.base_url
+            model = setup.model
+            system_prompt = setup.system_prompt
+            mcp_warning_template = setup.warning_template
+            auto_ctl = setup.auto_control
+            task_job = setup.task_job
+            is_task_runtime = setup.is_task_runtime
+            effective_tool_allowlist = setup.effective_tool_allowlist
+            history = setup.history
+            convo = setup.conversation
             markup_fallback_available = True
-            auto_ctl = normalize_system_auto_control(
-                kb_store.effective_auto_control_json(user_id, cfg) if cfg else None
-            )
             compression_failed = False
-            task_payload = _load_task_payload_by_session(bg, user_id, ai_config_id, session_id)
-            task_job = _load_task_job_by_session(bg, user_id, ai_config_id, session_id)
-            is_task_runtime = bool(task_payload) or str(session_id or "").startswith("session_task_")
-
-            # Single source of truth shared with the live /system-prompt-preview
-            # endpoint: identical MCP catalog, discovery guidance and task sections,
-            # so the prompt shown to the user is exactly the prompt the model receives.
-            system_prompt, effective_tool_allowlist = build_runtime_system_prompt_and_tools(
-                bg,
-                user,
-                ai_kind=ai_kind,
-                ai_config_id=ai_config_id,
-                session_id=session_id,
-                merged_system_prompt=merged_system_prompt,
-                cfg=cfg,
-                base_system_prompt=system_prompt,
-                task_payload=task_payload,
-                selected_mcp_tools=selected_mcp_tools,
-            )
-
-            msg_stmt = select(ChatMessage).where(
-                ChatMessage.user_id == user_id,
-                ChatMessage.session_id == session_id,
-                ChatMessage.ai_kind == ai_kind,
-            ).order_by(ChatMessage.created_at.asc())
-            if ai_config_id is not None:
-                msg_stmt = msg_stmt.where(ChatMessage.ai_config_id == ai_config_id)
-            history = bg.exec(msg_stmt).all()
-            # Compaction is a permanent safety valve now (no per-user toggle): the
-            # cap only shortens a historical tool result that exceeds it, so with a
-            # generous cap ordinary results replay in full while a giant dump can
-            # never blow up the context window.
-            mcp_history_result_max_chars = max(
-                20,
-                min(10000, int(getattr(user, "mcp_history_result_max_chars", 8000) or 8000)),
-            )
-            convo = build_conversation_history(
-                history,
-                system_prompt=system_prompt,
-                mcp_result_max_chars=mcp_history_result_max_chars,
-                model_user_content=model_user_content,
-            )
 
             headers = {
                 "Content-Type": "application/json",
