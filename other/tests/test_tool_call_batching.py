@@ -20,7 +20,7 @@ from api.chat_runtime.mcp_parser import extract_all_complete_mcp_calls
 from api.chat_runtime.run_state import _AUTO_RUNTIME_SECTION_TITLES
 from api.models import DEFAULT_MCP_FORMAT_ERROR_HINT
 from api.models.defaults import MCP_BATCH_CALL_RULE
-from ai_runtime.inference.core import _append_missing_tool_responses
+from ai_runtime.inference.model_error_flow import repair_missing_tool_responses
 
 
 class _FakeResponse:
@@ -184,7 +184,7 @@ class ConvoShapeTests(unittest.TestCase):
     Screenshot results ride in a *user* message. Appending one straight after the
     capturing tool's response would wedge it between two tool messages, orphaning
     every later tool_call_id — so the worker holds images back until the batch
-    drains. ``_append_missing_tool_responses`` is the runtime backstop for that
+    drains. ``repair_missing_tool_responses`` is the runtime backstop for that
     invariant, and these tests pin both sides of it.
     """
 
@@ -199,7 +199,7 @@ class ConvoShapeTests(unittest.TestCase):
             {"role": "user", "content": [{"type": "text", "text": "screenshot"}]},
         ]
         before = len(convo)
-        self.assertEqual(_append_missing_tool_responses(convo, "err"), [])
+        self.assertEqual(repair_missing_tool_responses(convo, "err"), [])
         self.assertEqual(len(convo), before)  # nothing dropped, nothing synthesized
 
     def test_image_between_tool_responses_orphans_the_later_call(self) -> None:
@@ -214,7 +214,7 @@ class ConvoShapeTests(unittest.TestCase):
             {"role": "user", "content": "screenshot"},
             {"role": "tool", "tool_call_id": "b", "content": "{\"real\": true}"},
         ]
-        self.assertEqual(_append_missing_tool_responses(convo, "err"), ["b"])
+        self.assertEqual(repair_missing_tool_responses(convo, "err"), ["b"])
         # b's real result is gone, replaced by a synthetic failure.
         recovered = [m for m in convo if m.get("role") == "tool" and m.get("tool_call_id") == "b"]
         self.assertIn("recovered", recovered[0]["content"])

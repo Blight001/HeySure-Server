@@ -20,6 +20,7 @@ from api.services.chat import chat_inject, mcp_session_context
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import compression_flow
+from ai_runtime.inference import model_error_flow
 from ai_runtime.inference import model_gateway
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
@@ -142,66 +143,6 @@ def _duplicate_call_flags(turn_calls: List[Dict[str, Any]]) -> List[bool]:
         flags.append(sig in seen)
         seen.add(sig)
     return flags
-
-
-def _append_missing_tool_responses(convo: List[Dict], error_text: str) -> List[str]:
-    """Repair OpenAI-style history in-place.
-
-    OpenAI-compatible providers require every assistant message with tool_calls
-    to be followed immediately by tool messages for each tool_call_id. Appending
-    synthetic tool responses to the end is still invalid if a user/system message
-    already sits between the assistant tool_calls and the tool response, so the
-    repair inserts missing tool messages at the exact required position.
-    """
-    repaired_ids: List[str] = []
-    idx = 0
-    while idx < len(convo):
-        item = convo[idx]
-        if item.get("role") != "assistant" or not item.get("tool_calls"):
-            if item.get("role") == "tool":
-                # Orphan tool messages are invalid in OpenAI-compatible payloads.
-                # They can appear after an older failed repair appended a tool
-                # response behind a user notice. Drop them from the outgoing
-                # in-memory request; persisted user/assistant history is untouched.
-                convo.pop(idx)
-                continue
-            idx += 1
-            continue
-
-        tool_calls = item.get("tool_calls") or []
-        expected_ids = [
-            str(call.get("id") or "").strip()
-            for call in tool_calls
-            if isinstance(call, dict) and str(call.get("id") or "").strip()
-        ]
-        if not expected_ids:
-            idx += 1
-            continue
-
-        seen_ids = set()
-        insert_at = idx + 1
-        while insert_at < len(convo) and convo[insert_at].get("role") == "tool":
-            tool_call_id = str(convo[insert_at].get("tool_call_id") or "").strip()
-            if tool_call_id in expected_ids and tool_call_id not in seen_ids:
-                seen_ids.add(tool_call_id)
-                insert_at += 1
-                continue
-            convo.pop(insert_at)
-
-        missing_ids = [tool_call_id for tool_call_id in expected_ids if tool_call_id not in seen_ids]
-        for offset, tool_call_id in enumerate(missing_ids):
-            convo.insert(insert_at + offset, {
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": _safe_json({
-                    "success": False,
-                    "error": error_text,
-                    "recovered": True,
-                }),
-            })
-        repaired_ids.extend(missing_ids)
-        idx = insert_at + len(missing_ids)
-    return repaired_ids
 
 
 def _mcp_tool_device_identity(
@@ -882,7 +823,7 @@ def _run_worker_impl(request: WorkerRequest):
                     pending_ai_reply_message_id,
                 )
 
-                _append_missing_tool_responses(
+                model_error_flow.repair_missing_tool_responses(
                     convo,
                     "Synthetic tool result inserted before request because the previous tool call did not receive a tool response.",
                 )
@@ -928,101 +869,33 @@ def _run_worker_impl(request: WorkerRequest):
                     ))
                     consecutive_ai_errors = 0
                 except Exception as ai_exc:
-                    consecutive_ai_errors += 1
                     error_text = _extract_mcp_error(ai_exc)
                     _ai_debug_stage(
                         "ERR",
                         f"{_ai_short_run_id(run_id)} #{step_label} "
-                        f"x{consecutive_ai_errors} {_ai_short(error_text, 140)}",
+                        f"x{consecutive_ai_errors + 1} {_ai_short(error_text, 140)}",
                         "31",
                     )
-                    repaired_ids = _append_missing_tool_responses(convo, error_text)
-                    if repaired_ids:
-                        consecutive_ai_errors = 0
-                        _save_message(
-                            bg,
-                            user_id,
-                            ChatMessageCreate(
-                                role="system",
-                                content="\n".join([
-                                    "[AI 对话上下文已修复]",
-                                    "已补齐缺失的 tool 响应，避免上游接口因 tool_calls 上下文不完整而拒绝请求。",
-                                    f"补齐 tool_call_id: {', '.join(repaired_ids)}",
-                                ]),
-                                tags="system_notice_ai_context_repaired",
-                                ai_config_id=ai_config_id,
-                                ai_kind=ai_kind,
-                                session_id=session_id,
-                                session_name=session_name,
-                                model=model,
-                                total_tokens=0,
-                            ),
-                        )
-                        _set_run_live_phase(run_id, "generating")
-                        continue
-                    if _is_image_input_unsupported_error(error_text):
-                        removed_images = _degrade_image_messages_to_text(convo)
-                        if removed_images:
-                            image_input_disabled = True
-                            consecutive_ai_errors = 0
-                            convo.append({
-                                "role": "user",
-                                "content": _image_input_degraded_feedback(error_text, removed_images),
-                            })
-                            notice = "\n".join([
-                                "[AI 对话出错]",
-                                error_text,
-                                "",
-                                f"检测到当前模型不支持图片输入；系统已移除 {removed_images} 张图片。",
-                                "该错误已作为运行时消息发送给 AI，对话将继续执行。",
-                            ])
-                            _save_message(
-                                bg,
-                                user_id,
-                                ChatMessageCreate(
-                                    role="system",
-                                    content=notice,
-                                    tags="system_notice_ai_error",
-                                    ai_config_id=ai_config_id,
-                                    ai_kind=ai_kind,
-                                    session_id=session_id,
-                                    session_name=session_name,
-                                    model=model,
-                                    total_tokens=0,
-                                ),
-                            )
-                            _set_run_live_phase(run_id, "generating")
-                            continue
-                    notice_lines = [
-                        "[AI 对话出错]",
-                        error_text,
-                        "",
-                        f"连续错误次数: {consecutive_ai_errors}/3",
-                    ]
-                    if consecutive_ai_errors < 3:
-                        notice_lines.extend([
-                            "",
-                            "系统将重试上游请求；该错误不会作为 user 消息发送给 AI。",
-                        ])
-                    notice = "\n".join(notice_lines)
-                    _save_message(
-                        bg,
-                        user_id,
-                        ChatMessageCreate(
-                            role="system",
-                            content=notice,
-                            tags="system_notice_ai_error",
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
+                    error_decision = model_error_flow.handle_model_error(
+                        model_error_flow.ModelErrorContext(
+                            session=bg, conversation=convo, user_id=user_id,
+                            ai_config_id=ai_config_id, ai_kind=ai_kind,
+                            session_id=session_id, session_name=session_name,
                             model=model,
-                            total_tokens=0,
+                            set_generating=lambda: _set_run_live_phase(
+                                run_id, "generating"
+                            ),
+                            set_run_error=lambda error: _run_set_status(
+                                run_id, "error", error, finished=True
+                            ),
                         ),
+                        error_text,
+                        consecutive_ai_errors,
+                        image_input_disabled,
                     )
-                    _set_run_live_phase(run_id, "generating")
-                    if consecutive_ai_errors >= 3:
-                        _run_set_status(run_id, "error", f"AI request failed 3 times consecutively: {error_text}", finished=True)
+                    consecutive_ai_errors = error_decision.consecutive_errors
+                    image_input_disabled = error_decision.image_input_disabled
+                    if error_decision.stop_run:
                         return
                     continue
 
