@@ -18,8 +18,8 @@ from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, ChatMessage, ChatMessageCreate, User
 from api.services.chat import chat_inject, mcp_session_context
 from api.services.tasks import task_plan as plan_service
-from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import compression_flow
+from ai_runtime.inference import final_response_flow
 from ai_runtime.inference import model_error_flow
 from ai_runtime.inference import model_gateway
 from ai_runtime.inference import phase_context
@@ -88,7 +88,6 @@ from api.services.tasks.task_system import (
 from api.chat_runtime.chat_prompt_utils import (
     _append_mcp_state_to_tags,
     _append_prompt_section,
-    _build_mcp_stream_warning,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
     _set_run_live_meta,
@@ -104,7 +103,6 @@ from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
     _load_task_job_by_session,
     _load_task_payload_by_session,
-    _renew_loop_scheduled_job,
     _parse_allowed_tools,
     _resolve_ai_runtime,
     _run_set_status,
@@ -1014,126 +1012,34 @@ def _run_worker_impl(request: WorkerRequest):
                     continue
 
                 if not turn_calls:
-                    # Only check for text-format MCP warnings when not using native tool_calls.
-                    if not _has_native_tc:
-                        warning = _build_mcp_stream_warning(
-                            assistant_text,
-                            cfg,
-                            mcp_warning_template,
-                            markup_fallback=markup_fallback_available,
-                        )
-                        if warning:
-                            markup_fallback_available = False
-                            _save_message(
-                                bg,
-                                user_id,
-                                ChatMessageCreate(
-                                    role="user",
-                                    content=warning,
-                                    tags="system_notice_mcp_format_invalid",
-                                    ai_config_id=ai_config_id,
-                                    ai_kind=ai_kind,
-                                    session_id=session_id,
-                                    session_name=session_name,
-                                    model=model,
-                                    total_tokens=0,
-                                ),
-                            )
-                            convo.append({"role": "user", "content": warning})
-                            continue
-                    # 收尾前最后一次排空：用户可能正是在 AI 输出这段最终回答时
-                    # 插入了新消息。此时不要结束本轮，直接把消息接上继续处理，
-                    # 兑现"一个深度思考/一次工具调用后就插入"的即时性。
-                    try:
-                        _final_injects = chat_inject.pop_pending_injects(
-                            user_id, ai_config_id, ai_kind, session_id
-                        )
-                    except Exception:
-                        _final_injects = []
-                        logger.exception("final pending user-inject drain failed")
-                    if _final_injects:
-                        for _inject_text in _final_injects:
-                            convo.append({"role": "user", "content": _inject_text})
-                        _set_run_live_phase(run_id, "generating")
+                    final_response = final_response_flow.handle_final_response(
+                        final_response_flow.FinalResponseContext(
+                            session=bg, conversation=convo, saved_message=saved,
+                            user_id=user_id, ai_config_id=ai_config_id,
+                            ai_kind=ai_kind, session_id=session_id,
+                            session_name=session_name, model=model, config=cfg,
+                            warning_template=mcp_warning_template,
+                            assistant_text=assistant_text,
+                            native_tool_calls=_has_native_tc,
+                            phase_started_at=phase_started_at,
+                            set_live_phase=lambda phase: _set_run_live_phase(run_id, phase),
+                            auto_finalize_plan=_auto_finalize_plan,
+                            notify_task_completion=_notify_task_completion,
+                        ),
+                        final_response_flow.FinalResponseState(
+                            markup_fallback_available=markup_fallback_available,
+                            pending_ai_reply_message_id=pending_ai_reply_message_id,
+                            plan_state=plan_state,
+                            awaiting_finish=flow_awaiting_finish,
+                            task_job=task_job,
+                        ),
+                    )
+                    markup_fallback_available = final_response.state.markup_fallback_available
+                    pending_ai_reply_message_id = final_response.state.pending_ai_reply_message_id
+                    plan_state = final_response.state.plan_state
+                    flow_awaiting_finish = final_response.state.awaiting_finish
+                    if final_response.action is final_response_flow.FinalResponseAction.NEXT_TURN:
                         continue
-                    if pending_ai_reply_message_id and assistant_text.strip() and ai_config_id is not None:
-                        try:
-                            _auto_reply = ai_message_service.complete_inbound_with_assistant_reply(
-                                message_id=pending_ai_reply_message_id,
-                                user_id=user_id,
-                                replier_ai_config_id=int(ai_config_id),
-                                content=assistant_text,
-                            )
-                            if _auto_reply and _auto_reply.get("auto_completed"):
-                                saved.tags = _append_mcp_state_to_tags(
-                                    saved.tags,
-                                    "ai.auto_reply",
-                                    {"message_id": pending_ai_reply_message_id},
-                                    "assistant final text delivered as AI message reply",
-                                )
-                                bg.add(saved)
-                                bg.commit()
-                        except Exception:
-                            logger.exception("auto AI message reply failed")
-                        finally:
-                            pending_ai_reply_message_id = ""
-                    # A model-side natural stop must not terminate an unfinished
-                    # todo. Refresh from DB in case another process changed the
-                    # plan, then invoke the model again without appending any
-                    # user/system nudge to the conversation.
-                    if ai_config_id is not None:
-                        try:
-                            plan_state = plan_service.get_active_plan(
-                                bg, user_id, int(ai_config_id), session_id
-                            )
-                            flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
-                        except Exception:
-                            logger.exception("plan reload after natural model stop failed")
-                    if _has_active_todo_plan(plan_state):
-                        if flow_awaiting_finish:
-                            _auto_finalize_plan(phase_started_at)
-                            _set_run_live_phase(run_id, "idle")
-                            _run_set_status(run_id, "completed", finished=True)
-                            return
-                        _set_run_live_phase(run_id, "generating")
-                        continue
-                    # Auto-finalize simple (non-plan) task jobs when the run ends naturally.
-                    # If a todo plan exists, the AI must keep working until its current
-                    # phase is updated through todo.manage(action=edit).
-                    # (enforced by flow_awaiting_finish + _flow_allowed_tool).
-                    if task_job is not None and str(getattr(task_job, "status", "") or "").strip() not in {"completed", "cancelled", "stopped", "error"}:
-                        try:
-                            active_plan = None
-                            if ai_config_id is not None:
-                                active_plan = plan_service.get_active_plan(bg, user_id, int(ai_config_id), session_id)
-                            if active_plan is None:
-                                finished_at = time.time()
-                                try:
-                                    _notify_task_completion(
-                                        user_id=user_id,
-                                        job_id=str(task_job.job_id or ""),
-                                        summary="任务执行完成（简单任务，无计划流程）。",
-                                    )
-                                except Exception:
-                                    logger.exception("auto simple task completion notify failed")
-                                # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
-                                # 未续期（非循环 / 循环已结束）才真正标记完成。
-                                _renewed_loop_job = None
-                                try:
-                                    _renewed_loop_job = _renew_loop_scheduled_job(bg, task_job, finished_at)
-                                except Exception:
-                                    logger.exception("auto simple task loop schedule failed")
-                                if _renewed_loop_job is None:
-                                    task_job.status = "completed"
-                                    task_job.finished_at = finished_at
-                                    task_job.updated_at = finished_at
-                                    bg.add(task_job)
-                                try:
-                                    bg.commit()
-                                except Exception:
-                                    pass
-                        except Exception:
-                            logger.exception("auto finalize simple task job failed")
                     _run_set_status(run_id, "completed", finished=True)
                     return
 
