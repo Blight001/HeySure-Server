@@ -1,7 +1,6 @@
 IS_ROUTER_ENTRY = False
 
 import asyncio
-import base64
 import json
 import logging
 import time
@@ -20,10 +19,10 @@ from mcp_runtime.mcp import get_project_root
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
 from api.services.chat import chat_inject, conversation_compress, mcp_session_context
-from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
+from ai_runtime.inference import tool_media
 from ai_runtime.inference.communication_prompt import (
     AIMessagePrompt,
     normalize_ai_message_type as _normalize_ai_message_type,
@@ -92,7 +91,6 @@ from api.chat_runtime.chat_prompt_utils import (
     _build_mcp_stream_warning,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
-    _sanitize_large_media,
     _safe_json,
     _set_run_live_meta,
     _set_run_live_phase,
@@ -482,210 +480,36 @@ def _reset_convo_after_clear(
     convo.append({"role": "user", "content": follow_up})
 
 
-_IMAGE_DATA_URL_KEYS = ("dataUrl", "data_url", "imageDataUrl", "screenshotDataUrl", "screenshot")
-_IMAGE_URL_KEYS = ("image_url", "public_url")
-_IMAGE_PATH_KEYS = ("server_path", "path")
 def _is_image_input_unsupported_error(error_text: str) -> bool:
-    text = str(error_text or "").lower()
-    image_markers = (
-        "image_url",
-        "image input",
-        "image content",
-        "images are",
-        "multimodal",
-        "vision input",
-    )
-    incompatibility_markers = (
-        "unknown variant",
-        "expected text",
-        "not support",
-        "unsupported",
-        "only supports text",
-        "text-only",
-        "invalid content type",
-        "failed to deserialize",
-    )
-    return any(marker in text for marker in image_markers) and any(
-        marker in text for marker in incompatibility_markers
-    )
+    return tool_media.is_image_input_unsupported_error(error_text)
 
 
 def _degrade_image_messages_to_text(convo: List[Dict]) -> int:
-    removed = 0
-    for message in convo:
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        kept = []
-        message_removed = 0
-        for block in content:
-            block_type = str(block.get("type") or "").lower() if isinstance(block, dict) else ""
-            if block_type in {"image", "image_url"}:
-                removed += 1
-                message_removed += 1
-                continue
-            kept.append(block)
-        if message_removed:
-            kept.append({
-                "type": "text",
-                "text": f"[系统已省略 {message_removed} 张图片：当前模型不支持图片输入。]",
-            })
-            message["content"] = kept
-    return removed
+    return tool_media.degrade_image_messages_to_text(convo)
 
 
 def _prune_prior_runtime_screenshot_images(convo: List[Dict]) -> int:
-    """Keep only the latest runtime screenshot image in model context.
-
-    Chat bubbles still persist each screenshot for the user. This only removes
-    older screenshot image blocks from the live model conversation so repeated
-    screen/browser captures do not keep charging vision input over and over.
-    """
-    removed = 0
-    screenshot_markers = (
-        "工具截图已捕获",
-        "鼠标点击前确认图已捕获",
-    )
-    for message in convo:
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        text = "\n".join(
-            str(block.get("text") or "")
-            for block in content
-            if isinstance(block, dict) and str(block.get("type") or "").lower() == "text"
-        )
-        if not any(marker in text for marker in screenshot_markers):
-            continue
-        kept = []
-        message_removed = 0
-        for block in content:
-            block_type = str(block.get("type") or "").lower() if isinstance(block, dict) else ""
-            if block_type in {"image", "image_url"}:
-                removed += 1
-                message_removed += 1
-                continue
-            kept.append(block)
-        if message_removed:
-            kept.append({
-                "type": "text",
-                "text": f"[系统已省略 {message_removed} 张较早截图：模型上下文只保留最新截图。]",
-            })
-            message["content"] = kept
-    return removed
+    return tool_media.prune_prior_runtime_screenshot_images(convo)
 
 
 def _image_input_degraded_feedback(error_text: str, removed_images: int) -> str:
-    return "\n".join([
-        "[运行时图片输入错误]",
-        f"上游模型拒绝了图片输入，系统已从模型上下文中移除 {removed_images} 张图片。",
-        "你无法查看这些图片。请基于已有文字、工具返回的非图片信息继续执行；",
-        "如果任务必须依赖视觉内容，请明确说明该限制或改用不需要视觉输入的工具，不要假装已经看过图片。",
-        "",
-        "[上游错误]",
-        str(error_text or "").strip(),
-    ])
+    return tool_media.image_input_degraded_feedback(error_text, removed_images)
 
 
 def _find_image_payload(value: object, depth: int = 0) -> Dict[str, str]:
-    if depth > 5:
-        return {}
-    if isinstance(value, str):
-        text = value.strip()
-        if text.startswith("data:image/"):
-            return {"data_url": text}
-        return {}
-    if isinstance(value, dict):
-        for key in _IMAGE_DATA_URL_KEYS:
-            item = value.get(key)
-            if isinstance(item, str) and item.strip().startswith("data:image/"):
-                return {"data_url": item.strip()}
-        for key in _IMAGE_URL_KEYS:
-            item = value.get(key)
-            if isinstance(item, str) and item.strip().startswith(("http://", "https://")):
-                return {"url": item.strip()}
-        for key in _IMAGE_PATH_KEYS:
-            item = value.get(key)
-            if isinstance(item, str) and item.strip():
-                return {"path": item.strip()}
-        for key in ("result", "payload", "data", "screenshot_result"):
-            found = _find_image_payload(value.get(key), depth + 1)
-            if found:
-                return found
-        for item in value.values():
-            if isinstance(item, (dict, list)):
-                found = _find_image_payload(item, depth + 1)
-                if found:
-                    return found
-    if isinstance(value, list):
-        for item in value:
-            found = _find_image_payload(item, depth + 1)
-            if found:
-                return found
-    return {}
+    return tool_media.find_image_payload(value, depth)
 
 
 def _image_path_to_data_url(path: str) -> str:
-    server_path = str(path or "").strip()
-    if not server_path or not os.path.isfile(server_path):
-        return ""
-    ext = os.path.splitext(server_path)[1].lower().lstrip(".")
-    media_type = {
-        "jpg": "image/jpeg",
-        "jpeg": "image/jpeg",
-        "png": "image/png",
-        "webp": "image/webp",
-    }.get(ext, "image/png")
-    try:
-        with open(server_path, "rb") as fh:
-            return f"data:{media_type};base64,{base64.b64encode(fh.read()).decode('ascii')}"
-    except Exception:
-        return ""
+    return tool_media.image_path_to_data_url(path)
 
 
 def _omit_image_fields(value: object) -> object:
-    omitted = {*_IMAGE_DATA_URL_KEYS, "server_path", "workspace_path"}
-    if isinstance(value, dict):
-        return {
-            key: _omit_image_fields(item)
-            for key, item in value.items()
-            if key not in omitted
-        }
-    if isinstance(value, list):
-        return [_omit_image_fields(item) for item in value]
-    return value
+    return tool_media.omit_image_fields(value)
 
 
 def _tool_image_message(tool: str, tool_result: Dict[str, object]) -> Optional[Dict[str, object]]:
-    if not canonical_screenshot_tool_name(tool, include_mouse_click=True) or not isinstance(tool_result, dict):
-        return None
-    result_payload = tool_result.get("result", tool_result)
-    image_payload = _find_image_payload(tool_result)
-    public_image_url = image_payload.get("url", "")
-    data_url = image_payload.get("data_url", "")
-    if not data_url.startswith("data:image/"):
-        data_url = _image_path_to_data_url(image_payload.get("path", ""))
-    if not data_url.startswith("data:image/"):
-        if not public_image_url.startswith(("http://", "https://")):
-            return None
-    meta_payload = result_payload if isinstance(result_payload, dict) else {}
-    # 7×24 全自动项目：mouse.click 的两段式"红点确认图 + confirmed:true"流程已移除，
-    # 所有截图类工具结果统一按普通截图处理，点击一次到位。
-    detail = "\n".join(
-        part for part in [
-            "工具截图已捕获。你已经收到这张图片，请直接查看视觉内容并继续，不要让用户打开本地路径。",
-            f"URL: {meta_payload.get('url') or ''}".strip(),
-            f"Method: {meta_payload.get('method') or ''}".strip(),
-        ]
-        if part and not part.endswith(":")
-    )
-    return {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": detail},
-            {"type": "image_url", "image_url": {"url": public_image_url or data_url}},
-        ],
-    }
+    return tool_media.tool_image_message(tool, tool_result)
 
 
 def _browser_screenshot_image_message(tool: str, tool_result: Dict[str, object]) -> Optional[Dict[str, object]]:
@@ -693,66 +517,15 @@ def _browser_screenshot_image_message(tool: str, tool_result: Dict[str, object])
 
 
 def _screenshot_display_ref(tool: str, tool_result: Dict[str, object]) -> Dict[str, str]:
-    """Return image data for screenshot chat rendering.
-
-    Screenshot MCP tools hand back the captured image as a public URL, a
-    base64 data URL, or a server path. Data URLs/server paths are persisted
-    against the eventual ChatMessage row, so deleting or recalling that message
-    removes the screenshot bytes from the database as well.
-    """
-    if not canonical_screenshot_tool_name(tool, include_mouse_click=True) or not isinstance(tool_result, dict):
-        return {}
-    payload = _find_image_payload(tool_result)
-    url = payload.get("url", "")
-    if url.startswith(("http://", "https://")):
-        return {"url": url}
-    data_url = payload.get("data_url", "")
-    if not data_url.startswith("data:image/"):
-        data_url = _image_path_to_data_url(payload.get("path", ""))
-    if not data_url.startswith("data:image/"):
-        return {}
-    return {"data_url": data_url}
+    return tool_media.screenshot_display_ref(tool, tool_result)
 
 
 def _find_screenshot_result_payload(value: object, depth: int = 0) -> Dict[str, object]:
-    if depth > 5:
-        return {}
-    if isinstance(value, dict):
-        if any(key in value for key in ("send_to_user", "bot_send_to_user", "deliver_to_user", "save_to_server", "server_path")):
-            return value
-        for key in ("result", "payload", "data", "screenshot_result"):
-            found = _find_screenshot_result_payload(value.get(key), depth + 1)
-            if found:
-                return found
-        for item in value.values():
-            if isinstance(item, (dict, list)):
-                found = _find_screenshot_result_payload(item, depth + 1)
-                if found:
-                    return found
-    if isinstance(value, list):
-        for item in value:
-            found = _find_screenshot_result_payload(item, depth + 1)
-            if found:
-                return found
-    return {}
+    return tool_media.find_screenshot_result_payload(value, depth)
 
 
 def _screenshot_send_to_user_enabled(tool: str, tool_result: Dict[str, object], args: Optional[dict] = None) -> bool:
-    tool_kind = canonical_screenshot_tool_name(tool)
-    if not tool_kind:
-        return False
-    if isinstance(args, dict) and any(
-        key in args and args.get(key) is False
-        for key in ("send_to_user", "bot_send_to_user", "deliver_to_user")
-    ):
-        return False
-    payload = _find_screenshot_result_payload(tool_result)
-    return (
-        payload.get("send_to_user") is True
-        or payload.get("bot_send_to_user") is True
-        or payload.get("deliver_to_user") is True
-        or bool(tool_kind)
-    )
+    return tool_media.screenshot_send_to_user_enabled(tool, tool_result, args)
 
 
 def _bot_target_from_route(route: object) -> Dict[str, object]:
@@ -838,21 +611,11 @@ def _model_visible_tool_result(
     *,
     image_attached: bool = True,
 ) -> object:
-    result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else tool_result
-    if not canonical_screenshot_tool_name(tool, include_mouse_click=True) or not isinstance(result_payload, dict):
-        return result_payload
-    cleaned = _omit_image_fields(_sanitize_large_media(result_payload))
-    if not isinstance(cleaned, dict):
-        cleaned = {}
-    cleaned["screenshot_attached_to_model"] = image_attached
-    if not image_attached:
-        cleaned["instruction"] = (
-            "The screenshot could not be attached because the current model does not support image input. "
-            "Continue from non-image tool data, use a non-visual tool, or explain the limitation."
-        )
-        return cleaned
-    cleaned["instruction"] = "The screenshot image is attached in a following user message. Analyze the image directly; do not ask the user to open a local path."
-    return cleaned
+    return tool_media.model_visible_tool_result(
+        tool,
+        tool_result,
+        image_attached=image_attached,
+    )
 
 
 def _append_mcp_disabled_feedback(

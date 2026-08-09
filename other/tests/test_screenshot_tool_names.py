@@ -1,6 +1,6 @@
-from ai_runtime.inference.core import (
-    _browser_screenshot_image_message,
-    _model_visible_tool_result,
+from ai_runtime.inference.tool_media import (
+    model_visible_tool_result,
+    tool_image_message,
 )
 from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
 from connector_runtime.dispatch.device_dispatch import (
@@ -28,8 +28,8 @@ def test_namespaced_ai_free_screenshot_is_attached_as_model_image():
         },
     }
 
-    message = _browser_screenshot_image_message(AI_FREE_SCREENSHOT, tool_result)
-    visible_result = _model_visible_tool_result(
+    message = tool_image_message(AI_FREE_SCREENSHOT, tool_result)
+    visible_result = model_visible_tool_result(
         AI_FREE_SCREENSHOT,
         tool_result,
         image_attached=True,
@@ -39,6 +39,21 @@ def test_namespaced_ai_free_screenshot_is_attached_as_model_image():
     assert message["content"][1]["image_url"]["url"] == DATA_URL
     assert "dataUrl" not in visible_result
     assert visible_result["screenshot_attached_to_model"] is True
+
+
+def test_server_path_screenshot_is_encoded_for_model(tmp_path):
+    screenshot = tmp_path / "capture.png"
+    screenshot.write_bytes(b"PNG")
+
+    message = tool_image_message(
+        AI_FREE_SCREENSHOT,
+        {"result": {"success": True, "server_path": str(screenshot)}},
+    )
+
+    assert message is not None
+    assert message["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
 
 
 def test_namespaced_ai_free_screenshot_honors_send_to_user_delivery():

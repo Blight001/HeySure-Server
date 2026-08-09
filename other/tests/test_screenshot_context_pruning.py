@@ -1,4 +1,4 @@
-from ai_runtime.inference.core import _prune_prior_runtime_screenshot_images
+from ai_runtime.inference.tool_media import prune_prior_runtime_screenshot_images
 
 
 def test_prune_prior_runtime_screenshot_images_only_removes_screenshot_blocks():
@@ -19,7 +19,7 @@ def test_prune_prior_runtime_screenshot_images_only_removes_screenshot_blocks():
         },
     ]
 
-    removed = _prune_prior_runtime_screenshot_images(convo)
+    removed = prune_prior_runtime_screenshot_images(convo)
 
     assert removed == 1
     assert all(block.get("type") != "image_url" for block in convo[0]["content"])
