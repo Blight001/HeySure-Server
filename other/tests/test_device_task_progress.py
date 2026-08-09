@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from connector_runtime.dispatch.device_dispatch import handle_task_progress
+from connector_runtime.dispatch import dispatch_results
 
 
 class DeviceTaskProgressTests(unittest.IsolatedAsyncioTestCase):
@@ -17,15 +17,18 @@ class DeviceTaskProgressTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch(
-                "connector_runtime.dispatch.device_dispatch._resolve_result_context",
+                "connector_runtime.dispatch.dispatch_results._resolve_result_context",
                 return_value=context,
             ),
             patch(
-                "connector_runtime.dispatch.device_dispatch._emit_to_user",
+                "connector_runtime.dispatch.dispatch_results._emit_to_user",
                 new=AsyncMock(),
             ) as emit,
+            patch(
+                "connector_runtime.dispatch.dispatch_results._renew_progress_lease",
+            ),
         ):
-            await handle_task_progress({
+            await dispatch_results.handle_task_progress({
                 "taskId": "task_9",
                 "progress": 0,
                 "message": "开始执行",

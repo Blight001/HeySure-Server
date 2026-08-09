@@ -3,8 +3,8 @@ from ai_runtime.inference.tool_media import (
     tool_image_message,
 )
 from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
-from connector_runtime.dispatch.device_dispatch import (
-    _normalize_screenshot_result_for_delivery,
+from connector_runtime.dispatch.result_payloads import (
+    normalize_screenshot_result_for_delivery as _normalize_screenshot_result_for_delivery,
 )
 
 

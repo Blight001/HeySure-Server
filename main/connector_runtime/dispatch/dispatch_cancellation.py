@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from api.models import AgentDispatchTask
 from api.sio import sio
-from connector_runtime.dispatch import repository
+from connector_runtime.dispatch import dispatch_results, repository
 
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ async def expire_dispatch(task_id: str, reason: str = "result wait timed out") -
 async def cancel_dispatch(task_id: str, reason: str = "cancelled by user") -> bool:
     dispatch = _dispatch_module()
     ctx = dispatch._PENDING_DISPATCHES.pop(task_id, None)
-    ctx = ctx or dispatch._resolve_result_context({"taskId": task_id})
+    ctx = ctx or dispatch_results._resolve_result_context({"taskId": task_id})
     device_id = str(ctx.get("device_id") or "")
     cancelled = repository.finalize_dispatch_row(
         task_id, status="cancelled", success=False, error=reason
@@ -52,7 +52,7 @@ async def cancel_dispatch(task_id: str, reason: str = "cancelled by user") -> bo
             {"taskId": task_id, "reason": reason},
             to=target_sid,
         )
-    await dispatch._emit_to_user(ctx, "device:task_cancelled", {
+    await dispatch_results._emit_to_user(ctx, "device:task_cancelled", {
         "taskId": task_id,
         "deviceId": device_id,
         "sessionId": ctx.get("session_id"),
