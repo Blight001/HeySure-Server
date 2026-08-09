@@ -24,10 +24,8 @@ from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
 from ai_runtime.inference import step_preparation
 from ai_runtime.inference import tool_media
-from ai_runtime.inference import tool_metadata
-from ai_runtime.inference import tool_persistence
-from ai_runtime.inference import tool_rejections
 from ai_runtime.inference import tool_batch_flow
+from ai_runtime.inference import turn_call_flow
 from ai_runtime.inference import turn_result
 from ai_runtime.inference import worker_lifecycle
 from ai_runtime.inference import worker_setup
@@ -51,24 +49,15 @@ from ai_runtime.inference.plan_flow import (
     send_task_completion_notification as _notify_task_completion,
 )
 from ai_runtime.inference.tool_resolution import (
-    ToolResponseContext,
     TurnCallAction,
-    append_joined_tool_response as _append_joined_tool_response,
-    append_ordinary_tool_response as _append_ordinary_tool_response,
     append_pending_call_responses as _answer_pending_calls,
     flush_screenshot_messages as _flush_screenshot_messages,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
-    split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
 )
 from ai_runtime.inference.run_request import WorkerRequest, start_worker_run
-from ai_runtime.inference.tool_execution import (
-    JoinedToolRequest,
-    execute_tool_call as _execute_tool_call,
-)
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
 from api.chat_runtime.chat_prompt_utils import (
-    _append_mcp_state_to_tags,
     _append_prompt_section,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
@@ -86,12 +75,8 @@ from api.chat_runtime.chat_runtime_helpers import (
 )
 
 
-_record_mcp_call = tool_persistence.record_tool_call
 _duplicate_call_flags = tool_batch_flow.duplicate_call_flags
-_mcp_tool_device_identity = tool_persistence.tool_device_identity
-_build_mcp_tool_bubble_content = tool_persistence.build_tool_bubble_content
-_save_mcp_tool_bubble = tool_persistence.save_tool_bubble
-_extract_screenshot_bubble_url = tool_persistence.extract_screenshot_bubble_url
+_raise_for_upstream_error = model_gateway.raise_for_upstream_error
 _is_image_input_unsupported_error = tool_media.is_image_input_unsupported_error
 _degrade_image_messages_to_text = tool_media.degrade_image_messages_to_text
 _prune_prior_runtime_screenshot_images = tool_media.prune_prior_runtime_screenshot_images
@@ -101,11 +86,8 @@ _image_path_to_data_url = tool_media.image_path_to_data_url
 _omit_image_fields = tool_media.omit_image_fields
 _tool_image_message = tool_media.tool_image_message
 _browser_screenshot_image_message = tool_media.tool_image_message
-_screenshot_display_ref = tool_media.screenshot_display_ref
 _find_screenshot_result_payload = tool_media.find_screenshot_result_payload
 _screenshot_send_to_user_enabled = tool_media.screenshot_send_to_user_enabled
-_bot_target_from_route = tool_persistence._bot_target_from_route
-_deliver_screenshot_to_bot = tool_persistence._send_screenshot_to_bot
 _model_visible_tool_result = tool_media.model_visible_tool_result
 
 
@@ -292,217 +274,6 @@ def _run_worker_impl(request: WorkerRequest):
                 if flow_awaiting_finish:
                     return name == "todo.manage"
                 return True
-
-            def _execute_turn_call(
-                call: Dict[str, Any],
-                pending: List[Dict[str, Any]],
-            ) -> TurnCallAction:
-                """Run one tool call from the current turn's batch.
-
-                Returns an explicit ``TurnCallAction`` transition for the batch
-                driver. Control-flow tools never rely on free-form strings.
-
-                Control-flow tools (context clear/compress, plan create/edit/
-                delete) rebuild or truncate ``convo``, so they end the batch;
-                ``pending`` is answered first so no tool_call_id is orphaned.
-                """
-                nonlocal session_name, last_rejected_tool_sig, rejected_repeat
-                nonlocal plan_state, flow_awaiting_finish
-                nonlocal phase_start_convo_index, phase_started_at, phase_mcp_statuses
-
-                tool = str(call.get("tool") or "")
-                arguments = call.get("arguments") or {}
-                call_id = str(call.get("id") or "call_0")
-
-                if _run_should_stop(run_id):
-                    _run_set_status(run_id, "stopped", finished=True)
-                    return TurnCallAction.STOP_RUN
-
-                rejection_context = tool_rejections.RejectionContext(
-                    session=bg, conversation=convo, pending=pending,
-                    saved_message=saved, user_id=user_id,
-                    ai_config_id=ai_config_id, ai_kind=ai_kind,
-                    session_id=session_id, session_name=session_name,
-                    model=model, run_id=run_id, native_tool_calls=_has_native_tc,
-                    set_live_phase=lambda phase: _set_run_live_phase(run_id, phase),
-                    set_run_error=lambda error: _run_set_status(
-                        run_id, "error", error, finished=True
-                    ),
-                )
-
-                if cfg and not cfg.mcp_enabled:
-                    rejection = tool_rejections.handle_mcp_disabled(
-                        rejection_context, tool, arguments, call_id,
-                        last_rejected_tool_sig, rejected_repeat,
-                    )
-                    last_rejected_tool_sig = rejection.signature
-                    rejected_repeat = rejection.count
-                    return rejection.action
-
-                # Legacy compat: some text-protocol models glue several tool
-                # names into one. Split and run them under this single call id.
-                joined_native_tools = _split_concatenated_native_tool_name(tool, native_tool_name_map)
-                if joined_native_tools:
-                    joined_mcp_tools = [native_tool_name_map.get(item, item) for item in joined_native_tools]
-                    joined_outcome = tool_persistence.execute_and_persist_joined_batch(
-                        JoinedToolRequest(
-                            tools=tuple(joined_mcp_tools),
-                            arguments=arguments,
-                            allowed_tools=frozenset(effective_tool_allowlist),
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                        ),
-                        tool_persistence.JoinedPersistenceContext(
-                            session=bg, saved_message=saved,
-                            user_id=user_id, ai_config_id=ai_config_id,
-                            ai_kind=ai_kind, session_id=session_id,
-                            session_name=session_name, model=model, run_id=run_id,
-                            plan_active=plan_state is not None,
-                            phase_mcp_statuses=phase_mcp_statuses,
-                            should_stop=lambda: _run_should_stop(run_id),
-                            mark_waiting=lambda name: _set_run_live_phase(
-                                run_id,
-                                "waiting_mcp",
-                                name,
-                            ),
-                        ),
-                    )
-                    if joined_outcome.stopped:
-                        _run_set_status(run_id, "stopped", finished=True)
-                        return TurnCallAction.STOP_RUN
-                    _append_joined_tool_response(
-                        convo,
-                        tool,
-                        joined_outcome.items,
-                        joined_outcome.failed,
-                        call_id,
-                        native=_has_native_tc,
-                    )
-                    return TurnCallAction.NEXT_CALL
-
-                if tool not in effective_tool_allowlist:
-                    rejection = tool_rejections.handle_disallowed_tool(
-                        rejection_context, tool, arguments, call_id,
-                        effective_tool_allowlist,
-                        last_rejected_tool_sig, rejected_repeat,
-                    )
-                    last_rejected_tool_sig = rejection.signature
-                    rejected_repeat = rejection.count
-                    return rejection.action
-
-                _set_run_live_phase(run_id, "waiting_mcp", tool)
-                execution = _execute_tool_call(
-                    tool,
-                    user_id,
-                    arguments,
-                    ai_config_id,
-                )
-                tool_result = execution.result
-                tool_failed = execution.failed
-                tool_error = execution.error
-                result_text = execution.display_text
-                _record_mcp_call(tool_persistence.ToolCallRecord(
-                    tool=tool, user_id=user_id, ai_config_id=ai_config_id,
-                    session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
-                    failed=tool_failed, error=tool_error,
-                ))
-                if plan_state is not None:
-                    phase_context.record_status(phase_mcp_statuses, tool, tool_failed)
-                renamed_session = tool_metadata.apply_tool_metadata(
-                    tool_metadata.ToolMetadataContext(
-                        session=bg, user_id=user_id, ai_config_id=ai_config_id,
-                        ai_kind=ai_kind, session_id=session_id,
-                        session_name=session_name,
-                        allowed_tools=frozenset(effective_tool_allowlist),
-                        exposed_tools=exposed_tool_allowlist,
-                    ),
-                    tool, tool_result, tool_failed,
-                )
-                session_name = tool_metadata.apply_session_rename(
-                    saved, session_name, renamed_session
-                )
-                saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
-                bg.add(saved)
-                bg.commit()
-                screenshot_ref = {} if tool_failed else _screenshot_display_ref(tool, tool_result)
-                _save_mcp_tool_bubble(tool_persistence.ToolBubbleRequest(
-                    session=bg,
-                    user_id=user_id,
-                    ai_config_id=ai_config_id,
-                    ai_kind=ai_kind,
-                    session_id=session_id,
-                    session_name=session_name,
-                    model=model,
-                    tool=tool,
-                    arguments=arguments,
-                    result_text=result_text,
-                    failed=tool_failed,
-                    image_url=screenshot_ref.get("url", ""),
-                    image_data_url=screenshot_ref.get("data_url", ""),
-                    tool_result=tool_result if isinstance(tool_result, dict) else None,
-                    latency=execution.latency,
-                ))
-
-                transition = plan_transitions.handle_plan_transition(
-                    plan_transitions.PlanTransitionContext(
-                        session=bg,
-                        conversation=convo,
-                        pending=pending,
-                        screenshot_messages=turn_screenshot_messages,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        session_name=session_name,
-                        model=model,
-                        native_tool_calls=_has_native_tc,
-                        system_prompt=system_prompt,
-                        current_user_message_id=current_user_message_id,
-                        model_user_content=model_user_content,
-                        set_live_phase=lambda phase: _set_run_live_phase(run_id, phase),
-                        complete_run=lambda: _run_set_status(
-                            run_id,
-                            "completed",
-                            finished=True,
-                        ),
-                        auto_finalize_plan=_auto_finalize_plan,
-                    ),
-                    plan_transitions.PlanFlowSnapshot(
-                        plan_state=plan_state,
-                        awaiting_finish=flow_awaiting_finish,
-                        phase_start_convo_index=phase_start_convo_index,
-                        phase_started_at=phase_started_at,
-                        phase_mcp_statuses=phase_mcp_statuses,
-                    ),
-                    plan_transitions.ControlToolCall(
-                        tool=tool, arguments=arguments, tool_result=tool_result,
-                        failed=tool_failed, call_id=call_id,
-                    ),
-                )
-                if transition is not None:
-                    plan_state = transition.snapshot.plan_state
-                    flow_awaiting_finish = transition.snapshot.awaiting_finish
-                    phase_start_convo_index = transition.snapshot.phase_start_convo_index
-                    phase_started_at = transition.snapshot.phase_started_at
-                    phase_mcp_statuses = transition.snapshot.phase_mcp_statuses
-                    return transition.action
-
-                # ---- ordinary tool: hand the result back and keep going --------
-                _append_ordinary_tool_response(
-                    ToolResponseContext(
-                        conversation=convo,
-                        screenshot_messages=turn_screenshot_messages,
-                        turn_convo_start=turn_convo_start,
-                        image_input_disabled=image_input_disabled,
-                        native_tool_calls=_has_native_tc,
-                    ),
-                    tool,
-                    arguments,
-                    tool_result,
-                    tool_failed,
-                    call_id,
-                )
-                return TurnCallAction.NEXT_CALL
 
             # The configured step limit protects ordinary conversations from
             # runaway loops. Once a todo exists, completion (or an explicit
@@ -786,13 +557,72 @@ def _run_worker_impl(request: WorkerRequest):
                             "33",
                         )
 
+                call_machine = turn_call_flow.TurnCallMachine(
+                    turn_call_flow.TurnCallContext(
+                        session=bg,
+                        conversation=convo,
+                        screenshot_messages=turn_screenshot_messages,
+                        saved_message=saved,
+                        user_id=user_id,
+                        ai_config_id=ai_config_id,
+                        ai_kind=ai_kind,
+                        session_id=session_id,
+                        model=model,
+                        run_id=run_id,
+                        config=cfg,
+                        effective_tools=frozenset(effective_tool_allowlist),
+                        native_tool_name_map=native_tool_name_map,
+                        native_tool_calls=_has_native_tc,
+                        system_prompt=system_prompt,
+                        current_user_message_id=current_user_message_id,
+                        model_user_content=model_user_content,
+                        turn_conversation_start=turn_convo_start,
+                        image_input_disabled=image_input_disabled,
+                        should_stop=lambda: _run_should_stop(run_id),
+                        stop_run=lambda: _run_set_status(
+                            run_id, "stopped", finished=True
+                        ),
+                        complete_run=lambda: _run_set_status(
+                            run_id, "completed", finished=True
+                        ),
+                        set_live_phase=lambda phase, tool="": _set_run_live_phase(
+                            run_id, phase, tool
+                        ),
+                        set_run_error=lambda error: _run_set_status(
+                            run_id, "error", error, finished=True
+                        ),
+                        auto_finalize_plan=_auto_finalize_plan,
+                    ),
+                    turn_call_flow.TurnCallState(
+                        session_name=session_name,
+                        exposed_tools=frozenset(exposed_tool_allowlist),
+                        rejected_tool_signature=last_rejected_tool_sig,
+                        rejected_repeat=rejected_repeat,
+                        plan=plan_transitions.PlanFlowSnapshot(
+                            plan_state=plan_state,
+                            awaiting_finish=flow_awaiting_finish,
+                            phase_start_convo_index=phase_start_convo_index,
+                            phase_started_at=phase_started_at,
+                            phase_mcp_statuses=phase_mcp_statuses,
+                        ),
+                    ),
+                )
                 batch_action = tool_batch_flow.execute_turn_batch(
                     convo,
                     turn_calls,
                     _has_native_tc,
-                    _execute_turn_call,
+                    call_machine.execute,
                     _debug_duplicate,
                 )
+                session_name = call_machine.state.session_name
+                exposed_tool_allowlist = set(call_machine.state.exposed_tools)
+                last_rejected_tool_sig = call_machine.state.rejected_tool_signature
+                rejected_repeat = call_machine.state.rejected_repeat
+                plan_state = call_machine.state.plan.plan_state
+                flow_awaiting_finish = call_machine.state.plan.awaiting_finish
+                phase_start_convo_index = call_machine.state.plan.phase_start_convo_index
+                phase_started_at = call_machine.state.plan.phase_started_at
+                phase_mcp_statuses = call_machine.state.plan.phase_mcp_statuses
                 if batch_action is TurnCallAction.STOP_RUN:
                     return
                 if batch_action is TurnCallAction.NEXT_TURN:
