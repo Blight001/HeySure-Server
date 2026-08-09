@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 import time
-from typing import Dict, Optional
+from typing import Callable, Dict, Iterator, Optional
 
 from api.chat_runtime.chat_prompt_utils import (
     _build_mcp_display_result,
@@ -16,6 +16,7 @@ from ai_runtime.inference.runtime_clients import (
     dispatch_endpoint_via_runtime,
     endpoint_dispatch_timeout,
 )
+from ai_runtime.inference.tool_resolution import joined_tool_skip_reason
 from connector_runtime.dispatch.desktop_device_tools import (
     is_endpoint_agent_tool,
     is_workshop_tool,
@@ -30,6 +31,22 @@ class ToolExecutionResult:
     error: str
     display_text: str
     latency: float
+
+
+@dataclass(frozen=True)
+class JoinedToolRequest:
+    tools: tuple[str, ...]
+    arguments: dict
+    allowed_tools: frozenset[str]
+    user_id: int
+    ai_config_id: Optional[int]
+
+
+@dataclass(frozen=True)
+class JoinedToolEvent:
+    tool: str = ""
+    execution: Optional[ToolExecutionResult] = None
+    stopped: bool = False
 
 
 async def call_mcp_or_endpoint_tool(
@@ -162,3 +179,45 @@ def execute_tool_call(
         display_text=display_text,
         latency=time.perf_counter() - started_at,
     )
+
+
+def iter_joined_tool_executions(
+    request: JoinedToolRequest,
+    should_stop: Callable[[], bool],
+    mark_waiting: Callable[[str], None],
+) -> Iterator[JoinedToolEvent]:
+    """Yield each joined-tool outcome in execution/persistence order."""
+
+    for tool in request.tools:
+        if should_stop():
+            yield JoinedToolEvent(stopped=True)
+            return
+        started_at = time.perf_counter()
+        error = joined_tool_skip_reason(
+            tool,
+            request.arguments,
+            set(request.allowed_tools),
+        )
+        if error:
+            result = {"result": {"success": False, "error": error}}
+            execution = ToolExecutionResult(
+                result=result,
+                failed=True,
+                error=error,
+                display_text=_build_mcp_display_result(
+                    tool,
+                    result,
+                    ok=False,
+                    error_message=error,
+                ),
+                latency=time.perf_counter() - started_at,
+            )
+        else:
+            mark_waiting(tool)
+            execution = execute_tool_call(
+                tool,
+                request.user_id,
+                request.arguments,
+                request.ai_config_id,
+            )
+        yield JoinedToolEvent(tool=tool, execution=execution)

@@ -126,3 +126,65 @@ def test_execute_tool_call_converts_bridge_exception_to_result(monkeypatch):
     assert execution.result == {
         "result": {"success": False, "error": execution.error}
     }
+
+
+def test_joined_tool_events_preserve_skip_and_execution_order(monkeypatch):
+    waiting = []
+
+    def fake_skip_reason(tool, arguments, allowed_tools):
+        return "unsafe joined call" if tool == "dangerous" else ""
+
+    def fake_execute(tool, user_id, arguments, ai_config_id):
+        return tool_execution.ToolExecutionResult(
+            result={"result": {"success": True, "tool": tool}},
+            failed=False,
+            error="",
+            display_text=tool,
+            latency=0.25,
+        )
+
+    monkeypatch.setattr(tool_execution, "joined_tool_skip_reason", fake_skip_reason)
+    monkeypatch.setattr(tool_execution, "execute_tool_call", fake_execute)
+    request = tool_execution.JoinedToolRequest(
+        tools=("dangerous", "workspace.read"),
+        arguments={"path": "README.md"},
+        allowed_tools=frozenset({"dangerous", "workspace.read"}),
+        user_id=9,
+        ai_config_id=3,
+    )
+
+    events = list(
+        tool_execution.iter_joined_tool_executions(
+            request,
+            should_stop=lambda: False,
+            mark_waiting=waiting.append,
+        )
+    )
+
+    assert [event.tool for event in events] == ["dangerous", "workspace.read"]
+    assert events[0].execution.failed is True
+    assert events[0].execution.error == "unsafe joined call"
+    assert events[1].execution.failed is False
+    assert waiting == ["workspace.read"]
+
+
+def test_joined_tool_events_emit_explicit_stop_before_next_call():
+    request = tool_execution.JoinedToolRequest(
+        tools=("workspace.read",),
+        arguments={},
+        allowed_tools=frozenset({"workspace.read"}),
+        user_id=9,
+        ai_config_id=None,
+    )
+
+    events = list(
+        tool_execution.iter_joined_tool_executions(
+            request,
+            should_stop=lambda: True,
+            mark_waiting=lambda _tool: None,
+        )
+    )
+
+    assert len(events) == 1
+    assert events[0].stopped is True
+    assert events[0].execution is None

@@ -53,10 +53,12 @@ from ai_runtime.inference.plan_flow import (
 )
 from ai_runtime.inference.tool_resolution import (
     TurnCallAction,
+    append_control_tool_result as _append_control_tool_result,
     append_pending_call_responses as _answer_pending_calls,
     build_native_tools_payload as _build_native_tools_payload,
+    described_tool_entries as _described_tool_entries,
     flush_screenshot_messages as _flush_screenshot_messages,
-    joined_tool_skip_reason as _joined_tool_skip_reason,
+    infer_todo_action as _infer_todo_action,
     missing_required_mcp_args as _missing_required_mcp_args,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
     split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
@@ -69,7 +71,9 @@ from ai_runtime.inference.run_request import (
     start_worker_run,
 )
 from ai_runtime.inference.tool_execution import (
+    JoinedToolRequest,
     execute_tool_call as _execute_tool_call,
+    iter_joined_tool_executions as _iter_joined_tool_executions,
 )
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
@@ -1075,38 +1079,35 @@ def _run_worker_impl(request: WorkerRequest):
                     joined_mcp_tools = [native_tool_name_map.get(item, item) for item in joined_native_tools]
                     compound_results = []
                     compound_failed = False
-                    for split_tool in joined_mcp_tools:
-                        if _run_should_stop(run_id):
+                    joined_request = JoinedToolRequest(
+                        tools=tuple(joined_mcp_tools),
+                        arguments=arguments,
+                        allowed_tools=frozenset(effective_tool_allowlist),
+                        user_id=user_id,
+                        ai_config_id=ai_config_id,
+                    )
+                    joined_events = _iter_joined_tool_executions(
+                        joined_request,
+                        should_stop=lambda: _run_should_stop(run_id),
+                        mark_waiting=lambda name: _set_run_live_phase(
+                            run_id,
+                            "waiting_mcp",
+                            name,
+                        ),
+                    )
+                    for event in joined_events:
+                        if event.stopped:
                             _run_set_status(run_id, "stopped", finished=True)
                             return TurnCallAction.STOP_RUN
-                        item_failed = False
-                        _split_started_at = time.perf_counter()
-                        item_error = _joined_tool_skip_reason(split_tool, arguments, effective_tool_allowlist)
-                        if item_error:
-                            item_failed = True
-                            compound_failed = True
-                            item_result = {"result": {"success": False, "error": item_error}}
-                            item_result_text = _build_mcp_display_result(
-                                split_tool,
-                                item_result,
-                                ok=False,
-                                error_message=item_error,
-                            )
-                            _split_latency = time.perf_counter() - _split_started_at
-                        else:
-                            _set_run_live_phase(run_id, "waiting_mcp", split_tool)
-                            execution = _execute_tool_call(
-                                split_tool,
-                                user_id,
-                                arguments,
-                                ai_config_id,
-                            )
-                            item_result = execution.result
-                            item_failed = execution.failed
-                            item_error = execution.error
-                            item_result_text = execution.display_text
-                            compound_failed = compound_failed or item_failed
-                            _split_latency = execution.latency
+                        split_tool = event.tool
+                        item_execution = event.execution
+                        if item_execution is None:
+                            continue
+                        item_result = item_execution.result
+                        item_failed = item_execution.failed
+                        item_error = item_execution.error
+                        item_result_text = item_execution.display_text
+                        compound_failed = compound_failed or item_failed
                         _record_mcp_call(
                             tool=split_tool, user_id=user_id, ai_config_id=ai_config_id,
                             session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
@@ -1138,7 +1139,7 @@ def _run_worker_impl(request: WorkerRequest):
                             image_url=item_screenshot_ref.get("url", ""),
                             image_data_url=item_screenshot_ref.get("data_url", ""),
                             tool_result=item_result if isinstance(item_result, dict) else None,
-                            latency=_split_latency,
+                            latency=item_execution.latency,
                         )
                         compound_results.append({
                             "tool": split_tool,
@@ -1275,21 +1276,9 @@ def _run_worker_impl(request: WorkerRequest):
                 )
 
                 if (not tool_failed) and tool == "mcp.describe+tool":
-                    described_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
-                    described_items: list[dict] = []
-                    described_names: list[str] = []
-                    if isinstance(described_payload, dict):
-                        batch = described_payload.get("tools")
-                        if isinstance(batch, list):
-                            described_items = [item for item in batch if isinstance(item, dict)]
-                            described_names = [
-                                str((item or {}).get("name") or "").strip()
-                                for item in batch
-                                if isinstance(item, dict)
-                            ]
-                        else:
-                            described_items = [described_payload]
-                            described_names = [str(described_payload.get("name") or "").strip()]
+                    described_items, described_names = _described_tool_entries(
+                        tool_result
+                    )
                     for described_tool in described_names:
                         if described_tool and described_tool in effective_tool_allowlist:
                             exposed_tool_allowlist.add(described_tool)
@@ -1345,33 +1334,22 @@ def _run_worker_impl(request: WorkerRequest):
                 # current phase and hands over the next; editing the last phase
                 # auto-finalizes. Legacy normalized calls may omit action, so infer
                 # it from their old argument shapes.
-                todo_action = str((arguments or {}).get("action") or "").strip().lower()
-                if tool == "todo.manage" and not todo_action:
-                    if (arguments or {}).get("phases") is not None or (arguments or {}).get("goal"):
-                        todo_action = "create"
-                    elif any(key in (arguments or {}) for key in ("status", "summary", "outcome")):
-                        todo_action = "edit"
-                    else:
-                        todo_action = "get"
+                todo_action = _infer_todo_action(arguments) if tool == "todo.manage" else ""
 
                 if (not tool_failed) and tool == "todo.manage" and todo_action == "create":
                     # Answer the tool call, then drive straight into phase 1 — the
                     # AI never has to poll plan progress itself.
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": _safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False)),
-                        })
-                    else:
-                        convo.append({
-                            "role": "user",
-                            "content": (
-                                f"[MCP执行结果]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
-                                "[工具执行结果]\n"
-                                f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
-                            ),
-                        })
+                    _append_control_tool_result(
+                        convo,
+                        tool,
+                        _model_visible_tool_result(
+                            tool,
+                            tool_result,
+                            image_attached=False,
+                        ),
+                        call_id,
+                        native=_has_native_tc,
+                    )
                     _answer_pending_calls(
                         convo,
                         pending,
@@ -1488,21 +1466,17 @@ def _run_worker_impl(request: WorkerRequest):
                     return TurnCallAction.NEXT_TURN
 
                 if (not tool_failed) and tool == "todo.manage" and todo_action == "delete":
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": _safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False)),
-                        })
-                    else:
-                        convo.append({
-                            "role": "user",
-                            "content": (
-                                f"[MCP执行结果]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
-                                "[工具执行结果]\n"
-                                f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=False))}"
-                            ),
-                        })
+                    _append_control_tool_result(
+                        convo,
+                        tool,
+                        _model_visible_tool_result(
+                            tool,
+                            tool_result,
+                            image_attached=False,
+                        ),
+                        call_id,
+                        native=_has_native_tc,
+                    )
                     _answer_pending_calls(
                         convo,
                         pending,

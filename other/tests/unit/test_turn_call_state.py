@@ -2,8 +2,11 @@ import json
 
 from ai_runtime.inference.tool_resolution import (
     TurnCallAction,
+    append_control_tool_result,
     append_pending_call_responses,
+    described_tool_entries,
     flush_screenshot_messages,
+    infer_todo_action,
     track_repeated_tool_call,
 )
 
@@ -77,3 +80,57 @@ def test_flush_screenshots_preserves_order_and_clears_buffer():
         "image-2",
     ]
     assert screenshots == []
+
+
+def test_legacy_todo_action_is_inferred_from_argument_shape():
+    assert infer_todo_action({"goal": "ship"}) == "create"
+    assert infer_todo_action({"phases": []}) == "create"
+    assert infer_todo_action({"summary": "done"}) == "edit"
+    assert infer_todo_action({}) == "get"
+    assert infer_todo_action({"action": "DELETE"}) == "delete"
+
+
+def test_described_tool_entries_normalizes_single_and_batch_results():
+    single_items, single_names = described_tool_entries(
+        {"result": {"name": "workspace.read"}}
+    )
+    batch_items, batch_names = described_tool_entries({
+        "result": {
+            "tools": [
+                {"name": "workspace.read"},
+                "ignored",
+                {"name": "workspace.write"},
+            ]
+        }
+    })
+
+    assert single_names == ["workspace.read"]
+    assert single_items[0]["name"] == "workspace.read"
+    assert batch_names == ["workspace.read", "workspace.write"]
+    assert len(batch_items) == 2
+
+
+def test_control_tool_result_supports_native_and_text_protocols():
+    native_conversation = []
+    text_conversation = []
+
+    append_control_tool_result(
+        native_conversation,
+        "todo.manage",
+        {"success": True},
+        "call-1",
+        native=True,
+    )
+    append_control_tool_result(
+        text_conversation,
+        "todo.manage",
+        {"success": True},
+        "call-1",
+        native=False,
+    )
+
+    assert native_conversation[0]["role"] == "tool"
+    assert native_conversation[0]["tool_call_id"] == "call-1"
+    assert json.loads(native_conversation[0]["content"])["success"] is True
+    assert text_conversation[0]["role"] == "user"
+    assert "todo.manage" in text_conversation[0]["content"]

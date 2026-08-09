@@ -22,6 +22,59 @@ class TurnCallAction(str, Enum):
     STOP_RUN = "stop_run"
 
 
+def infer_todo_action(arguments: dict) -> str:
+    args = arguments if isinstance(arguments, dict) else {}
+    action = str(args.get("action") or "").strip().lower()
+    if action:
+        return action
+    if args.get("phases") is not None or args.get("goal"):
+        return "create"
+    if any(key in args for key in ("status", "summary", "outcome")):
+        return "edit"
+    return "get"
+
+
+def described_tool_entries(
+    tool_result: Dict[str, object],
+) -> tuple[List[dict], List[str]]:
+    payload = tool_result.get("result", tool_result)
+    if not isinstance(payload, dict):
+        return [], []
+    batch = payload.get("tools")
+    items = (
+        [item for item in batch if isinstance(item, dict)]
+        if isinstance(batch, list)
+        else [payload]
+    )
+    names = [str(item.get("name") or "").strip() for item in items]
+    return items, names
+
+
+def append_control_tool_result(
+    conversation: List[Dict[str, Any]],
+    tool: str,
+    visible_result: object,
+    call_id: str,
+    *,
+    native: bool,
+) -> None:
+    if native:
+        conversation.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": _safe_json(visible_result),
+        })
+        return
+    conversation.append({
+        "role": "user",
+        "content": (
+            f"[MCP执行结果]\n系统已执行工具：{tool}\n执行状态：成功\n\n"
+            "[工具执行结果]\n"
+            f"{_safe_json(visible_result)}"
+        ),
+    })
+
+
 def track_repeated_tool_call(
     prefix: str,
     tool: str,
