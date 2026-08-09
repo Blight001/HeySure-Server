@@ -9,12 +9,10 @@ import time
 logger = logging.getLogger(__name__)
 from typing import Any, Dict, List, Optional
 
-import requests
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.runtime import http_client, run_context
-ai_http_post = http_client.ai_http_post
+from api.runtime import run_context
 from mcp_runtime.mcp import get_project_root
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, ChatMessage, ChatMessageCreate, User
@@ -22,6 +20,7 @@ from api.services.chat import chat_inject, mcp_session_context
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import compression_flow
+from ai_runtime.inference import model_gateway
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
 from ai_runtime.inference import step_preparation
@@ -99,7 +98,7 @@ from api.chat_runtime.chat_prompt_utils import (
     _strip_task_runtime_sections,
 )
 from api.services.chat.chat_persistence import _save_message
-from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
+from api.chat_runtime.chat_stream import _detect_provider
 from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
     _load_task_job_by_session,
@@ -114,40 +113,6 @@ from api.chat_runtime.chat_runtime_helpers import (
 
 from api.core.config import DEFAULT_CHAT_MAX_STEPS
 from api.core.settings import settings
-
-
-def _format_upstream_error(response: requests.Response, max_body_len: int = 4000) -> str:
-    status = f"HTTP {response.status_code}"
-    reason = str(response.reason or "").strip()
-    if reason:
-        status = f"{status} {reason}"
-
-    body = str(response.text or "").strip()
-    if body:
-        try:
-            parsed = response.json()
-            if isinstance(parsed, dict):
-                error = parsed.get("error")
-                if isinstance(error, dict):
-                    message = str(error.get("message") or "").strip()
-                    code = str(error.get("code") or "").strip()
-                    error_type = str(error.get("type") or "").strip()
-                    parts = [part for part in [message, code, error_type] if part]
-                    if parts:
-                        body = " | ".join(parts)
-                elif isinstance(error, str) and error.strip():
-                    body = error.strip()
-        except Exception:
-            pass
-    if len(body) > max_body_len:
-        body = f"{body[:max_body_len]}\n...<truncated>"
-    return f"Upstream AI request failed: {status} for {response.url}\n{body}".strip()
-
-
-def _raise_for_upstream_error(response: requests.Response) -> None:
-    if response.ok:
-        return
-    raise RuntimeError(_format_upstream_error(response))
 
 
 def _record_mcp_call(record: tool_persistence.ToolCallRecord) -> None:
@@ -954,49 +919,13 @@ def _run_worker_impl(request: WorkerRequest):
                     "33",
                 )
                 try:
-                    if provider == "anthropic":
-                        sr = stream_turn_anthropic(
-                            run_id=run_id,
-                            base_url=base_url,
-                            api_key=api_key,
-                            model=model,
-                            convo=convo,
-                            step_tools=step_tools,
-                            native_tool_name_map=native_tool_name_map,
-                        )
-                    else:
-                        oa_payload = {
-                            "model": model,
-                            "messages": convo,
-                            "stream": True,
-                            "stream_options": {"include_usage": True},
-                        }
-                        if step_tools:
-                            oa_payload["tools"] = step_tools
-                            oa_payload["tool_choice"] = "auto"
-                            # The worker executes every tool call the model emits
-                            # in a turn, answering each tool_call_id before the
-                            # next request. Letting the model batch independent
-                            # actions collapses N round trips into one.
-                            oa_payload["parallel_tool_calls"] = True
-                        response = ai_http_post(base_url, headers=headers, json=oa_payload, timeout=300, stream=True)
-                        if not response.ok and "parallel_tool_calls" in oa_payload:
-                            unsupported_hint = str(response.text or "").lower()
-                            if "parallel_tool_calls" in unsupported_hint and (
-                                "unsupported" in unsupported_hint
-                                or "unknown" in unsupported_hint
-                                or "invalid" in unsupported_hint
-                                or "extra" in unsupported_hint
-                            ):
-                                oa_payload.pop("parallel_tool_calls", None)
-                                response.close()
-                                response = ai_http_post(base_url, headers=headers, json=oa_payload, timeout=300, stream=True)
-                        _raise_for_upstream_error(response)
-                        sr = stream_turn_openai_compat(
-                            run_id=run_id,
-                            response=response,
-                            native_tool_name_map=native_tool_name_map,
-                        )
+                    sr = model_gateway.run_model_turn(model_gateway.ModelTurnRequest(
+                        run_id=run_id, provider=provider, base_url=base_url,
+                        api_key=api_key, model=model, conversation=convo,
+                        provider_tools=step_tools,
+                        native_name_map=native_tool_name_map,
+                        headers=headers,
+                    ))
                     consecutive_ai_errors = 0
                 except Exception as ai_exc:
                     consecutive_ai_errors += 1
