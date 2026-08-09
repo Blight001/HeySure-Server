@@ -38,8 +38,6 @@ from sqlmodel import Session, SQLModel, select
 from ai_runtime.inference.ai_service import ensure_default_ai_for_user
 from api.auth import get_password_hash, verify_password
 from api.core.config import DATA_DIR, user_workspace_dir
-from api.core.logging_config import get_recent_logs
-from api.core.settings import settings
 from api.database import engine, get_session
 from api.models import (
     AdminAuditLog,
@@ -55,8 +53,14 @@ from api.models import (
     TokenUsageSnapshot,
     User,
 )
-from api.runtime.internal_http import InternalClient
 from gateway.routers.auth import ensure_user_workspace, get_current_user
+from gateway.routers.admin_services import (
+    ServiceRequestError,
+    fetch_service_logs,
+    list_service_statuses,
+    restart_remote_service,
+    service_target,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -134,59 +138,9 @@ def _record_audit(
 # ---------------------------------------------------------------------------
 
 
-def _service_registry():
-    """(key, display name, base_url) for every monitorable sub-service.
-
-    ``gateway`` is this very process, so it has no URL (handled in-process).
-    The others are reachable only when their ``*_runtime_url`` env is set
-    (i.e. a split/compose deployment); in a monolith they show as ``local``.
-    """
-    return [
-        ("gateway", "API 网关", ""),
-        ("mcp", "MCP 运行时", settings.mcp_runtime_url),
-        ("connector", "连接器运行时", settings.connector_runtime_url),
-        ("ai", "AI 运行时", settings.ai_runtime_url),
-    ]
-
-
-def _probe_service(key: str, name: str, base_url: str) -> dict:
-    if key == "gateway":
-        return {
-            "key": key,
-            "name": name,
-            "status": "running",
-            "detail": {"role": "gateway"},
-            "url": "(self)",
-        }
-    if not base_url:
-        return {
-            "key": key,
-            "name": name,
-            "status": "local",
-            "detail": {"note": "未配置独立服务地址（单体模式）"},
-            "url": "",
-        }
-    client = InternalClient(base_url, timeout=4.0)
-    try:
-        payload = client.get("/internal/health")
-        status = "running" if payload.get("ok") else "degraded"
-        return {"key": key, "name": name, "status": status, "detail": payload, "url": base_url}
-    except Exception as exc:  # network error / non-2xx / timeout
-        return {
-            "key": key,
-            "name": name,
-            "status": "down",
-            "detail": {"error": str(exc)},
-            "url": base_url,
-        }
-    finally:
-        client.close()
-
-
 @router.get("/services")
 def list_services(_admin: User = Depends(require_admin_user)) -> dict:
-    services = [_probe_service(key, name, url) for key, name, url in _service_registry()]
-    return {"services": services, "checked_at": time.time()}
+    return {"services": list_service_statuses(), "checked_at": time.time()}
 
 
 @router.get("/services/{key}/logs")
@@ -197,26 +151,13 @@ def service_logs(
     _admin: User = Depends(require_admin_user),
 ) -> dict:
     limit = max(1, min(600, int(limit or 200)))
-    registry = {k: (name, url) for k, name, url in _service_registry()}
-    if key not in registry:
+    target = service_target(key)
+    if target is None:
         raise HTTPException(status_code=404, detail="未知的子服务")
-    name, base_url = registry[key]
-
-    if key == "gateway":
-        return {"key": key, "name": name, "lines": get_recent_logs(limit=limit, level=level)}
-    if not base_url:
-        return {"key": key, "name": name, "lines": [], "note": "单体模式：日志与网关合并"}
-    client = InternalClient(base_url, timeout=4.0)
     try:
-        params = {"limit": limit}
-        if level:
-            params["level"] = level
-        payload = client.get("/internal/logs", params=params)
-        return {"key": key, "name": name, "lines": payload.get("lines", [])}
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"无法获取 {name} 日志: {exc}")
-    finally:
-        client.close()
+        return fetch_service_logs(target, limit=limit, level=level)
+    except ServiceRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -310,10 +251,9 @@ def restart_service(
     - In monolith mode (no dedicated URL) there is no separate process to
       bounce, so the call is rejected.
     """
-    registry = {k: (name, url) for k, name, url in _service_registry()}
-    if key not in registry:
+    target = service_target(key)
+    if target is None:
         raise HTTPException(status_code=404, detail="未知的子服务")
-    name, base_url = registry[key]
 
     if key == "gateway":
         from api.runtime.process_control import request_restart
@@ -321,29 +261,26 @@ def restart_service(
         logger.warning(f"admin {admin.account} triggered gateway restart")
         _record_audit(
             session, admin, "restart_service",
-            target_type="service", target_id=key, target_label=name,
-            detail=f"重启服务 {name}（网关自身）",
+            target_type="service", target_id=key, target_label=target.name,
+            detail=f"重启服务 {target.name}（网关自身）",
         )
         cmd = request_restart(delay=1.0)
-        return {"ok": True, "key": key, "name": name, "restarting": True, "command": cmd}
+        return {"ok": True, "key": key, "name": target.name, "restarting": True, "command": cmd}
 
-    if not base_url:
-        raise HTTPException(status_code=400, detail=f"{name} 未配置独立服务地址（单体模式无法重启）")
+    if not target.base_url:
+        raise HTTPException(status_code=400, detail=f"{target.name} 未配置独立服务地址（单体模式无法重启）")
 
-    client = InternalClient(base_url, timeout=5.0)
     try:
-        payload = client.post("/internal/restart")
-        logger.warning(f"admin {admin.account} triggered restart of {key} ({base_url})")
+        payload = restart_remote_service(target)
+        logger.warning(f"admin {admin.account} triggered restart of {key} ({target.base_url})")
         _record_audit(
             session, admin, "restart_service",
-            target_type="service", target_id=key, target_label=name,
-            detail=f"重启服务 {name}（{base_url}）",
+            target_type="service", target_id=key, target_label=target.name,
+            detail=f"重启服务 {target.name}（{target.base_url}）",
         )
-        return {"ok": True, "key": key, "name": name, **payload}
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"无法重启 {name}: {exc}")
-    finally:
-        client.close()
+        return {"ok": True, "key": key, "name": target.name, **payload}
+    except ServiceRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
