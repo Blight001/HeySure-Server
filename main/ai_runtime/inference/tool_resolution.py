@@ -1,14 +1,85 @@
 """Native provider tool-name encoding, aliases, and safe joined-call checks."""
 
 import copy
+import json
 import re
-from typing import Dict, List, Optional
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
+from api.chat_runtime.chat_prompt_utils import _safe_json
 from connector_runtime.dispatch.desktop_device_tools import (
     build_endpoint_tools_payload,
     is_endpoint_agent_tool,
 )
 from mcp_runtime.mcp import registry
+
+
+class TurnCallAction(str, Enum):
+    """State transition requested after one tool call in a model turn."""
+
+    NEXT_CALL = "next_call"
+    NEXT_TURN = "next_turn"
+    STOP_RUN = "stop_run"
+
+
+def track_repeated_tool_call(
+    prefix: str,
+    tool: str,
+    arguments: dict,
+    previous_signature: str,
+    previous_count: int,
+) -> tuple[str, int]:
+    """Return the stable call signature and its consecutive repeat count."""
+
+    signature = (
+        f"{prefix}|{tool}|"
+        f"{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+    )
+    count = previous_count + 1 if signature == previous_signature else 1
+    return signature, count
+
+
+def append_pending_call_responses(
+    conversation: List[Dict[str, Any]],
+    pending: List[Dict[str, Any]],
+    payload: Dict[str, object],
+    *,
+    native: bool,
+) -> None:
+    """Close tool-call ids skipped by a control-flow transition."""
+
+    if not pending:
+        return
+    if native:
+        conversation.extend(
+            {
+                "role": "tool",
+                "tool_call_id": str(call.get("id") or "call_0"),
+                "content": _safe_json(payload),
+            }
+            for call in pending
+        )
+        return
+    skipped = ", ".join(str(call.get("tool") or "?") for call in pending)
+    conversation.append(
+        {
+            "role": "user",
+            "content": (
+                "[MCP未执行]\n"
+                f"本轮以下工具未被执行：{skipped}\n\n"
+                f"{_safe_json(payload)}"
+            ),
+        }
+    )
+
+
+def flush_screenshot_messages(
+    conversation: List[Dict[str, Any]], screenshots: List[Dict[str, Any]]
+) -> None:
+    """Append held images only after every native tool response is adjacent."""
+
+    conversation.extend(screenshots)
+    screenshots.clear()
 
 
 def to_native_tool_name(name: str) -> str:

@@ -53,11 +53,15 @@ from ai_runtime.inference.plan_flow import (
     send_task_completion_notification as _notify_task_completion,
 )
 from ai_runtime.inference.tool_resolution import (
+    TurnCallAction,
+    append_pending_call_responses as _answer_pending_calls,
     build_native_tools_payload as _build_native_tools_payload,
+    flush_screenshot_messages as _flush_screenshot_messages,
     joined_tool_skip_reason as _joined_tool_skip_reason,
     missing_required_mcp_args as _missing_required_mcp_args,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
     split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
+    track_repeated_tool_call as _track_repeated_tool_call,
     to_native_tool_name as _to_native_tool_name,
 )
 from ai_runtime.inference.runtime_clients import (
@@ -1358,59 +1362,14 @@ def _run_worker_impl(
                     return name == "todo.manage"
                 return True
 
-            def _answer_pending_calls(
-                pending: List[Dict[str, Any]],
-                payload: Dict[str, object],
-                *,
-                native: bool,
-            ) -> None:
-                """Close out tool calls the batch will not execute.
-
-                OpenAI-compatible providers reject the next request unless every
-                ``tool_call_id`` in an assistant message has a matching tool
-                message. When a control-flow tool (context clear, plan edit, …)
-                cuts a batch short, the calls behind it still need an answer.
-                """
-                if not pending:
-                    return
-                if native:
-                    for call in pending:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": str(call.get("id") or "call_0"),
-                            "content": _safe_json(payload),
-                        })
-                    return
-                skipped = ", ".join(str(call.get("tool") or "?") for call in pending)
-                convo.append({
-                    "role": "user",
-                    "content": (
-                        "[MCP未执行]\n"
-                        f"本轮以下工具未被执行：{skipped}\n\n"
-                        f"{_safe_json(payload)}"
-                    ),
-                })
-
-            def _flush_turn_screenshots() -> None:
-                """Append this turn's held-back screenshot images.
-
-                Only called once every tool message for the turn is in place, so
-                the assistant's tool_calls stay contiguous with their responses.
-                Barriers that rebuild or truncate ``convo`` drop the images
-                instead — the turn they belonged to no longer exists."""
-                while turn_screenshot_messages:
-                    convo.append(turn_screenshot_messages.pop(0))
-
             def _execute_turn_call(
                 call: Dict[str, Any],
                 pending: List[Dict[str, Any]],
-            ) -> str:
+            ) -> TurnCallAction:
                 """Run one tool call from the current turn's batch.
 
-                Returns one of:
-                  ``"next_call"`` — continue through the batch
-                  ``"next_turn"`` — batch is over, go back to the model
-                  ``"stop_run"``  — the run is finished (status already set)
+                Returns an explicit ``TurnCallAction`` transition for the batch
+                driver. Control-flow tools never rely on free-form strings.
 
                 Control-flow tools (context clear/compress, plan create/edit/
                 delete) rebuild or truncate ``convo``, so they end the batch;
@@ -1426,15 +1385,12 @@ def _run_worker_impl(
 
                 if _run_should_stop(run_id):
                     _run_set_status(run_id, "stopped", finished=True)
-                    return "stop_run"
+                    return TurnCallAction.STOP_RUN
 
                 if cfg and not cfg.mcp_enabled:
-                    denied_sig = f"mcp_disabled|{tool}|{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
-                    if denied_sig == last_rejected_tool_sig:
-                        rejected_repeat += 1
-                    else:
-                        last_rejected_tool_sig = denied_sig
-                        rejected_repeat = 1
+                    last_rejected_tool_sig, rejected_repeat = _track_repeated_tool_call(
+                        "mcp_disabled", tool, arguments, last_rejected_tool_sig, rejected_repeat
+                    )
                     _append_mcp_disabled_feedback(
                         bg=bg,
                         convo=convo,
@@ -1449,15 +1405,16 @@ def _run_worker_impl(
                         native_tool_call_id=call_id if _has_native_tc else "",
                     )
                     _answer_pending_calls(
+                        convo,
                         pending,
                         {"success": False, "error": "MCP is disabled for this AI"},
                         native=_has_native_tc,
                     )
                     if rejected_repeat >= 3:
                         _run_set_status(run_id, "error", "Repeated MCP call while MCP is disabled", finished=True)
-                        return "stop_run"
+                        return TurnCallAction.STOP_RUN
                     _set_run_live_phase(run_id, "generating")
-                    return "next_turn"
+                    return TurnCallAction.NEXT_TURN
 
                 # Legacy compat: some text-protocol models glue several tool
                 # names into one. Split and run them under this single call id.
@@ -1469,7 +1426,7 @@ def _run_worker_impl(
                     for split_tool in joined_mcp_tools:
                         if _run_should_stop(run_id):
                             _run_set_status(run_id, "stopped", finished=True)
-                            return "stop_run"
+                            return TurnCallAction.STOP_RUN
                         item_failed = False
                         _split_started_at = time.perf_counter()
                         item_error = _joined_tool_skip_reason(split_tool, arguments, effective_tool_allowlist)
@@ -1582,15 +1539,12 @@ def _run_worker_impl(
                             f"{_safe_json(compound_payload)}\n\n"
                             "请基于以上结果继续；如仍需调用失败的工具，请按标准格式提供所需参数重新调用。"
                         )})
-                    return "next_call"
+                    return TurnCallAction.NEXT_CALL
 
                 if tool not in effective_tool_allowlist:
-                    denied_sig = f"{tool}|{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
-                    if denied_sig == last_rejected_tool_sig:
-                        rejected_repeat += 1
-                    else:
-                        last_rejected_tool_sig = denied_sig
-                        rejected_repeat = 1
+                    last_rejected_tool_sig, rejected_repeat = _track_repeated_tool_call(
+                        "disallowed", tool, arguments, last_rejected_tool_sig, rejected_repeat
+                    )
                     tool_error = f"Tool not allowed for this task: {tool}"
                     tool_result = {"result": {"success": False, "error": tool_error}}
                     result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
@@ -1628,15 +1582,16 @@ def _run_worker_impl(
                         )})
                     if rejected_repeat >= 3:
                         _answer_pending_calls(
+                            convo,
                             pending,
                             {"success": False, "error": "Run aborted: repeated disallowed MCP tool call"},
                             native=_has_native_tc,
                         )
                         _run_set_status(run_id, "error", f"Repeated disallowed MCP tool call: {tool}", finished=True)
-                        return "stop_run"
+                        return TurnCallAction.STOP_RUN
                     # A rejected tool does not invalidate the rest of the batch:
                     # answer it and let the sibling calls run.
-                    return "next_call"
+                    return TurnCallAction.NEXT_CALL
 
                 _set_run_live_phase(run_id, "waiting_mcp", tool)
                 tool_failed = False
@@ -1775,7 +1730,7 @@ def _run_worker_impl(
                         phase_started_at = time.time()
                         phase_mcp_statuses = []
                     _set_run_live_phase(run_id, "generating")
-                    return "next_turn"
+                    return TurnCallAction.NEXT_TURN
 
                 # Planned task flow (system-driven). All plan operations use the
                 # single todo.manage MCP. create starts the flow; edit closes the
@@ -1810,6 +1765,7 @@ def _run_worker_impl(
                             ),
                         })
                     _answer_pending_calls(
+                        convo,
                         pending,
                         {
                             "success": False,
@@ -1820,7 +1776,7 @@ def _run_worker_impl(
                     )
                     # Every tool_call_id is now answered, so the held images can
                     # land before this branch appends its phase directive.
-                    _flush_turn_screenshots()
+                    _flush_screenshot_messages(convo, turn_screenshot_messages)
                     try:
                         plan_state = plan_service.get_active_plan(
                             bg, user_id, int(ai_config_id), session_id
@@ -1843,7 +1799,7 @@ def _run_worker_impl(
                             "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
                         })
                     _set_run_live_phase(run_id, "generating")
-                    return "next_turn"
+                    return TurnCallAction.NEXT_TURN
 
                 if (not tool_failed) and tool == "todo.manage" and todo_action == "edit" and plan_state is not None:
                     finished_phase = result_payload.get("finished_phase") if isinstance(result_payload, dict) else None
@@ -1909,7 +1865,7 @@ def _run_worker_impl(
                         _auto_finalize_plan(phase_started_at)
                         _set_run_live_phase(run_id, "idle")
                         _run_set_status(run_id, "completed", finished=True)
-                        return "stop_run"
+                        return TurnCallAction.STOP_RUN
                     if plan_state is not None:
                         _prog = plan_service.plan_progress(bg, plan_state)
                         _cur = next(
@@ -1921,7 +1877,7 @@ def _run_worker_impl(
                             "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
                         })
                     _set_run_live_phase(run_id, "generating")
-                    return "next_turn"
+                    return TurnCallAction.NEXT_TURN
 
                 if (not tool_failed) and tool == "todo.manage" and todo_action == "delete":
                     if _has_native_tc:
@@ -1940,6 +1896,7 @@ def _run_worker_impl(
                             ),
                         })
                     _answer_pending_calls(
+                        convo,
                         pending,
                         {
                             "success": False,
@@ -1948,12 +1905,12 @@ def _run_worker_impl(
                         },
                         native=_has_native_tc,
                     )
-                    _flush_turn_screenshots()
+                    _flush_screenshot_messages(convo, turn_screenshot_messages)
                     plan_state = None
                     flow_awaiting_finish = False
                     phase_mcp_statuses = []
                     _set_run_live_phase(run_id, "generating")
-                    return "next_turn"
+                    return TurnCallAction.NEXT_TURN
 
                 # ---- ordinary tool: hand the result back and keep going --------
                 screenshot_message = _browser_screenshot_image_message(tool, tool_result)
@@ -2001,7 +1958,7 @@ def _run_worker_impl(
                         })
                     else:
                         convo.append({"role": "user", "content": follow_up_text})
-                return "next_call"
+                return TurnCallAction.NEXT_CALL
 
             # The configured step limit protects ordinary conversations from
             # runaway loops. Once a todo exists, completion (or an explicit
@@ -2437,6 +2394,7 @@ def _run_worker_impl(
                                 ),
                             })
                             _answer_pending_calls(
+                                convo,
                                 [call for call in turn_calls if call is not _compress_call],
                                 {
                                     "success": False,
@@ -2530,6 +2488,7 @@ def _run_worker_impl(
                         _flow_block_text = phase_context.render_continue_phase_notice()
                     if _has_native_tc:
                         _answer_pending_calls(
+                            convo,
                             turn_calls,
                             {"success": False, "error": "flow_violation", "note": _flow_block_text},
                             native=True,
@@ -2693,6 +2652,7 @@ def _run_worker_impl(
                     )
                     if _has_native_tc:
                         _answer_pending_calls(
+                            convo,
                             turn_calls,
                             {"success": False, "error": "no_progress_loop", "note": _loop_note},
                             native=True,
@@ -2735,7 +2695,7 @@ def _run_worker_impl(
                 # 调用。批处理会逐个执行，对有副作用的工具（发消息、点击、提交）就
                 # 是重复动作。这里对本轮内的精确重复只执行第一次，其余直接以“已合并”
                 # 结果答复——既保住原生 tool_call_id 必须逐个答复的契约，又避免重复副作用。
-                batch_action = "next_call"
+                batch_action = TurnCallAction.NEXT_CALL
                 _dup_flags = _duplicate_call_flags(turn_calls)
                 for call_index, turn_call in enumerate(turn_calls):
                     if _dup_flags[call_index]:
@@ -2746,6 +2706,7 @@ def _run_worker_impl(
                             "33",
                         )
                         _answer_pending_calls(
+                            convo,
                             [turn_call],
                             {
                                 "success": True,
@@ -2756,16 +2717,16 @@ def _run_worker_impl(
                         )
                         continue
                     batch_action = _execute_turn_call(turn_call, turn_calls[call_index + 1:])
-                    if batch_action != "next_call":
+                    if batch_action is not TurnCallAction.NEXT_CALL:
                         break
-                if batch_action == "stop_run":
+                if batch_action is TurnCallAction.STOP_RUN:
                     return
-                if batch_action == "next_turn":
+                if batch_action is TurnCallAction.NEXT_TURN:
                     # A barrier already flushed or dropped the held screenshots.
                     continue
                 # Batch drained: every tool_call_id is answered, so the screenshot
                 # images can now follow the tool messages without splitting them.
-                _flush_turn_screenshots()
+                _flush_screenshot_messages(convo, turn_screenshot_messages)
                 _set_run_live_phase(run_id, "generating")
 
             notice = (
