@@ -2,7 +2,7 @@
   "counts": {
     "complexity": 128,
     "dependencies": 15,
-    "file_lines": 18,
+    "file_lines": 17,
     "function_lines": 49,
     "nesting": 30,
     "parameters": 25
@@ -184,7 +184,6 @@
     "file_lines:main/api/services/workflows/run_service.py": 947,
     "file_lines:main/connector_runtime/bots/qq/router.py": 527,
     "file_lines:main/connector_runtime/dispatch/device_dispatch.py": 808,
-    "file_lines:main/gateway/routers/admin.py": 738,
     "file_lines:main/gateway/routers/ai_misc_routes.py": 615,
     "file_lines:main/gateway/routers/ai_task_routes.py": 571,
     "file_lines:main/gateway/routers/chat_action_routes.py": 746,
