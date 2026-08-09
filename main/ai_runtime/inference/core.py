@@ -22,6 +22,7 @@ from api.services.chat import chat_inject, conversation_compress, mcp_session_co
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
+from ai_runtime.inference import plan_transitions
 from ai_runtime.inference import tool_media
 from ai_runtime.inference import tool_persistence
 from ai_runtime.inference.communication_prompt import (
@@ -54,12 +55,10 @@ from ai_runtime.inference.plan_flow import (
 )
 from ai_runtime.inference.tool_resolution import (
     TurnCallAction,
-    append_control_tool_result as _append_control_tool_result,
     append_pending_call_responses as _answer_pending_calls,
     build_native_tools_payload as _build_native_tools_payload,
     described_tool_entries as _described_tool_entries,
     flush_screenshot_messages as _flush_screenshot_messages,
-    infer_todo_action as _infer_todo_action,
     missing_required_mcp_args as _missing_required_mcp_args,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
     split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
@@ -292,54 +291,6 @@ def _save_mcp_tool_bubble(request: tool_persistence.ToolBubbleRequest) -> None:
 
 def _extract_screenshot_bubble_url(content: str) -> str:
     return tool_persistence.extract_screenshot_bubble_url(content)
-
-
-def _load_current_user_content(
-    session: Session,
-    *,
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-    current_user_message_id: Optional[int],
-    fallback: Optional[str],
-) -> str:
-    fallback_text = str(fallback or "").strip()
-    if current_user_message_id:
-        row = session.get(ChatMessage, current_user_message_id)
-        if (
-            row
-            and row.user_id == user_id
-            and row.ai_config_id == ai_config_id
-            and row.ai_kind == ai_kind
-            and row.session_id == session_id
-            and row.role == "user"
-        ):
-            return fallback_text or str(row.content or "").strip()
-    return fallback_text
-
-
-def _reset_convo_after_clear(
-    convo: List[Dict],
-    *,
-    system_prompt: str,
-    current_user_content: str,
-    tool_result: Dict[str, object],
-) -> None:
-    result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else tool_result
-    follow_up = (
-        "[MCP执行结果]\n"
-        "系统已执行工具：conversation.manage（action=clear）\n"
-        "执行状态：成功\n\n"
-        "[工具执行结果]\n"
-        f"{_safe_json(result_payload)}\n\n"
-        "旧上下文已从本轮模型上下文中移除。请只基于当前用户消息和以上结果继续。"
-    )
-    convo.clear()
-    convo.append({"role": "system", "content": system_prompt})
-    if current_user_content:
-        convo.append({"role": "user", "content": current_user_content})
-    convo.append({"role": "user", "content": follow_up})
 
 
 def _is_image_input_unsupported_error(error_text: str) -> bool:
@@ -1084,204 +1035,52 @@ def _run_worker_impl(request: WorkerRequest):
                     except Exception:
                         logger.exception("persist described MCP tools failed")
 
-                # ---- control-flow tools: they rewrite the conversation --------
-                if (
-                    (not tool_failed)
-                    and tool == "conversation.manage"
-                    and isinstance(result_payload, dict)
-                    and result_payload.get("action") == "clear"
-                    and str(result_payload.get("session_id") or "") == str(session_id)
-                ):
-                    current_user_content = _load_current_user_content(
-                        bg,
+                transition = plan_transitions.handle_plan_transition(
+                    plan_transitions.PlanTransitionContext(
+                        session=bg,
+                        conversation=convo,
+                        pending=pending,
+                        screenshot_messages=turn_screenshot_messages,
                         user_id=user_id,
                         ai_config_id=ai_config_id,
                         ai_kind=ai_kind,
                         session_id=session_id,
-                        current_user_message_id=current_user_message_id,
-                        fallback=model_user_content,
-                    )
-                    # The rebuild drops this turn's assistant message entirely,
-                    # so the unanswered ids vanish with it — nothing to close out,
-                    # and the held screenshots belong to a turn that no longer exists.
-                    turn_screenshot_messages.clear()
-                    _reset_convo_after_clear(
-                        convo,
+                        session_name=session_name,
+                        model=model,
+                        native_tool_calls=_has_native_tc,
                         system_prompt=system_prompt,
-                        current_user_content=current_user_content,
+                        current_user_message_id=current_user_message_id,
+                        model_user_content=model_user_content,
+                        set_live_phase=lambda phase: _set_run_live_phase(run_id, phase),
+                        complete_run=lambda: _run_set_status(
+                            run_id,
+                            "completed",
+                            finished=True,
+                        ),
+                        auto_finalize_plan=_auto_finalize_plan,
+                    ),
+                    plan_transitions.PlanFlowSnapshot(
+                        plan_state=plan_state,
+                        awaiting_finish=flow_awaiting_finish,
+                        phase_start_convo_index=phase_start_convo_index,
+                        phase_started_at=phase_started_at,
+                        phase_mcp_statuses=phase_mcp_statuses,
+                    ),
+                    plan_transitions.ControlToolCall(
+                        tool=tool,
+                        arguments=arguments,
                         tool_result=tool_result,
-                    )
-                    if plan_state is not None:
-                        phase_start_convo_index = len(convo)
-                        phase_started_at = time.time()
-                        phase_mcp_statuses = []
-                    _set_run_live_phase(run_id, "generating")
-                    return TurnCallAction.NEXT_TURN
-
-                # Planned task flow (system-driven). All plan operations use the
-                # single todo.manage MCP. create starts the flow; edit closes the
-                # current phase and hands over the next; editing the last phase
-                # auto-finalizes. Legacy normalized calls may omit action, so infer
-                # it from their old argument shapes.
-                todo_action = _infer_todo_action(arguments) if tool == "todo.manage" else ""
-
-                if (not tool_failed) and tool == "todo.manage" and todo_action == "create":
-                    # Answer the tool call, then drive straight into phase 1 — the
-                    # AI never has to poll plan progress itself.
-                    _append_control_tool_result(
-                        convo,
-                        tool,
-                        _model_visible_tool_result(
-                            tool,
-                            tool_result,
-                            image_attached=False,
-                        ),
-                        call_id,
-                        native=_has_native_tc,
-                    )
-                    _answer_pending_calls(
-                        convo,
-                        pending,
-                        {
-                            "success": False,
-                            "error": "not_executed",
-                            "note": "A todo plan was just created; the system handed over phase 1. Re-issue this call if the new phase still needs it.",
-                        },
-                        native=_has_native_tc,
-                    )
-                    # Every tool_call_id is now answered, so the held images can
-                    # land before this branch appends its phase directive.
-                    _flush_screenshot_messages(convo, turn_screenshot_messages)
-                    try:
-                        plan_state = plan_service.get_active_plan(
-                            bg, user_id, int(ai_config_id), session_id
-                        ) if ai_config_id is not None else None
-                        flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
-                    except Exception:
-                        logger.exception("plan reload after todo.manage create failed")
-                        plan_state = None
-                    phase_start_convo_index = len(convo)
-                    phase_started_at = time.time()
-                    phase_mcp_statuses = []
-                    if plan_state is not None and not flow_awaiting_finish:
-                        _prog = plan_service.plan_progress(bg, plan_state)
-                        _cur = next(
-                            (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
-                            None,
-                        )
-                        convo.append({
-                            "role": "user",
-                            "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
-                        })
-                    _set_run_live_phase(run_id, "generating")
-                    return TurnCallAction.NEXT_TURN
-
-                if (not tool_failed) and tool == "todo.manage" and todo_action == "edit" and plan_state is not None:
-                    finished_phase = result_payload.get("finished_phase") if isinstance(result_payload, dict) else None
-                    boundary = max(0, min(phase_start_convo_index, len(convo)))
-                    compaction_text = phase_context.build_phase_compaction_text(
-                        finished_phase, phase_mcp_statuses
-                    )
-                    # Fold the finished phase out of the live conversation: drop
-                    # its deep-thinking + verbose MCP results, keep one status line.
-                    # This truncation also removes this turn's assistant message,
-                    # so any unexecuted sibling calls disappear with their ids.
-                    # Injected as the user role (not system) so it stays consistent
-                    # with the other plan-mode directives and avoids mid-conversation
-                    # system messages that some providers reject.
-                    turn_screenshot_messages.clear()
-                    convo[boundary:] = [{"role": "user", "content": compaction_text}]
-                    now_ts = time.time()
-                    try:
-                        phase_context.mark_phase_messages_compressed(
-                            bg,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            since_ts=phase_started_at,
-                            until_ts=now_ts,
-                        )
-                        _save_message(
-                            bg,
-                            user_id,
-                            ChatMessageCreate(
-                                role="system",
-                                content=compaction_text,
-                                tags="phase_summary",
-                                ai_config_id=ai_config_id,
-                                ai_kind=ai_kind,
-                                session_id=session_id,
-                                session_name=session_name,
-                                model=model,
-                                total_tokens=max(1, len(compaction_text) // 3),
-                            ),
-                        )
-                        bg.commit()
-                    except Exception:
-                        logger.exception("phase compaction persistence failed")
-                        bg.rollback()
-                    # Refresh plan state and open a fresh boundary for next phase.
-                    try:
-                        plan_state = plan_service.get_active_plan(
-                            bg, user_id, int(ai_config_id), session_id
-                        ) if ai_config_id is not None else None
-                        flow_awaiting_finish = plan_service.awaiting_finish(bg, plan_state)
-                    except Exception:
-                        logger.exception("plan reload after todo.manage edit failed")
-                    phase_start_convo_index = len(convo)
-                    phase_started_at = time.time()
-                    phase_mcp_statuses = []
-                    # System drives the next step: hand over the next phase, or —
-                    # when every phase is done — finalize the whole plan on its own.
-                    # Completing the last phase IS the finish; there is no separate
-                    # completion MCP.
-                    if flow_awaiting_finish:
-                        _auto_finalize_plan(phase_started_at)
-                        _set_run_live_phase(run_id, "idle")
-                        _run_set_status(run_id, "completed", finished=True)
-                        return TurnCallAction.STOP_RUN
-                    if plan_state is not None:
-                        _prog = plan_service.plan_progress(bg, plan_state)
-                        _cur = next(
-                            (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
-                            None,
-                        )
-                        convo.append({
-                            "role": "user",
-                            "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
-                        })
-                    _set_run_live_phase(run_id, "generating")
-                    return TurnCallAction.NEXT_TURN
-
-                if (not tool_failed) and tool == "todo.manage" and todo_action == "delete":
-                    _append_control_tool_result(
-                        convo,
-                        tool,
-                        _model_visible_tool_result(
-                            tool,
-                            tool_result,
-                            image_attached=False,
-                        ),
-                        call_id,
-                        native=_has_native_tc,
-                    )
-                    _answer_pending_calls(
-                        convo,
-                        pending,
-                        {
-                            "success": False,
-                            "error": "not_executed",
-                            "note": "The todo plan was just deleted; the flow reset. Re-issue this call if it is still needed.",
-                        },
-                        native=_has_native_tc,
-                    )
-                    _flush_screenshot_messages(convo, turn_screenshot_messages)
-                    plan_state = None
-                    flow_awaiting_finish = False
-                    phase_mcp_statuses = []
-                    _set_run_live_phase(run_id, "generating")
-                    return TurnCallAction.NEXT_TURN
+                        failed=tool_failed,
+                        call_id=call_id,
+                    ),
+                )
+                if transition is not None:
+                    plan_state = transition.snapshot.plan_state
+                    flow_awaiting_finish = transition.snapshot.awaiting_finish
+                    phase_start_convo_index = transition.snapshot.phase_start_convo_index
+                    phase_started_at = transition.snapshot.phase_started_at
+                    phase_mcp_statuses = transition.snapshot.phase_mcp_statuses
+                    return transition.action
 
                 # ---- ordinary tool: hand the result back and keep going --------
                 screenshot_message = _browser_screenshot_image_message(tool, tool_result)
