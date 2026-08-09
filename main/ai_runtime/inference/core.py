@@ -17,20 +17,17 @@ from api.models import ChatMessageCreate
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import model_gateway
 from ai_runtime.inference import phase_context
-from ai_runtime.inference import plan_transitions
 from ai_runtime.inference import tool_media
-from ai_runtime.inference import tool_batch_flow
-from ai_runtime.inference import turn_call_flow
 from ai_runtime.inference import worker_lifecycle
 from ai_runtime.inference import worker_post_turn_flow
 from ai_runtime.inference import worker_setup
+from ai_runtime.inference import worker_tool_batch_flow
 from ai_runtime.inference import worker_turn_flow
 from ai_runtime.inference.debug_support import (
     ai_color as _ai_color,
     ai_debug_enabled as _ai_debug_enabled,
     ai_debug_log as _ai_debug_log,
     ai_debug_stage as _ai_debug_stage,
-    ai_short as _ai_short,
     ai_short_base_url as _ai_short_base_url,
     ai_short_run_id as _ai_short_run_id,
 )
@@ -43,11 +40,7 @@ from ai_runtime.inference.plan_flow import (
     append_plan_directive,
     finalize_plan,
 )
-from ai_runtime.inference.tool_resolution import (
-    TurnCallAction,
-    flush_screenshot_messages as _flush_screenshot_messages,
-    resolve_mcp_tool_name as _resolve_mcp_tool_name,
-)
+from ai_runtime.inference.tool_resolution import resolve_mcp_tool_name as _resolve_mcp_tool_name
 from ai_runtime.inference.run_request import WorkerRequest, start_worker_run
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
@@ -66,8 +59,8 @@ from api.chat_runtime.chat_runtime_helpers import (
 )
 
 
-_duplicate_call_flags = tool_batch_flow.duplicate_call_flags
 _raise_for_upstream_error = model_gateway.raise_for_upstream_error
+_duplicate_call_flags = worker_tool_batch_flow.duplicate_call_flags
 _is_image_input_unsupported_error = tool_media.is_image_input_unsupported_error
 _prune_prior_runtime_screenshot_images = tool_media.prune_prior_runtime_screenshot_images
 _find_image_payload = tool_media.find_image_payload
@@ -390,63 +383,21 @@ def _run_worker_impl(request: WorkerRequest):
                     _run_set_status(run_id, "completed", finished=True)
                     return
 
-                progress = tool_batch_flow.evaluate_progress(
-                    tool_batch_flow.ProgressContext(
-                        session=bg, conversation=convo, user_id=user_id,
-                        ai_config_id=ai_config_id, ai_kind=ai_kind,
-                        session_id=session_id, session_name=session_name,
-                        model=model, native_tool_calls=_has_native_tc,
-                        set_live_phase=lambda phase: _set_run_live_phase(run_id, phase),
-                    ),
-                    tool_batch_flow.ProgressState(
-                        last_batch_signature=last_batch_sig,
-                        consecutive_same_batch=consecutive_same_batch,
-                    ),
-                    turn_calls,
-                )
-                last_batch_sig = progress.state.last_batch_signature
-                consecutive_same_batch = progress.state.consecutive_same_batch
-                if progress.action is not tool_batch_flow.ProgressAction.EXECUTE_BATCH:
-                    _ai_debug_stage(
-                        "LOOP",
-                        f"{_ai_short_run_id(run_id)} #{step_label} x{consecutive_same_batch} "
-                        f"{_ai_short(', '.join(c['tool'] for c in turn_calls), 48)}",
-                        "31",
-                    )
-                    if progress.action is tool_batch_flow.ProgressAction.STOP_RUN:
-                        _run_set_status(run_id, "completed", finished=True)
-                        return
-                    continue
-
-                def _debug_duplicate(turn_call):
-                        _ai_debug_stage(
-                            "DEDUP",
-                            f"{_ai_short_run_id(run_id)} #{step_label} "
-                            f"{_ai_short(str(turn_call.get('tool') or '?'), 40)}",
-                            "33",
-                        )
-
-                call_machine = turn_call_flow.TurnCallMachine(
-                    turn_call_flow.TurnCallContext(
+                tool_batch = worker_tool_batch_flow.handle_tool_batch(
+                    worker_tool_batch_flow.WorkerToolBatchContext(
                         session=bg,
-                        conversation=convo,
-                        screenshot_messages=turn_screenshot_messages,
-                        saved_message=saved,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        model=model,
-                        run_id=run_id,
+                        request=request,
                         config=cfg,
+                        model=model,
+                        system_prompt=system_prompt,
+                        conversation=convo,
+                        saved_message=saved,
                         effective_tools=frozenset(effective_tool_allowlist),
                         native_tool_name_map=native_tool_name_map,
                         native_tool_calls=_has_native_tc,
-                        system_prompt=system_prompt,
-                        current_user_message_id=current_user_message_id,
-                        model_user_content=model_user_content,
                         turn_conversation_start=turn_convo_start,
                         image_input_disabled=image_input_disabled,
+                        screenshot_messages=turn_screenshot_messages,
                         should_stop=lambda: _run_should_stop(run_id),
                         stop_run=lambda: _run_set_status(
                             run_id, "stopped", finished=True
@@ -462,45 +413,43 @@ def _run_worker_impl(request: WorkerRequest):
                         ),
                         auto_finalize_plan=_auto_finalize_plan,
                     ),
-                    turn_call_flow.TurnCallState(
+                    worker_tool_batch_flow.WorkerToolBatchState(
                         session_name=session_name,
                         exposed_tools=frozenset(exposed_tool_allowlist),
                         rejected_tool_signature=last_rejected_tool_sig,
                         rejected_repeat=rejected_repeat,
-                        plan=plan_transitions.PlanFlowSnapshot(
+                        plan=worker_tool_batch_flow.PlanFlowSnapshot(
                             plan_state=plan_state,
                             awaiting_finish=flow_awaiting_finish,
                             phase_start_convo_index=phase_start_convo_index,
                             phase_started_at=phase_started_at,
                             phase_mcp_statuses=phase_mcp_statuses,
                         ),
+                        last_batch_signature=last_batch_sig,
+                        consecutive_same_batch=consecutive_same_batch,
+                    ),
+                    worker_tool_batch_flow.WorkerToolBatchData(
+                        step_label=step_label,
+                        turn_calls=turn_calls,
                     ),
                 )
-                batch_action = tool_batch_flow.execute_turn_batch(
-                    convo,
-                    turn_calls,
-                    _has_native_tc,
-                    call_machine.execute,
-                    _debug_duplicate,
-                )
-                session_name = call_machine.state.session_name
-                exposed_tool_allowlist = set(call_machine.state.exposed_tools)
-                last_rejected_tool_sig = call_machine.state.rejected_tool_signature
-                rejected_repeat = call_machine.state.rejected_repeat
-                plan_state = call_machine.state.plan.plan_state
-                flow_awaiting_finish = call_machine.state.plan.awaiting_finish
-                phase_start_convo_index = call_machine.state.plan.phase_start_convo_index
-                phase_started_at = call_machine.state.plan.phase_started_at
-                phase_mcp_statuses = call_machine.state.plan.phase_mcp_statuses
-                if batch_action is TurnCallAction.STOP_RUN:
+                session_name = tool_batch.state.session_name
+                exposed_tool_allowlist = set(tool_batch.state.exposed_tools)
+                last_rejected_tool_sig = tool_batch.state.rejected_tool_signature
+                rejected_repeat = tool_batch.state.rejected_repeat
+                plan_state = tool_batch.state.plan.plan_state
+                flow_awaiting_finish = tool_batch.state.plan.awaiting_finish
+                phase_start_convo_index = tool_batch.state.plan.phase_start_convo_index
+                phase_started_at = tool_batch.state.plan.phase_started_at
+                phase_mcp_statuses = tool_batch.state.plan.phase_mcp_statuses
+                last_batch_sig = tool_batch.state.last_batch_signature
+                consecutive_same_batch = tool_batch.state.consecutive_same_batch
+                if (
+                    tool_batch.action
+                    is worker_tool_batch_flow.WorkerToolBatchAction.STOP_RUN
+                ):
                     return
-                if batch_action is TurnCallAction.NEXT_TURN:
-                    # A barrier already flushed or dropped the held screenshots.
-                    continue
-                # Batch drained: every tool_call_id is answered, so the screenshot
-                # images can now follow the tool messages without splitting them.
-                _flush_screenshot_messages(convo, turn_screenshot_messages)
-                _set_run_live_phase(run_id, "generating")
+                continue
 
             notice = (
                 "[系统提示]\n"
