@@ -48,6 +48,10 @@ class DeviceDispatchRequest(BaseModel):
     timeout_seconds: int = 120
 
 
+class DeviceDispatchExpireRequest(BaseModel):
+    reason: str = "result wait timed out"
+
+
 class FeishuSendRequest(BaseModel):
     user_id: int
     ai_config_id: Optional[int] = None
@@ -251,6 +255,24 @@ def create_app() -> FastAPI:
             except Exception:
                 payload["result"] = row.result_json
         return payload
+
+    @router.post("/agent/dispatch/expire/{task_id}")
+    async def device_dispatch_expire(
+        task_id: str, req: Optional[DeviceDispatchExpireRequest] = None
+    ) -> Dict[str, Any]:
+        """Finalize a dispatch whose remote caller stopped waiting.
+
+        AI Runtime polls Connector Runtime directly in split deployments, so
+        the expire endpoint must live beside the dispatch/result endpoints.
+        The Gateway mirror alone cannot unblock Connector's device queue.
+        """
+        from connector_runtime.dispatch.device_dispatch import expire_dispatch
+
+        expired = await expire_dispatch(
+            task_id,
+            reason=(req.reason if req else "result wait timed out"),
+        )
+        return {"ok": True, "expired": expired}
 
     @router.post("/feishu/send")
     def feishu_send(req: FeishuSendRequest) -> Dict[str, Any]:

@@ -96,6 +96,34 @@ engine = create_engine(
 )
 
 
+def _require_assistant_avatar_column(db_engine) -> None:
+    """Fail fast when the Alembic-owned compatibility column is missing.
+
+    Runtime processes must never repair schema drift themselves. Even an
+    idempotent PostgreSQL ``ALTER TABLE ... IF NOT EXISTS`` requests an ACCESS
+    EXCLUSIVE lock and can block unrelated login/read traffic while it waits.
+    """
+    with db_engine.connect() as conn:
+        avatar_exists = bool(
+            conn.exec_driver_sql(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'assistantaiconfig'
+                      AND column_name = 'avatar'
+                )
+                """
+            ).scalar_one()
+        )
+    if not avatar_exists:
+        raise RuntimeError(
+            "database schema is missing assistantaiconfig.avatar; "
+            "run `python -m api.db migrate` before starting runtime services"
+        )
+
+
 def create_db_and_tables() -> None:
     """Ensure the database schema is current. Called by each runtime at startup.
 
@@ -121,18 +149,8 @@ def create_db_and_tables() -> None:
             )
         logger.info("create_db_and_tables completed (no auto migrate)")
 
-    # Always ensure the avatar column (added to model without migration).
-    # This was the cause of "assistantaiconfig.avatar 不存在" errors on startup.
-    # Safe, idempotent (IF NOT EXISTS), and runs early so subsequent queries succeed.
-    try:
-        with engine.connect() as conn:
-            conn.exec_driver_sql(
-                "ALTER TABLE assistantaiconfig ADD COLUMN IF NOT EXISTS avatar VARCHAR"
-            )
-            conn.commit()
-        logger.info("create_db_and_tables: ensured 'avatar' column exists")
-    except Exception:
-        logger.exception("create_db_and_tables: failed to ensure avatar column (non-fatal)")
+    _require_assistant_avatar_column(engine)
+    logger.info("create_db_and_tables: verified 'avatar' column")
 
 
 def get_session():
