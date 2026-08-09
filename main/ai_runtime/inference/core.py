@@ -18,17 +18,15 @@ from api.models import ChatMessageCreate
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import compression_flow
 from ai_runtime.inference import final_response_flow
-from ai_runtime.inference import model_error_flow
 from ai_runtime.inference import model_gateway
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
-from ai_runtime.inference import step_preparation
 from ai_runtime.inference import tool_media
 from ai_runtime.inference import tool_batch_flow
 from ai_runtime.inference import turn_call_flow
-from ai_runtime.inference import turn_result
 from ai_runtime.inference import worker_lifecycle
 from ai_runtime.inference import worker_setup
+from ai_runtime.inference import worker_turn_flow
 from ai_runtime.inference.debug_support import (
     ai_color as _ai_color,
     ai_debug_enabled as _ai_debug_enabled,
@@ -59,7 +57,6 @@ get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
 from api.chat_runtime.chat_prompt_utils import (
     _append_prompt_section,
-    _extract_mcp_error,
     _filter_tools_for_current_bindings,
     _set_run_live_phase,
     _set_run_live_text,
@@ -78,9 +75,7 @@ from api.chat_runtime.chat_runtime_helpers import (
 _duplicate_call_flags = tool_batch_flow.duplicate_call_flags
 _raise_for_upstream_error = model_gateway.raise_for_upstream_error
 _is_image_input_unsupported_error = tool_media.is_image_input_unsupported_error
-_degrade_image_messages_to_text = tool_media.degrade_image_messages_to_text
 _prune_prior_runtime_screenshot_images = tool_media.prune_prior_runtime_screenshot_images
-_image_input_degraded_feedback = tool_media.image_input_degraded_feedback
 _find_image_payload = tool_media.find_image_payload
 _image_path_to_data_url = tool_media.image_path_to_data_url
 _omit_image_fields = tool_media.omit_image_fields
@@ -290,130 +285,76 @@ def _run_worker_impl(request: WorkerRequest):
                     _run_set_status(run_id, "stopped", finished=True)
                     return
 
-                pending_ai_reply_message_id = step_preparation.ingest_step_messages(
-                    step_preparation.StepMessageContext(
-                        session=bg, conversation=convo, user_id=user_id,
-                        ai_config_id=ai_config_id, ai_kind=ai_kind,
-                        session_id=session_id, session_name=session_name, model=model,
-                    ),
-                    pending_ai_reply_message_id,
-                )
-
-                model_error_flow.repair_missing_tool_responses(
-                    convo,
-                    "Synthetic tool result inserted before request because the previous tool call did not receive a tool response.",
-                )
-                if image_input_disabled:
-                    removed_images = _degrade_image_messages_to_text(convo)
-                    if removed_images:
-                        convo.append({
-                            "role": "user",
-                            "content": _image_input_degraded_feedback(
-                                "The current model previously rejected image input in this run.",
-                                removed_images,
-                            ),
-                        })
-                exposure = step_preparation.select_tool_exposure(
-                    step_preparation.ToolExposureRequest(
-                        mcp_active=mcp_active,
-                        exposed_tools=frozenset(exposed_tool_allowlist),
-                        allowed_tools=frozenset(effective_tool_allowlist),
-                        task_runtime=is_task_runtime,
-                        plan_active=plan_state is not None,
-                        awaiting_finish=flow_awaiting_finish,
-                        tool_protocol=tool_protocol,
-                    )
-                )
-                current_exposed_tools = set(exposure.current_tools)
-                step_tools = exposure.provider_tools
-                native_tool_name_map = exposure.native_name_map
-                start_at = time.time()
-                _ai_debug_stage(
-                    "TURN",
-                    f"{_ai_short_run_id(run_id)} #{step_label} "
-                    f"start msgs={len(convo)} tools={len(step_tools)} "
-                    f"reply={'y' if pending_ai_reply_message_id else 'n'}",
-                    "33",
-                )
-                try:
-                    sr = model_gateway.run_model_turn(model_gateway.ModelTurnRequest(
-                        run_id=run_id, provider=provider, base_url=base_url,
-                        api_key=api_key, model=model, conversation=convo,
-                        provider_tools=step_tools,
-                        native_name_map=native_tool_name_map,
+                worker_turn = worker_turn_flow.run_worker_turn(
+                    worker_turn_flow.WorkerTurnContext(
+                        session=bg,
+                        conversation=convo,
+                        user_id=user_id,
+                        ai_config_id=ai_config_id,
+                        ai_kind=ai_kind,
+                        session_id=session_id,
+                        model=model,
+                        system_prompt=system_prompt,
+                        run_id=run_id,
+                        provider=provider,
+                        base_url=base_url,
+                        api_key=api_key,
                         headers=headers,
-                    ))
-                    consecutive_ai_errors = 0
-                except Exception as ai_exc:
-                    error_text = _extract_mcp_error(ai_exc)
-                    _ai_debug_stage(
-                        "ERR",
-                        f"{_ai_short_run_id(run_id)} #{step_label} "
-                        f"x{consecutive_ai_errors + 1} {_ai_short(error_text, 140)}",
-                        "31",
-                    )
-                    error_decision = model_error_flow.handle_model_error(
-                        model_error_flow.ModelErrorContext(
-                            session=bg, conversation=convo, user_id=user_id,
-                            ai_config_id=ai_config_id, ai_kind=ai_kind,
-                            session_id=session_id, session_name=session_name,
-                            model=model,
-                            set_generating=lambda: _set_run_live_phase(
-                                run_id, "generating"
-                            ),
-                            set_run_error=lambda error: _run_set_status(
-                                run_id, "error", error, finished=True
-                            ),
+                        should_stop=lambda: _run_should_stop(run_id),
+                        stop_run=lambda: _run_set_status(
+                            run_id, "stopped", finished=True
                         ),
-                        error_text,
-                        consecutive_ai_errors,
-                        image_input_disabled,
-                    )
-                    consecutive_ai_errors = error_decision.consecutive_errors
-                    image_input_disabled = error_decision.image_input_disabled
-                    if error_decision.stop_run:
-                        return
-                    continue
-
-                if sr.stopped:
-                    _run_set_status(run_id, "stopped", finished=True)
-                    return
-                if _run_should_stop(run_id):
-                    _run_set_status(run_id, "stopped", finished=True)
-                    return
-
-                assistant_text = sr.assistant_text
-                _has_native_tc = sr.has_native_tc
-                latency = time.time() - start_at
-                persisted_turn = turn_result.persist_assistant_turn(
-                    turn_result.AssistantTurnContext(
-                        session=bg, conversation=convo, user_id=user_id,
-                        ai_config_id=ai_config_id, ai_kind=ai_kind,
-                        session_id=session_id, session_name=session_name,
-                        model=model, system_prompt=system_prompt,
-                        native_tool_name_map=native_tool_name_map,
-                        allowed_tools=frozenset(effective_tool_allowlist),
+                        set_live_phase=lambda phase: _set_run_live_phase(
+                            run_id, phase
+                        ),
+                        set_run_error=lambda error: _run_set_status(
+                            run_id, "error", error, finished=True
+                        ),
+                        clear_live_text=lambda: _set_run_live_text(run_id, ""),
+                        reset_live_usage=lambda: _set_run_live_usage(
+                            run_id, 0, 0, 0
+                        ),
                     ),
-                    sr,
-                    latency,
+                    worker_turn_flow.WorkerTurnRequest(
+                        step_label=step_label,
+                        session_name=session_name,
+                        state=worker_turn_flow.WorkerTurnState(
+                            pending_reply_message_id=pending_ai_reply_message_id,
+                            consecutive_errors=consecutive_ai_errors,
+                            image_input_disabled=image_input_disabled,
+                        ),
+                        policy=worker_turn_flow.WorkerTurnPolicy(
+                            mcp_active=mcp_active,
+                            exposed_tools=frozenset(exposed_tool_allowlist),
+                            allowed_tools=frozenset(effective_tool_allowlist),
+                            task_runtime=is_task_runtime,
+                            plan_active=plan_state is not None,
+                            awaiting_finish=flow_awaiting_finish,
+                            tool_protocol=tool_protocol,
+                        ),
+                    ),
                 )
+                pending_ai_reply_message_id = (
+                    worker_turn.state.pending_reply_message_id
+                )
+                consecutive_ai_errors = worker_turn.state.consecutive_errors
+                image_input_disabled = worker_turn.state.image_input_disabled
+                if worker_turn.action is worker_turn_flow.WorkerTurnAction.STOP_RUN:
+                    return
+                if worker_turn.action is worker_turn_flow.WorkerTurnAction.RETRY:
+                    continue
+                persisted_turn = worker_turn.persisted_turn
+                if persisted_turn is None:
+                    raise RuntimeError("model turn proceeded without persistence")
+                assistant_text = worker_turn.assistant_text
+                _has_native_tc = worker_turn.native_tool_calls
+                native_tool_name_map = worker_turn.native_tool_name_map or {}
                 turn_calls = persisted_turn.tool_calls
                 saved = persisted_turn.saved_message
                 turn_convo_start = persisted_turn.conversation_start
-                _ai_debug_stage(
-                    "DONE",
-                    f"{_ai_short_run_id(run_id)} #{step_label} "
-                    f"{sr.finish_reason or 'stop'} {int(latency * 1000)}ms "
-                    f"tok={persisted_turn.token_triplet} "
-                    f"tc={'native:' if _has_native_tc else ''}"
-                    f"{_ai_short(', '.join(c['tool'] for c in turn_calls) or '-', 48)}",
-                    "32",
-                )
                 # Screenshot images captured by this turn's tools, held back until
                 # every tool response is appended (see _flush_turn_screenshots).
                 turn_screenshot_messages: List[Dict] = []
-                _set_run_live_text(run_id, "")
-                _set_run_live_usage(run_id, 0, 0, 0)
 
                 compression_context = compression_flow.CompressionContext(
                     session=bg, user=user, config=cfg, user_id=user_id,
