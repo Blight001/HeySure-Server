@@ -15,7 +15,6 @@ from api.runtime import run_context
 from mcp_runtime.mcp import get_project_root
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import ChatMessageCreate
-from api.services.chat import mcp_session_context
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import compression_flow
 from ai_runtime.inference import final_response_flow
@@ -40,7 +39,6 @@ from ai_runtime.inference.debug_support import (
     ai_short as _ai_short,
     ai_short_base_url as _ai_short_base_url,
     ai_short_run_id as _ai_short_run_id,
-    heysure_provider_session_id as _heysure_provider_session_id,
 )
 from ai_runtime.inference.policies import (
     can_start_inference_step as _can_start_inference_step,
@@ -62,20 +60,13 @@ from ai_runtime.inference.tool_resolution import (
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
     split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
 )
-from ai_runtime.inference.run_request import (
-    WorkerRequest,
-    resolve_session_preset_entry,
-    start_worker_run,
-)
+from ai_runtime.inference.run_request import WorkerRequest, start_worker_run
 from ai_runtime.inference.tool_execution import (
     JoinedToolRequest,
     execute_tool_call as _execute_tool_call,
 )
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
-from api.services.tasks.task_system import (
-    TASK_RUNTIME_REQUIRED_TOOLS,
-)
 from api.chat_runtime.chat_prompt_utils import (
     _append_mcp_state_to_tags,
     _append_prompt_section,
@@ -86,7 +77,6 @@ from api.chat_runtime.chat_prompt_utils import (
     _set_run_live_usage,
 )
 from api.services.chat.chat_persistence import _save_message
-from api.chat_runtime.chat_stream import _detect_provider
 from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
     _load_task_job_by_session,
@@ -179,16 +169,8 @@ def _run_worker_impl(request: WorkerRequest):
             markup_fallback_available = True
             compression_failed = False
 
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                # Unknown HTTP headers are ignored by ordinary providers, while
-                # HeySure's local CLI gateways use this anonymous value to map
-                # full OpenAI requests onto one provider-side conversation.
-                "X-HeySure-Session-ID": _heysure_provider_session_id(
-                    user_id, ai_config_id, ai_kind, session_id
-                ),
-            }
+            capabilities = worker_setup.prepare_capabilities(bg, request, setup)
+            headers = capabilities.headers
             last_rejected_tool_sig = ""
             rejected_repeat = 0
             consecutive_ai_errors = 0
@@ -198,51 +180,10 @@ def _run_worker_impl(request: WorkerRequest):
             last_batch_sig = ""
             consecutive_same_batch = 0
 
-            # Native tool schemas are exposed progressively. Keep the full
-            # allowlist as the execution boundary, but initially show only MCP
-            # self-inspection tools to the model.
-            mcp_active = bool(cfg and cfg.mcp_enabled and effective_tool_allowlist)
-            restored_described_tools: set[str] = set()
-            if ai_config_id is not None:
-                try:
-                    cached_versions = mcp_session_context.described_tool_versions(
-                        bg,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                    )
-                    if cached_versions:
-                        from tools.introspection import current_tool_schema_versions
-
-                        current_versions = current_tool_schema_versions(user_id, cached_versions.keys())
-                        restored_described_tools = {
-                            name for name, version in cached_versions.items()
-                            if current_versions.get(name) == version and name in effective_tool_allowlist
-                        }
-                except Exception:
-                    logger.exception("restore described MCP tools failed")
-            exposed_tool_allowlist = (
-                (set(MCP_INTROSPECTION_TOOLS) | restored_described_tools)
-                & set(effective_tool_allowlist)
-            )
-            if is_task_runtime:
-                # Pre-expose the task / planned-flow tools so a task runtime can
-                # plan, advance phases and finish without a describe_tool detour.
-                exposed_tool_allowlist |= set(TASK_RUNTIME_REQUIRED_TOOLS) & set(effective_tool_allowlist)
-            provider = _detect_provider(base_url)
-            # Explicit preset capability fields beat base_url sniffing: a local
-            # CLI gateway (grok-cli 等) looks like a generic OpenAI endpoint, so
-            # the preset is the only place that knows the wire/tool protocol.
-            preset_entry = resolve_session_preset_entry(
-                bg, user, cfg, session_id, ai_kind
-            ) or {}
-            preset_provider = str(preset_entry.get("provider") or "auto")
-            if preset_provider == "anthropic":
-                provider = "anthropic"
-            elif preset_provider == "openai":
-                provider = "openai_compat"
-            tool_protocol = str(preset_entry.get("tool_protocol") or "auto")
+            mcp_active = capabilities.mcp_active
+            exposed_tool_allowlist = set(capabilities.exposed_tool_allowlist)
+            provider = capabilities.provider
+            tool_protocol = capabilities.tool_protocol
             _ai_debug_stage(
                 "INIT",
                 f"{_ai_short_run_id(run_id)} {provider} {model} tc_proto={tool_protocol} "

@@ -1,5 +1,6 @@
 """Build the immutable inputs required by an inference worker run."""
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
@@ -13,10 +14,23 @@ from api.chat_runtime.chat_runtime_helpers import (
 )
 from api.core.config import DEFAULT_CHAT_MAX_STEPS
 from api.models import ChatMessage, User
-from api.services.tasks.task_system import normalize_system_auto_control
+from api.services.chat import mcp_session_context
+from api.services.tasks.task_system import (
+    TASK_RUNTIME_REQUIRED_TOOLS,
+    normalize_system_auto_control,
+)
+from api.chat_runtime.chat_stream import _detect_provider
+from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from ai_runtime.inference.conversation_history import build_conversation_history
+from ai_runtime.inference.debug_support import heysure_provider_session_id
 from ai_runtime.inference.policies import coerce_max_steps
-from ai_runtime.inference.run_request import WorkerRequest
+from ai_runtime.inference.run_request import (
+    WorkerRequest,
+    resolve_session_preset_entry,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,6 +49,15 @@ class WorkerSetup:
     effective_tool_allowlist: frozenset[str]
     history: List[ChatMessage]
     conversation: List[Dict]
+
+
+@dataclass(frozen=True)
+class WorkerCapabilities:
+    headers: Dict[str, str]
+    mcp_active: bool
+    exposed_tool_allowlist: frozenset[str]
+    provider: str
+    tool_protocol: str
 
 
 def prepare_worker(session: Session, request: WorkerRequest) -> WorkerSetup:
@@ -135,3 +158,82 @@ def _build_history(session, request, user, system_prompt):
         model_user_content=request.model_user_content,
     )
     return history, conversation
+
+
+def prepare_capabilities(
+    session: Session,
+    request: WorkerRequest,
+    setup: WorkerSetup,
+) -> WorkerCapabilities:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {setup.api_key}",
+        "X-HeySure-Session-ID": heysure_provider_session_id(
+            request.user_id,
+            request.ai_config_id,
+            request.ai_kind,
+            request.session_id,
+        ),
+    }
+    mcp_active = bool(
+        setup.config
+        and setup.config.mcp_enabled
+        and setup.effective_tool_allowlist
+    )
+    restored = _restored_described_tools(session, request, setup)
+    exposed = (
+        (set(MCP_INTROSPECTION_TOOLS) | restored)
+        & set(setup.effective_tool_allowlist)
+    )
+    if setup.is_task_runtime:
+        exposed |= (
+            set(TASK_RUNTIME_REQUIRED_TOOLS)
+            & set(setup.effective_tool_allowlist)
+        )
+    provider = _detect_provider(setup.base_url)
+    preset = resolve_session_preset_entry(
+        session,
+        setup.user,
+        setup.config,
+        request.session_id,
+        request.ai_kind,
+    ) or {}
+    preset_provider = str(preset.get("provider") or "auto")
+    if preset_provider == "anthropic":
+        provider = "anthropic"
+    elif preset_provider == "openai":
+        provider = "openai_compat"
+    return WorkerCapabilities(
+        headers=headers,
+        mcp_active=mcp_active,
+        exposed_tool_allowlist=frozenset(exposed),
+        provider=provider,
+        tool_protocol=str(preset.get("tool_protocol") or "auto"),
+    )
+
+
+def _restored_described_tools(session, request, setup):
+    if request.ai_config_id is None:
+        return set()
+    try:
+        cached = mcp_session_context.described_tool_versions(
+            session,
+            user_id=request.user_id,
+            ai_config_id=request.ai_config_id,
+            ai_kind=request.ai_kind,
+            session_id=request.session_id,
+        )
+        if not cached:
+            return set()
+        from tools.introspection import current_tool_schema_versions
+
+        current = current_tool_schema_versions(request.user_id, cached.keys())
+        return {
+            name
+            for name, version in cached.items()
+            if current.get(name) == version
+            and name in setup.effective_tool_allowlist
+        }
+    except Exception:
+        logger.exception("restore described MCP tools failed")
+        return set()

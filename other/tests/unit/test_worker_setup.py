@@ -83,3 +83,98 @@ def test_prepare_worker_builds_frozen_runtime_snapshot(monkeypatch):
 def test_prepare_worker_rejects_missing_user():
     with pytest.raises(RuntimeError, match="User not found"):
         worker_setup.prepare_worker(FakeSession(None), _request("session-a"))
+
+
+def _setup(*, task_runtime=False, allowed=None):
+    return worker_setup.WorkerSetup(
+        user=SimpleNamespace(),
+        max_steps=40,
+        config=SimpleNamespace(mcp_enabled=True),
+        api_key="secret",
+        base_url="https://api.anthropic.com",
+        model="model-a",
+        system_prompt="prompt",
+        warning_template="warning",
+        auto_control={},
+        task_job=None,
+        is_task_runtime=task_runtime,
+        effective_tool_allowlist=frozenset(
+            allowed or {"mcp.describe+tool", "todo.manage", "knowledge.search"}
+        ),
+        history=[],
+        conversation=[],
+    )
+
+
+def test_prepare_capabilities_restores_current_tools_and_applies_preset(monkeypatch):
+    request = _request("session-a")
+    setup = _setup()
+    monkeypatch.setattr(
+        worker_setup.mcp_session_context,
+        "described_tool_versions",
+        lambda *args, **kwargs: {"knowledge.search": "v2", "stale.tool": "v1"},
+    )
+    monkeypatch.setattr(
+        "tools.introspection.current_tool_schema_versions",
+        lambda user_id, names: {"knowledge.search": "v2", "stale.tool": "v3"},
+    )
+    monkeypatch.setattr(
+        worker_setup,
+        "resolve_session_preset_entry",
+        lambda *args: {"provider": "openai", "tool_protocol": "markup"},
+    )
+    monkeypatch.setattr(
+        worker_setup,
+        "heysure_provider_session_id",
+        lambda *args: "provider-session",
+    )
+
+    result = worker_setup.prepare_capabilities(FakeSession(setup.user), request, setup)
+
+    assert result.headers["Authorization"] == "Bearer secret"
+    assert result.headers["X-HeySure-Session-ID"] == "provider-session"
+    assert result.mcp_active is True
+    assert result.exposed_tool_allowlist == frozenset(
+        {"mcp.describe+tool", "knowledge.search"}
+    )
+    assert result.provider == "openai_compat"
+    assert result.tool_protocol == "markup"
+
+
+def test_prepare_capabilities_preexposes_required_task_tools(monkeypatch):
+    request = _request()
+    setup = _setup(task_runtime=True)
+    monkeypatch.setattr(
+        worker_setup.mcp_session_context,
+        "described_tool_versions",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(worker_setup, "resolve_session_preset_entry", lambda *args: None)
+    monkeypatch.setattr(worker_setup, "_detect_provider", lambda base_url: "anthropic")
+
+    result = worker_setup.prepare_capabilities(FakeSession(setup.user), request, setup)
+
+    expected = {"mcp.describe+tool"} | (
+        set(worker_setup.TASK_RUNTIME_REQUIRED_TOOLS)
+        & set(setup.effective_tool_allowlist)
+    )
+    assert result.exposed_tool_allowlist == frozenset(expected)
+    assert result.provider == "anthropic"
+    assert result.tool_protocol == "auto"
+
+
+def test_prepare_capabilities_logs_and_ignores_restore_failure(monkeypatch, caplog):
+    request = _request("session-a")
+    setup = _setup()
+    monkeypatch.setattr(
+        worker_setup.mcp_session_context,
+        "described_tool_versions",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("cache unavailable")),
+    )
+    monkeypatch.setattr(worker_setup, "resolve_session_preset_entry", lambda *args: None)
+
+    with caplog.at_level("ERROR"):
+        result = worker_setup.prepare_capabilities(FakeSession(setup.user), request, setup)
+
+    assert result.exposed_tool_allowlist == frozenset({"mcp.describe+tool"})
+    assert "restore described MCP tools failed" in caplog.text

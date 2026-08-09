@@ -1,6 +1,8 @@
 """Stable anonymous session IDs let local CLI gateways resume provider state."""
 
-from ai_runtime.inference.core import _heysure_provider_session_id
+from ai_runtime.inference.debug_support import (
+    heysure_provider_session_id as _heysure_provider_session_id,
+)
 
 
 def test_openai_session_user_is_stable_and_anonymous():
