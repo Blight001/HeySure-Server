@@ -2,7 +2,9 @@
 
 import unittest
 
-from ai_runtime.inference.core import _should_replay_system_notice_as_user
+from ai_runtime.inference.communication_prompt import (
+    should_replay_system_notice_as_user,
+)
 from api.services.knowledge.knowledge_review_trigger import (
     KNOWLEDGE_REVIEW_TAG,
     _render_briefing,
@@ -11,10 +13,10 @@ from api.services.knowledge.knowledge_review_trigger import (
 
 class KnowledgeReviewBriefingTests(unittest.TestCase):
     def test_review_system_notice_is_replayed_to_the_model(self) -> None:
-        self.assertTrue(_should_replay_system_notice_as_user(KNOWLEDGE_REVIEW_TAG))
+        self.assertTrue(should_replay_system_notice_as_user(KNOWLEDGE_REVIEW_TAG))
 
     def test_unrelated_system_bubble_is_not_replayed(self) -> None:
-        self.assertFalse(_should_replay_system_notice_as_user("system_notice_ai_error"))
+        self.assertFalse(should_replay_system_notice_as_user("system_notice_ai_error"))
 
     def test_briefing_contains_the_actionable_review_request(self) -> None:
         content = _render_briefing(

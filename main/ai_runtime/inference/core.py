@@ -17,23 +17,18 @@ from api.runtime import http_client, run_context
 ai_http_post = http_client.ai_http_post
 from mcp_runtime.mcp import get_project_root
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
-from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
+from api.models import AITaskJob, ChatMessage, ChatMessageCreate, User
 from api.services.chat import chat_inject, mcp_session_context
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import compression_flow
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
+from ai_runtime.inference import step_preparation
 from ai_runtime.inference import tool_media
 from ai_runtime.inference import tool_metadata
 from ai_runtime.inference import tool_persistence
 from ai_runtime.inference import tool_rejections
-from ai_runtime.inference.communication_prompt import (
-    AIMessagePrompt,
-    normalize_ai_message_type as _normalize_ai_message_type,
-    render_ai_message_system_prompt as _render_ai_message_system_prompt,
-    should_replay_system_notice_as_user as _should_replay_system_notice_as_user,
-)
 from ai_runtime.inference.debug_support import (
     ai_color as _ai_color,
     ai_debug_enabled as _ai_debug_enabled,
@@ -62,7 +57,6 @@ from ai_runtime.inference.tool_resolution import (
     append_joined_tool_response as _append_joined_tool_response,
     append_ordinary_tool_response as _append_ordinary_tool_response,
     append_pending_call_responses as _answer_pending_calls,
-    build_native_tools_payload as _build_native_tools_payload,
     flush_screenshot_messages as _flush_screenshot_messages,
     missing_required_mcp_args as _missing_required_mcp_args,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
@@ -120,18 +114,6 @@ from api.chat_runtime.chat_runtime_helpers import (
 
 from api.core.config import DEFAULT_CHAT_MAX_STEPS
 from api.core.settings import settings
-
-
-def _resolve_ai_name_safe(session: Session, ai_config_id: Optional[int]) -> str:
-    if not ai_config_id:
-        return ""
-    try:
-        row = session.exec(
-            select(AssistantAIConfig).where(AssistantAIConfig.id == int(ai_config_id))
-        ).first()
-        return str(row.name or "") if row else ""
-    except Exception:
-        return ""
 
 
 def _format_upstream_error(response: requests.Response, max_body_len: int = 4000) -> str:
@@ -926,71 +908,14 @@ def _run_worker_impl(request: WorkerRequest):
                     _run_set_status(run_id, "stopped", finished=True)
                     return
 
-                # 抢占式钩子：若收件箱有 pending 的 AI 间消息，在下一次 LLM
-                # 调用前把它注入到 convo 强制 AI 优先回复。
-                # 必须按 session_id 严格匹配——保证 (AI, session) 的消息流
-                # 不会跨会话相互串话。
-                if ai_config_id is not None:
-                    try:
-                        _inbound = ai_message_service.pop_pending_for(
-                            user_id, int(ai_config_id), session_id
-                        )
-                    except Exception as _iex:
-                        _inbound = None
-                        logger.exception("inbox poll failed")
-                    if _inbound is not None:
-                        _from_name = _resolve_ai_name_safe(bg, _inbound.from_ai_config_id) or f"AI-{_inbound.from_ai_config_id}"
-                        _target_name = _resolve_ai_name_safe(bg, ai_config_id) or f"AI-{ai_config_id}"
-                        _requires_reply = bool(getattr(_inbound, "require_reply", True))
-                        _msg_type = _normalize_ai_message_type(
-                            getattr(_inbound, "message_type", None),
-                            _requires_reply,
-                        )
-                        _injected = _render_ai_message_system_prompt(AIMessagePrompt(
-                            from_ai_name=_from_name,
-                            from_ai_config_id=_inbound.from_ai_config_id,
-                            target_ai_name=_target_name,
-                            target_ai_config_id=ai_config_id,
-                            message_id=_inbound.message_id,
-                            current_session_id=session_id,
-                            content=_inbound.content,
-                            message_type=_msg_type,
-                            require_reply=_requires_reply,
-                        ))
-                        _save_message(
-                            bg,
-                            user_id,
-                            ChatMessageCreate(
-                                role="user",
-                                content=_injected,
-                                tags=f"ai_message_inbound:{_msg_type}:{_inbound.message_id}",
-                                ai_config_id=ai_config_id,
-                                ai_kind=ai_kind,
-                                session_id=session_id,
-                                session_name=session_name,
-                                model=model,
-                                total_tokens=0,
-                            ),
-                        )
-                        convo.append({"role": "user", "content": _injected})
-                        if _requires_reply or _msg_type == "inquiry":
-                            pending_ai_reply_message_id = str(_inbound.message_id or "").strip()
-                        else:
-                            pending_ai_reply_message_id = ""
-
-                # 用户中途插入：运行期间用户发来的消息不再等到整轮结束，
-                # 而是在每个步骤边界（一次深度思考或一次 MCP 调用之后）直接
-                # 注入到 convo，让 AI 在下一次推理前就看到它。消息已由
-                # /run/inject 落库，这里只追加到上下文，绝不重复保存。
-                try:
-                    _user_injects = chat_inject.pop_pending_injects(
-                        user_id, ai_config_id, ai_kind, session_id
-                    )
-                except Exception:
-                    _user_injects = []
-                    logger.exception("pending user-inject poll failed")
-                for _inject_text in _user_injects:
-                    convo.append({"role": "user", "content": _inject_text})
+                pending_ai_reply_message_id = step_preparation.ingest_step_messages(
+                    step_preparation.StepMessageContext(
+                        session=bg, conversation=convo, user_id=user_id,
+                        ai_config_id=ai_config_id, ai_kind=ai_kind,
+                        session_id=session_id, session_name=session_name, model=model,
+                    ),
+                    pending_ai_reply_message_id,
+                )
 
                 _append_missing_tool_responses(
                     convo,
@@ -1006,34 +931,20 @@ def _run_worker_impl(request: WorkerRequest):
                                 removed_images,
                             ),
                         })
-                if mcp_active:
-                    current_exposed_tools = set(exposed_tool_allowlist) & set(effective_tool_allowlist)
-                    current_exposed_tools.update(set(MCP_INTROSPECTION_TOOLS) & set(effective_tool_allowlist))
-                    # If plan mode is already active, narrow the visible tools
-                    # to the phase-forward action (plus self-inspection).
-                    if is_task_runtime and plan_state is None:
-                        # Allow knowledge tools so the AI can consult the KB
-                        # before committing to a plan structure.
-                        _pre_plan_kb_tools = {
-                            "knowledge.search",
-                            "librarian.consult",
-                            "librarian.list_topics",
-                        }
-                        current_exposed_tools = (
-                            {"todo.manage"} | set(MCP_INTROSPECTION_TOOLS) | _pre_plan_kb_tools
-                        ) & set(effective_tool_allowlist)
-                    elif is_task_runtime and flow_awaiting_finish:
-                        current_exposed_tools = set(MCP_INTROSPECTION_TOOLS) & set(effective_tool_allowlist)
-                    if tool_protocol == "text":
-                        # Preset says the endpoint ignores / rejects the native
-                        # tools payload (text-protocol gateway): rely purely on
-                        # the prompt-taught <mcp-call> blocks.
-                        step_tools, native_tool_name_map = [], {}
-                    else:
-                        step_tools, native_tool_name_map = _build_native_tools_payload(current_exposed_tools)
-                else:
-                    current_exposed_tools = set()
-                    step_tools, native_tool_name_map = [], {}
+                exposure = step_preparation.select_tool_exposure(
+                    step_preparation.ToolExposureRequest(
+                        mcp_active=mcp_active,
+                        exposed_tools=frozenset(exposed_tool_allowlist),
+                        allowed_tools=frozenset(effective_tool_allowlist),
+                        task_runtime=is_task_runtime,
+                        plan_active=plan_state is not None,
+                        awaiting_finish=flow_awaiting_finish,
+                        tool_protocol=tool_protocol,
+                    )
+                )
+                current_exposed_tools = set(exposure.current_tools)
+                step_tools = exposure.provider_tools
+                native_tool_name_map = exposure.native_name_map
                 start_at = time.time()
                 _ai_debug_stage(
                     "TURN",
