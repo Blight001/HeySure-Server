@@ -39,6 +39,7 @@ from connector_runtime.dispatch.desktop_device_tools import (
     is_workshop_tool,
 )
 from api.services.storage.screenshot_store import attach_persisted_screenshot
+from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
 from api.models import AgentDispatchTask, ChatMessageCreate, DeviceAiBinding, DevicePresence
 from api.sio import agents, sio
 from api.services.chat.chat_persistence import _save_message
@@ -639,7 +640,6 @@ def _save_agent_message(ctx: Dict[str, Any], content: str, tags: str) -> None:
         )
 
 
-_SCREENSHOT_TOOLS = {"browser_screenshot", "screen.capture", "screen.capture_region", "vision.capture", "vision.capture_mouse"}
 _IMAGE_DATA_URL_KEYS = {"dataUrl", "data_url", "imageDataUrl", "screenshotDataUrl", "screenshot"}
 
 
@@ -655,13 +655,19 @@ def _explicit_send_disabled(args: Any) -> bool:
 def _should_send_screenshot_to_user(tool: str, result: Any, args: Any = None) -> bool:
     if _explicit_send_disabled(args):
         return False
+    tool_kind = canonical_screenshot_tool_name(tool)
+    requested_by_args = isinstance(args, dict) and any(
+        args.get(key) is True
+        for key in ("send_to_user", "bot_send_to_user", "deliver_to_user")
+    )
     return (
-        (isinstance(result, dict) and (
+        requested_by_args
+        or (isinstance(result, dict) and (
             result.get("send_to_user") is True
             or result.get("bot_send_to_user") is True
             or result.get("deliver_to_user") is True
         ))
-        or str(tool or "") in {"vision.capture", "vision.capture_mouse", "screen.capture", "screen.capture_region"}
+        or tool_kind in {"vision_capture", "vision_capture_mouse", "screen_capture", "screen_capture_region"}
     )
 
 
@@ -836,7 +842,8 @@ async def handle_task_result(data: Dict[str, Any]) -> bool:
     tool = str(data.get("tool") or ctx.get("tool") or "")
     summary = str(data.get("summary") or "")
     result = data.get("result")
-    if success and tool in _SCREENSHOT_TOOLS:
+    is_screenshot = bool(canonical_screenshot_tool_name(tool))
+    if success and is_screenshot:
         result = _normalize_screenshot_result_for_delivery(tool, result, ctx.get("args"))
         try:
             result = attach_persisted_screenshot(
@@ -866,7 +873,7 @@ async def handle_task_result(data: Dict[str, Any]) -> bool:
                 result["save_error"] = str(exc)
 
     status = "成功" if success else "失败"
-    display_result = _omit_screenshot_bytes(result) if tool in _SCREENSHOT_TOOLS else result
+    display_result = _omit_screenshot_bytes(result) if is_screenshot else result
     result_text = result if isinstance(result, str) else _safe_dump(display_result)
     agent_label = _device_kind_label(device_id)
     content = (

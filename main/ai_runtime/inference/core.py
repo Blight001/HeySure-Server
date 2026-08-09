@@ -26,6 +26,7 @@ from mcp_runtime.mcp import get_project_root, registry
 from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AITaskJob, AssistantAIConfig, ChatMessage, ChatMessageCreate, User
 from api.services.chat import chat_inject, conversation_compress, mcp_session_context
+from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
@@ -997,16 +998,6 @@ def _reset_convo_after_clear(
 _IMAGE_DATA_URL_KEYS = ("dataUrl", "data_url", "imageDataUrl", "screenshotDataUrl", "screenshot")
 _IMAGE_URL_KEYS = ("image_url", "public_url")
 _IMAGE_PATH_KEYS = ("server_path", "path")
-_SCREENSHOT_MODEL_TOOLS = {
-    "browser_screenshot",
-    "mouse.click",
-    "screen.capture",
-    "screen.capture_region",
-    "vision.capture",
-    "vision.capture_mouse",
-}
-
-
 def _is_image_input_unsupported_error(error_text: str) -> bool:
     text = str(error_text or "").lower()
     image_markers = (
@@ -1179,7 +1170,7 @@ def _omit_image_fields(value: object) -> object:
 
 
 def _tool_image_message(tool: str, tool_result: Dict[str, object]) -> Optional[Dict[str, object]]:
-    if tool not in _SCREENSHOT_MODEL_TOOLS or not isinstance(tool_result, dict):
+    if not canonical_screenshot_tool_name(tool, include_mouse_click=True) or not isinstance(tool_result, dict):
         return None
     result_payload = tool_result.get("result", tool_result)
     image_payload = _find_image_payload(tool_result)
@@ -1222,7 +1213,7 @@ def _screenshot_display_ref(tool: str, tool_result: Dict[str, object]) -> Dict[s
     against the eventual ChatMessage row, so deleting or recalling that message
     removes the screenshot bytes from the database as well.
     """
-    if tool not in _SCREENSHOT_MODEL_TOOLS or not isinstance(tool_result, dict):
+    if not canonical_screenshot_tool_name(tool, include_mouse_click=True) or not isinstance(tool_result, dict):
         return {}
     payload = _find_image_payload(tool_result)
     url = payload.get("url", "")
@@ -1260,7 +1251,8 @@ def _find_screenshot_result_payload(value: object, depth: int = 0) -> Dict[str, 
 
 
 def _screenshot_send_to_user_enabled(tool: str, tool_result: Dict[str, object], args: Optional[dict] = None) -> bool:
-    if tool not in {"browser_screenshot", "screen.capture", "screen.capture_region", "vision.capture", "vision.capture_mouse"}:
+    tool_kind = canonical_screenshot_tool_name(tool)
+    if not tool_kind:
         return False
     if isinstance(args, dict) and any(
         key in args and args.get(key) is False
@@ -1272,7 +1264,7 @@ def _screenshot_send_to_user_enabled(tool: str, tool_result: Dict[str, object], 
         payload.get("send_to_user") is True
         or payload.get("bot_send_to_user") is True
         or payload.get("deliver_to_user") is True
-        or tool in {"browser_screenshot", "screen.capture", "screen.capture_region", "vision.capture", "vision.capture_mouse"}
+        or bool(tool_kind)
     )
 
 
@@ -1360,7 +1352,7 @@ def _model_visible_tool_result(
     image_attached: bool = True,
 ) -> object:
     result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else tool_result
-    if tool not in _SCREENSHOT_MODEL_TOOLS or not isinstance(result_payload, dict):
+    if not canonical_screenshot_tool_name(tool, include_mouse_click=True) or not isinstance(result_payload, dict):
         return result_payload
     cleaned = _omit_image_fields(_sanitize_large_media(result_payload))
     if not isinstance(cleaned, dict):
