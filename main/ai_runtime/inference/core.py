@@ -70,6 +70,11 @@ from ai_runtime.inference.runtime_clients import (
     dispatch_endpoint_via_runtime as _dispatch_endpoint_via_runtime,
     endpoint_dispatch_timeout as _endpoint_dispatch_timeout,
 )
+from ai_runtime.inference.run_request import (
+    WorkerRequest,
+    resolve_session_preset_entry,
+    start_worker_run,
+)
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
 from connector_runtime.dispatch.desktop_device_tools import (
@@ -101,7 +106,6 @@ from api.chat_runtime.chat_prompt_utils import (
     _strip_task_runtime_sections,
 )
 from api.services.chat.chat_persistence import _save_message
-from api.services.model_presets import session_model_preset_entry
 from api.chat_runtime.chat_stream import _detect_provider, stream_turn_anthropic, stream_turn_openai_compat
 from api.chat_runtime.chat_runtime_helpers import (
     _is_task_finished_status,
@@ -1052,7 +1056,7 @@ def _run_worker(
         pass
 
     try:
-        _run_worker_impl(
+        _run_worker_impl(WorkerRequest.create(
             run_id=run_id,
             user_id=user_id,
             ai_config_id=ai_config_id,
@@ -1064,7 +1068,7 @@ def _run_worker(
             max_steps=max_steps,
             current_user_message_id=current_user_message_id,
             selected_mcp_tools=selected_mcp_tools,
-        )
+        ))
     finally:
         try:
             from connector_runtime.bots.qq.stream_sender import finish_qq_stream
@@ -1089,38 +1093,14 @@ def _run_worker(
         _hb_thread.join(timeout=1.0)
 
 
-def _run_worker_impl(
-    *,
-    run_id: str,
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-    session_name: str,
-    model_user_content: Optional[str] = None,
-    merged_system_prompt: Optional[str] = None,
-    max_steps: Optional[int] = None,
-    current_user_message_id: Optional[int] = None,
-    selected_mcp_tools: Optional[set[str]] = None,
-):
-    if _run_should_stop(run_id):
-        _run_set_status(run_id, "stopped", finished=True)
+def _run_worker_impl(request: WorkerRequest):
+    if not start_worker_run(request):
         return
-    _run_set_status(run_id, "running")
-    _set_run_live_meta(
-        run_id,
-        user_id=user_id,
-        ai_config_id=ai_config_id,
-        ai_kind=ai_kind,
-        session_id=session_id,
-        session_name=session_name,
-    )
-    _ai_debug_stage(
-        "START",
-        f"{_ai_short_run_id(run_id)} u={user_id} cfg={ai_config_id if ai_config_id is not None else '-'} "
-        f"kind={ai_kind} sess={_ai_short(session_id, 24)}",
-        "36",
-    )
+    (
+        run_id, user_id, ai_config_id, ai_kind, session_id, session_name,
+        model_user_content, merged_system_prompt, max_steps,
+        current_user_message_id, selected_mcp_tools,
+    ) = request.unpack()
     try:
         with Session(engine) as bg:
             user = bg.get(User, user_id)
@@ -1244,7 +1224,7 @@ def _run_worker_impl(
             # Explicit preset capability fields beat base_url sniffing: a local
             # CLI gateway (grok-cli 等) looks like a generic OpenAI endpoint, so
             # the preset is the only place that knows the wire/tool protocol.
-            preset_entry = session_model_preset_entry(
+            preset_entry = resolve_session_preset_entry(
                 bg, user, cfg, session_id, ai_kind
             ) or {}
             preset_provider = str(preset_entry.get("provider") or "auto")
