@@ -24,6 +24,7 @@ from .audit import add_audit
 from .expression import evaluate_expression, render_template
 from .result_store import save_result
 from .secrets import decrypt_json, encrypt_json
+from .workflow_cancellation import cancel_workflow_run
 
 
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
@@ -929,32 +930,7 @@ def fail_step_dispatch(
 
 
 def cancel_run(session: Session, run: WorkflowRun, reason: str) -> WorkflowRun:
-    if run.status not in TERMINAL_RUN_STATUSES:
-        fail_run(session, run, error_payload("RUN_CANCELLED", reason, "cancel"), status="cancelled")
-        steps = session.exec(
-            select(WorkflowStepRun).where(
-                WorkflowStepRun.run_id == run.id,
-                WorkflowStepRun.status.in_(["dispatch_pending", "dispatching", "waiting_device"]),
-            )
-        ).all()
-        for step in steps:
-            step.status = "cancelled"
-            step.finished_at = time.time()
-            session.add(step)
-        confirmations = session.exec(
-            select(WorkflowConfirmation).where(
-                WorkflowConfirmation.run_id == run.id,
-                WorkflowConfirmation.status == "pending",
-            )
-        ).all()
-        for confirmation in confirmations:
-            confirmation.status = "cancelled"
-            confirmation.decision = "cancelled"
-            confirmation.decided_at = time.time()
-            session.add(confirmation)
-        session.commit()
-        session.refresh(run)
-    return run
+    return cancel_workflow_run(session, run, reason, fail_run)
 
 
 def wake_offline_runs(session: Session, *, user_id: int, device_id: str) -> int:

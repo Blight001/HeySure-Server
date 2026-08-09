@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Optional
 
@@ -28,7 +29,11 @@ from api.services.workflows.run_service import (
 )
 from api.services.workflows.schemas import RunCancel, RunConfirm, RunCreate, RunRetry
 from api.core.settings import settings
+from api.runtime.internal_http import internal_post
 from .auth import get_current_user
+
+
+logger = logging.getLogger(__name__)
 
 
 def _require_enabled() -> None:
@@ -44,6 +49,20 @@ def _owned_run(session: Session, user_id: int, run_id: str):
     return session.exec(
         select(WorkflowRun).where(WorkflowRun.id == run_id, WorkflowRun.user_id == user_id)
     ).first()
+
+
+async def _cancel_device_dispatch(task_id: str, reason: str) -> None:
+    if settings.connector_runtime_url:
+        await internal_post(
+            settings.connector_runtime_url,
+            f"/internal/agent/dispatch/cancel/{task_id}",
+            json={"reason": reason},
+            timeout=10.0,
+        )
+        return
+    from connector_runtime.dispatch.device_dispatch import cancel_dispatch
+
+    await cancel_dispatch(task_id, reason)
 
 
 @router.get("/workflow-metrics")
@@ -194,7 +213,7 @@ def get_steps(
 
 
 @router.post("/workflow-runs/{run_id}/cancel")
-def cancel(
+async def cancel(
     run_id: str,
     body: RunCancel,
     session: Session = Depends(get_session),
@@ -204,7 +223,20 @@ def cancel(
     row = _owned_run(session, user.id, run_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "RUN_NOT_FOUND"})
-    return run_payload(cancel_run(session, row, body.reason))
+    dispatch_ids = session.exec(
+        select(WorkflowStepRun.dispatch_task_id).where(
+            WorkflowStepRun.run_id == row.id,
+            WorkflowStepRun.status.in_(["dispatch_pending", "dispatching", "waiting_device"]),
+        )
+    ).all()
+    cancelled = cancel_run(session, row, body.reason)
+    for task_id in dispatch_ids:
+        if task_id:
+            try:
+                await _cancel_device_dispatch(str(task_id), body.reason)
+            except Exception:
+                logger.exception("device dispatch cancel notification failed task=%s", task_id)
+    return run_payload(cancelled)
 
 
 @router.get("/workflow-runs/{run_id}/confirmations")

@@ -7,6 +7,7 @@ os.environ.setdefault("HEYSURE_INTERNAL_TOKEN", "test")
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from api.models import (
+    AgentDispatchTask,
     DevicePresence,
     User,
     WorkflowAuditEvent,
@@ -22,6 +23,7 @@ from api.services.workflows.permissions import WorkflowDispatchError, validate_s
 from api.services.workflows.run_service import (
     advance_run,
     apply_step_result,
+    cancel_run,
     create_run,
     decide_confirmation,
 )
@@ -33,6 +35,7 @@ def _database():
         User.__table__, DevicePresence.__table__, WorkflowCard.__table__, WorkflowCardVersion.__table__,
         WorkflowRun.__table__, WorkflowStepRun.__table__, WorkflowConfirmation.__table__,
         WorkflowAuditEvent.__table__,
+        AgentDispatchTask.__table__,
     ]
     SQLModel.metadata.create_all(engine, tables=tables)
     return engine
@@ -184,3 +187,60 @@ def test_dispatch_rechecks_scope_schema_arguments_and_confirmation(monkeypatch):
             assert exc.code == "CONFIRMATION_REQUIRED"
         else:
             raise AssertionError("destructive tool must require confirmation")
+
+
+def test_cancel_run_terminalizes_pending_device_dispatch():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "call",
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 3},
+        "steps": {
+            "call": {
+                "type": "mcp",
+                "toolRef": {"namespace": "device", "name": "demo", "schemaDigest": "sha256:x"},
+                "arguments": {},
+                "timeoutSeconds": 30,
+                "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "output": {},
+    }
+    db = _database()
+    with Session(db) as session:
+        user, card = _seed(session, definition, tool_contracts={"demo": {}})
+        run = create_run(
+            session,
+            user_id=user.id,
+            card_id=card.id,
+            device_id="device",
+            input_value={},
+        )
+        advance_run(session, run.id)
+        step = session.exec(
+            select(WorkflowStepRun).where(WorkflowStepRun.run_id == run.id)
+        ).one()
+        session.add(AgentDispatchTask(
+            task_id=step.dispatch_task_id,
+            user_id=user.id,
+            device_id="device",
+            status="pending",
+            lease_expires_at=9999999999,
+        ))
+        session.commit()
+
+        cancel_run(session, run, "user stopped workflow")
+
+        session.refresh(step)
+        dispatch = session.exec(
+            select(AgentDispatchTask).where(
+                AgentDispatchTask.task_id == step.dispatch_task_id
+            )
+        ).one()
+        assert run.status == "cancelled"
+        assert step.status == "cancelled"
+        assert dispatch.status == "cancelled"
+        assert dispatch.success is False
+        assert dispatch.error == "user stopped workflow"
+        assert dispatch.lease_expires_at is None

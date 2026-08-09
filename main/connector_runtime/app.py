@@ -52,6 +52,10 @@ class DeviceDispatchExpireRequest(BaseModel):
     reason: str = "result wait timed out"
 
 
+class DeviceDispatchCancelRequest(BaseModel):
+    reason: str = "cancelled by caller"
+
+
 class FeishuSendRequest(BaseModel):
     user_id: int
     ai_config_id: Optional[int] = None
@@ -161,16 +165,21 @@ def _new_fastapi_app() -> FastAPI:
     return fastapi_app
 
 
-def create_app() -> FastAPI:
-    fastapi_app = _new_fastapi_app()
+def _register_dispatch_cancel_route(router: APIRouter) -> None:
+    @router.post("/agent/dispatch/cancel/{task_id}")
+    async def device_dispatch_cancel(
+        task_id: str, req: Optional[DeviceDispatchCancelRequest] = None
+    ) -> Dict[str, Any]:
+        from connector_runtime.dispatch.device_dispatch import cancel_dispatch
 
-    router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
+        cancelled = await cancel_dispatch(
+            task_id,
+            reason=(req.reason if req else "cancelled by caller"),
+        )
+        return {"ok": True, "cancelled": cancelled}
 
-    from api.runtime.health import build_health_router
-    from connector_runtime.health_detail import connector_health_detail
 
-    router.include_router(build_health_router("connector", detail_provider=connector_health_detail))
-
+def _register_control_routes(router: APIRouter) -> None:
     @router.get("/logs")
     def logs(limit: int = 200, level: Optional[str] = None) -> Dict[str, Any]:
         from api.core.logging_config import get_recent_logs
@@ -184,6 +193,19 @@ def create_app() -> FastAPI:
         cmd = request_restart()
         logger.warning("restart requested via /internal/restart")
         return {"ok": True, "restarting": True, "command": cmd}
+
+
+def create_app() -> FastAPI:
+    fastapi_app = _new_fastapi_app()
+
+    router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
+    _register_dispatch_cancel_route(router)
+    _register_control_routes(router)
+
+    from api.runtime.health import build_health_router
+    from connector_runtime.health_detail import connector_health_detail
+
+    router.include_router(build_health_router("connector", detail_provider=connector_health_detail))
 
     @router.get("/bot/statuses")
     def bot_statuses() -> Dict[str, Any]:

@@ -151,3 +151,54 @@ def test_expire_releases_queue_and_promotes_next_task(monkeypatch):
         assert expired.status == "timeout"
         assert expired.error == "caller timeout"
         assert promoted.status == "pending"
+
+
+def test_cancel_releases_waiter_notifies_agent_and_resumes_queue(monkeypatch):
+    db = _database()
+    monkeypatch.setattr(repository, "engine", db)
+    monkeypatch.setattr(device_dispatch, "engine", db)
+    monkeypatch.setattr(device_dispatch, "_PENDING_DISPATCHES", {
+        "task-cancel": {
+            "device_id": "device-1",
+            "user_id": 1,
+            "session_id": "session-a",
+            "tool": "demo",
+        }
+    })
+    monkeypatch.setattr(device_dispatch, "_PENDING_DISPATCH_WAITERS", {})
+    monkeypatch.setitem(device_dispatch.agents, "sid-device", {"id": "device-1"})
+    emit = AsyncMock()
+    resume = AsyncMock(return_value=None)
+    monkeypatch.setattr(device_dispatch.sio, "emit", emit)
+    monkeypatch.setattr(device_dispatch, "resume_device_dispatch_queue", resume)
+    with Session(db) as session:
+        session.add(AgentDispatchTask(
+            task_id="task-cancel",
+            user_id=1,
+            device_id="device-1",
+            status="pending",
+        ))
+        session.commit()
+
+    async def scenario():
+        future = asyncio.get_running_loop().create_future()
+        device_dispatch._PENDING_DISPATCH_WAITERS["task-cancel"] = {
+            "loop": asyncio.get_running_loop(),
+            "future": future,
+        }
+        assert await device_dispatch.cancel_dispatch("task-cancel", "user cancelled")
+        await asyncio.sleep(0)
+        assert (await future)["cancelled"] is True
+
+    asyncio.run(scenario())
+
+    with Session(db) as session:
+        row = session.exec(
+            select(AgentDispatchTask).where(AgentDispatchTask.task_id == "task-cancel")
+        ).one()
+        assert row.status == "cancelled"
+        assert row.error == "user cancelled"
+    assert "task-cancel" not in device_dispatch._PENDING_DISPATCHES
+    assert "task-cancel" not in device_dispatch._PENDING_DISPATCH_WAITERS
+    assert any(call.args[0] == "task:cancel" for call in emit.await_args_list)
+    resume.assert_awaited_once_with("device-1")

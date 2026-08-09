@@ -41,6 +41,7 @@ from api.sio import agents, sio
 from api.services.chat.chat_persistence import _save_message
 from api.runtime.run_context import get_run_session_context, set_run_session_context
 from connector_runtime.dispatch import models as dispatch_models, repository as dispatch_repository
+from connector_runtime.dispatch import dispatch_cancellation
 from connector_runtime.dispatch.result_payloads import (
     normalize_screenshot_result_for_delivery as _normalize_screenshot_result_for_delivery,
     omit_screenshot_bytes as _omit_screenshot_bytes,
@@ -59,35 +60,8 @@ _persist_dispatch = dispatch_repository.persist_dispatch
 _requeue_pending = dispatch_repository.requeue_pending
 TERMINAL_DISPATCH_STATUSES = dispatch_models.TERMINAL_DISPATCH_STATUSES
 
-async def expire_dispatch(task_id: str, reason: str = "result wait timed out") -> bool:
-    """Finalize one unfinished dispatch as ``timeout`` and unblock its device queue.
-
-    Called (via the gateway's internal expire endpoint) by pollers in other
-    processes when they give up waiting on ``task_id`` — the row would
-    otherwise keep the device's queue wedged until the orphan sweep. Returns
-    False when the task already reached a terminal state.
-    """
-    ctx = _PENDING_DISPATCHES.pop(task_id, None)
-    device_id = str(ctx.get("device_id") or "") if ctx else ""
-    if not device_id:
-        try:
-            with Session(engine) as session:
-                row = session.exec(
-                    select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
-                ).first()
-            if not row or row.status not in {"pending", "queued"}:
-                return False
-            device_id = str(row.device_id or "")
-        except Exception as exc:
-            logger.exception(f"expire lookup failed task={task_id}: {exc}")
-            return False
-    expired = _finalize_dispatch_row(task_id, status="timeout", success=False, error=reason)
-    if expired and device_id:
-        try:
-            await resume_device_dispatch_queue(device_id)
-        except Exception:
-            logger.exception(f"queue resume after expire failed device={device_id}")
-    return expired
+expire_dispatch = dispatch_cancellation.expire_dispatch
+cancel_dispatch = dispatch_cancellation.cancel_dispatch
 
 # Per-run session context so MCP tools (running inside the worker thread) can
 # attach dispatched-task results to the correct chat session. asyncio.run()

@@ -63,6 +63,10 @@ class DeviceDispatchExpireRequest(BaseModel):
     reason: str = "result wait timed out"
 
 
+class DeviceDispatchCancelRequest(BaseModel):
+    reason: str = "cancelled by caller"
+
+
 @router.post("/dispatch/expire/{task_id}")
 async def device_dispatch_expire(
     task_id: str, req: Optional[DeviceDispatchExpireRequest] = None
@@ -75,6 +79,19 @@ async def device_dispatch_expire(
         task_id, reason=(req.reason if req else "result wait timed out")
     )
     return {"ok": True, "expired": expired}
+
+
+@router.post("/dispatch/cancel/{task_id}")
+async def device_dispatch_cancel(
+    task_id: str, req: Optional[DeviceDispatchCancelRequest] = None
+) -> Dict[str, Any]:
+    from connector_runtime.dispatch.device_dispatch import cancel_dispatch
+
+    cancelled = await cancel_dispatch(
+        task_id,
+        reason=(req.reason if req else "cancelled by caller"),
+    )
+    return {"ok": True, "cancelled": cancelled}
 
 
 @router.get("/dispatch/result/{task_id}")
