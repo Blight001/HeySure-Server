@@ -1,8 +1,10 @@
 import json
 
 from ai_runtime.inference.tool_resolution import (
+    ToolResponseContext,
     TurnCallAction,
     append_control_tool_result,
+    append_ordinary_tool_response,
     append_pending_call_responses,
     described_tool_entries,
     flush_screenshot_messages,
@@ -134,3 +136,52 @@ def test_control_tool_result_supports_native_and_text_protocols():
     assert json.loads(native_conversation[0]["content"])["success"] is True
     assert text_conversation[0]["role"] == "user"
     assert "todo.manage" in text_conversation[0]["content"]
+
+
+def test_ordinary_native_tool_result_keeps_structured_tool_role():
+    conversation = []
+    screenshots = []
+
+    append_ordinary_tool_response(
+        ToolResponseContext(
+            conversation=conversation,
+            screenshot_messages=screenshots,
+            turn_convo_start=0,
+            image_input_disabled=False,
+            native_tool_calls=True,
+        ),
+        "workspace.read",
+        {"path": "README.md"},
+        {"result": {"success": True, "content": "hello"}},
+        False,
+        "call-1",
+    )
+
+    assert conversation[0]["role"] == "tool"
+    assert conversation[0]["tool_call_id"] == "call-1"
+    assert json.loads(conversation[0]["content"])["content"] == "hello"
+    assert screenshots == []
+
+
+def test_ordinary_text_tool_failure_includes_arguments_and_result():
+    conversation = []
+
+    append_ordinary_tool_response(
+        ToolResponseContext(
+            conversation=conversation,
+            screenshot_messages=[],
+            turn_convo_start=0,
+            image_input_disabled=True,
+            native_tool_calls=False,
+        ),
+        "workspace.read",
+        {"path": "missing.md"},
+        {"result": {"success": False, "error": "not found"}},
+        True,
+        "call-1",
+    )
+
+    assert conversation[0]["role"] == "user"
+    assert "MCP执行失败" in conversation[0]["content"]
+    assert "missing.md" in conversation[0]["content"]
+    assert "not found" in conversation[0]["content"]

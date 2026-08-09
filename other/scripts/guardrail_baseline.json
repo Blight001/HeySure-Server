@@ -1,11 +1,11 @@
 {
   "counts": {
-    "complexity": 125,
+    "complexity": 124,
     "dependencies": 15,
     "file_lines": 17,
     "function_lines": 49,
     "nesting": 29,
-    "parameters": 24
+    "parameters": 23
   },
   "limits": {
     "production": {
@@ -36,8 +36,7 @@
     "complexity:main/ai_runtime/inference/ai_service.py:migrate_legacy_switch_files_to_db": 19,
     "complexity:main/ai_runtime/inference/core.py:_append_missing_tool_responses": 18,
     "complexity:main/ai_runtime/inference/core.py:_format_upstream_error": 16,
-    "complexity:main/ai_runtime/inference/core.py:_run_worker_impl": 224,
-    "complexity:main/ai_runtime/inference/core.py:_run_worker_impl._execute_turn_call": 49,
+    "complexity:main/ai_runtime/inference/core.py:_run_worker_impl": 190,
     "complexity:main/api/chat_runtime/chat_prompt_utils.py:_build_dynamic_mcp_explanation": 35,
     "complexity:main/api/chat_runtime/chat_prompt_utils.py:_build_mcp_stream_warning": 36,
     "complexity:main/api/chat_runtime/chat_prompt_utils.py:_emit_run_live_update": 16,
@@ -168,7 +167,7 @@
     "dependencies:main/gateway/routers/diagnostics.py": 18,
     "dependencies:main/gateway/routers/mcp.py": 19,
     "file_lines:main/ai_runtime/inference/ai_message_service.py": 954,
-    "file_lines:main/ai_runtime/inference/core.py": 1654,
+    "file_lines:main/ai_runtime/inference/core.py": 1448,
     "file_lines:main/api/chat_runtime/chat_prompt_utils.py": 895,
     "file_lines:main/api/chat_runtime/chat_runtime_helpers.py": 534,
     "file_lines:main/api/core/migrations.py": 1589,
@@ -186,8 +185,8 @@
     "file_lines:main/gateway/routers/chat_action_routes.py": 746,
     "function_lines:main/ai_runtime/inference/ai_message_service.py:_send_inquiry_reply_reminder": 132,
     "function_lines:main/ai_runtime/inference/ai_message_service.py:_wake_idle_target_for_message_locked": 119,
-    "function_lines:main/ai_runtime/inference/core.py:_run_worker_impl": 1225,
-    "function_lines:main/ai_runtime/inference/core.py:_run_worker_impl._execute_turn_call": 348,
+    "function_lines:main/ai_runtime/inference/core.py:_run_worker_impl": 1075,
+    "function_lines:main/ai_runtime/inference/core.py:_run_worker_impl._execute_turn_call": 198,
     "function_lines:main/api/chat_runtime/chat_prompt_utils.py:_build_mcp_stream_warning": 95,
     "function_lines:main/api/chat_runtime/chat_runtime_helpers.py:build_runtime_system_prompt_and_tools": 203,
     "function_lines:main/api/chat_runtime/chat_scheduler.py:_start_task_run": 163,
@@ -263,7 +262,6 @@
     "nesting:main/gateway/routers/chat_action_routes.py:stream_chat.generate": 10,
     "nesting:main/gateway/routers/diagnostics.py:_probe_model": 5,
     "parameters:main/ai_runtime/inference/ai_message_service.py:send": 10,
-    "parameters:main/ai_runtime/inference/core.py:_append_mcp_disabled_feedback": 11,
     "parameters:main/ai_runtime/inference/core.py:_run_worker": 11,
     "parameters:main/api/chat_runtime/chat_runtime_helpers.py:build_runtime_system_prompt_and_tools": 10,
     "parameters:main/api/core/migrations.py:_migrate_user": 20,

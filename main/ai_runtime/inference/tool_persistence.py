@@ -3,14 +3,19 @@
 from dataclasses import dataclass
 import logging
 import time
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from sqlmodel import Session
 
-from api.chat_runtime.chat_prompt_utils import _safe_json
+from api.chat_runtime.chat_prompt_utils import _append_mcp_state_to_tags, _safe_json
 from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate
 from api.services.chat.chat_persistence import _save_message
 from ai_runtime.inference import tool_media
+from ai_runtime.inference import phase_context
+from ai_runtime.inference.tool_execution import (
+    JoinedToolRequest,
+    iter_joined_tool_executions,
+)
 from connector_runtime.dispatch.desktop_device_tools import is_endpoint_agent_tool
 
 
@@ -49,6 +54,30 @@ class ToolBubbleRequest:
     latency: Optional[float] = None
 
 
+@dataclass(frozen=True)
+class JoinedPersistenceContext:
+    session: Session
+    saved_message: ChatMessage
+    user_id: int
+    ai_config_id: Optional[int]
+    ai_kind: str
+    session_id: str
+    session_name: str
+    model: str
+    run_id: str
+    plan_active: bool
+    phase_mcp_statuses: List[tuple]
+    should_stop: Callable[[], bool]
+    mark_waiting: Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class JoinedBatchOutcome:
+    stopped: bool
+    failed: bool
+    items: tuple[Dict[str, object], ...]
+
+
 def record_tool_call(record: ToolCallRecord) -> None:
     """Best-effort failure-rate record with conversation coordinates."""
 
@@ -67,6 +96,68 @@ def record_tool_call(record: ToolCallRecord) -> None:
         )
     except Exception:
         pass
+
+
+def execute_and_persist_joined_batch(
+    request: JoinedToolRequest,
+    context: JoinedPersistenceContext,
+) -> JoinedBatchOutcome:
+    items = []
+    compound_failed = False
+    events = iter_joined_tool_executions(
+        request,
+        should_stop=context.should_stop,
+        mark_waiting=context.mark_waiting,
+    )
+    for event in events:
+        if event.stopped:
+            return JoinedBatchOutcome(True, compound_failed, tuple(items))
+        execution = event.execution
+        if execution is None:
+            continue
+        compound_failed = compound_failed or execution.failed
+        record_tool_call(ToolCallRecord(
+            tool=event.tool, user_id=context.user_id,
+            ai_config_id=context.ai_config_id, session_id=context.session_id,
+            run_id=context.run_id, message_id=getattr(context.saved_message, "id", None),
+            failed=execution.failed, error=execution.error,
+        ))
+        if context.plan_active:
+            phase_context.record_status(
+                context.phase_mcp_statuses,
+                event.tool,
+                execution.failed,
+            )
+        context.saved_message.tags = _append_mcp_state_to_tags(
+            context.saved_message.tags,
+            event.tool,
+            request.arguments,
+            execution.display_text,
+        )
+        context.session.add(context.saved_message)
+        context.session.commit()
+        screenshot = (
+            {}
+            if execution.failed
+            else tool_media.screenshot_display_ref(event.tool, execution.result)
+        )
+        save_tool_bubble(ToolBubbleRequest(
+            session=context.session, user_id=context.user_id,
+            ai_config_id=context.ai_config_id, ai_kind=context.ai_kind,
+            session_id=context.session_id, session_name=context.session_name,
+            model=context.model, tool=event.tool, arguments=request.arguments,
+            result_text=execution.display_text, failed=execution.failed,
+            image_url=screenshot.get("url", ""),
+            image_data_url=screenshot.get("data_url", ""),
+            tool_result=execution.result, latency=execution.latency,
+        ))
+        items.append({
+            "tool": event.tool,
+            "failed": execution.failed,
+            "error": execution.error,
+            "result": execution.result.get("result", execution.result),
+        })
+    return JoinedBatchOutcome(False, compound_failed, tuple(items))
 
 
 def _completed_device_id(

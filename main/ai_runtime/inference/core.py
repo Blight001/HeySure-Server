@@ -24,7 +24,9 @@ from ai_runtime.inference import ai_message_service
 from ai_runtime.inference import phase_context
 from ai_runtime.inference import plan_transitions
 from ai_runtime.inference import tool_media
+from ai_runtime.inference import tool_metadata
 from ai_runtime.inference import tool_persistence
+from ai_runtime.inference import tool_rejections
 from ai_runtime.inference.communication_prompt import (
     AIMessagePrompt,
     normalize_ai_message_type as _normalize_ai_message_type,
@@ -54,15 +56,16 @@ from ai_runtime.inference.plan_flow import (
     send_task_completion_notification as _notify_task_completion,
 )
 from ai_runtime.inference.tool_resolution import (
+    ToolResponseContext,
     TurnCallAction,
+    append_joined_tool_response as _append_joined_tool_response,
+    append_ordinary_tool_response as _append_ordinary_tool_response,
     append_pending_call_responses as _answer_pending_calls,
     build_native_tools_payload as _build_native_tools_payload,
-    described_tool_entries as _described_tool_entries,
     flush_screenshot_messages as _flush_screenshot_messages,
     missing_required_mcp_args as _missing_required_mcp_args,
     resolve_mcp_tool_name as _resolve_mcp_tool_name,
     split_concatenated_native_tool_name as _split_concatenated_native_tool_name,
-    track_repeated_tool_call as _track_repeated_tool_call,
     to_native_tool_name as _to_native_tool_name,
 )
 from ai_runtime.inference.run_request import (
@@ -73,7 +76,6 @@ from ai_runtime.inference.run_request import (
 from ai_runtime.inference.tool_execution import (
     JoinedToolRequest,
     execute_tool_call as _execute_tool_call,
-    iter_joined_tool_executions as _iter_joined_tool_executions,
 )
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
@@ -90,7 +92,6 @@ from api.services.tasks.task_system import (
 from api.chat_runtime.chat_prompt_utils import (
     _append_mcp_state_to_tags,
     _append_prompt_section,
-    _build_mcp_display_result,
     _build_mcp_stream_warning,
     _extract_mcp_error,
     _filter_tools_for_current_bindings,
@@ -360,65 +361,6 @@ def _model_visible_tool_result(
         tool_result,
         image_attached=image_attached,
     )
-
-
-def _append_mcp_disabled_feedback(
-    *,
-    bg: Session,
-    convo: List[Dict],
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-    session_name: str,
-    model: str,
-    tool: str,
-    arguments: dict,
-    native_tool_call_id: str = "",
-) -> None:
-    tool_name = str(tool or "").strip() or "unknown"
-    payload = {
-        "success": False,
-        "error": "MCP is disabled for this AI",
-        "tool": tool_name,
-        "arguments": arguments or {},
-        "instruction": (
-            "The requested MCP call was not executed because MCP is disabled or not effective "
-            "for this AI. Do not wait for a tool result. Continue by explaining the limitation "
-            "to the user, asking them to enable MCP if tool execution is required, or completing "
-            "the task without MCP when possible."
-        ),
-    }
-    notice = (
-        "[系统提示] 检测到 MCP 调用未生效。\n"
-        f"- 工具: {tool_name}\n"
-        "- 原因: 当前 AI 的 MCP 开关关闭或 MCP 未生效，系统没有执行该工具。\n\n"
-        "请不要停在等待 MCP 结果的状态；请继续回复用户，说明无法执行该 MCP，"
-        "必要时请用户开启 MCP 或改用无需 MCP 的方式完成。"
-    )
-    _save_message(
-        bg,
-        user_id,
-        ChatMessageCreate(
-            role="user",
-            content=notice,
-            tags="system_notice_mcp_disabled",
-            ai_config_id=ai_config_id,
-            ai_kind=ai_kind,
-            session_id=session_id,
-            session_name=session_name,
-            model=model,
-            total_tokens=0,
-        ),
-    )
-    if native_tool_call_id:
-        convo.append({
-            "role": "tool",
-            "tool_call_id": native_tool_call_id,
-            "content": _safe_json(payload),
-        })
-    else:
-        convo.append({"role": "user", "content": f"{notice}\n\n[工具检查结果]\n{_safe_json(payload)}"})
 
 
 def _run_worker(
@@ -783,185 +725,77 @@ def _run_worker_impl(request: WorkerRequest):
                     _run_set_status(run_id, "stopped", finished=True)
                     return TurnCallAction.STOP_RUN
 
+                rejection_context = tool_rejections.RejectionContext(
+                    session=bg, conversation=convo, pending=pending,
+                    saved_message=saved, user_id=user_id,
+                    ai_config_id=ai_config_id, ai_kind=ai_kind,
+                    session_id=session_id, session_name=session_name,
+                    model=model, run_id=run_id, native_tool_calls=_has_native_tc,
+                    set_live_phase=lambda phase: _set_run_live_phase(run_id, phase),
+                    set_run_error=lambda error: _run_set_status(
+                        run_id, "error", error, finished=True
+                    ),
+                )
+
                 if cfg and not cfg.mcp_enabled:
-                    last_rejected_tool_sig, rejected_repeat = _track_repeated_tool_call(
-                        "mcp_disabled", tool, arguments, last_rejected_tool_sig, rejected_repeat
+                    rejection = tool_rejections.handle_mcp_disabled(
+                        rejection_context, tool, arguments, call_id,
+                        last_rejected_tool_sig, rejected_repeat,
                     )
-                    _append_mcp_disabled_feedback(
-                        bg=bg,
-                        convo=convo,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        session_name=session_name,
-                        model=model,
-                        tool=tool,
-                        arguments=arguments,
-                        native_tool_call_id=call_id if _has_native_tc else "",
-                    )
-                    _answer_pending_calls(
-                        convo,
-                        pending,
-                        {"success": False, "error": "MCP is disabled for this AI"},
-                        native=_has_native_tc,
-                    )
-                    if rejected_repeat >= 3:
-                        _run_set_status(run_id, "error", "Repeated MCP call while MCP is disabled", finished=True)
-                        return TurnCallAction.STOP_RUN
-                    _set_run_live_phase(run_id, "generating")
-                    return TurnCallAction.NEXT_TURN
+                    last_rejected_tool_sig = rejection.signature
+                    rejected_repeat = rejection.count
+                    return rejection.action
 
                 # Legacy compat: some text-protocol models glue several tool
                 # names into one. Split and run them under this single call id.
                 joined_native_tools = _split_concatenated_native_tool_name(tool, native_tool_name_map)
                 if joined_native_tools:
                     joined_mcp_tools = [native_tool_name_map.get(item, item) for item in joined_native_tools]
-                    compound_results = []
-                    compound_failed = False
-                    joined_request = JoinedToolRequest(
-                        tools=tuple(joined_mcp_tools),
-                        arguments=arguments,
-                        allowed_tools=frozenset(effective_tool_allowlist),
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                    )
-                    joined_events = _iter_joined_tool_executions(
-                        joined_request,
-                        should_stop=lambda: _run_should_stop(run_id),
-                        mark_waiting=lambda name: _set_run_live_phase(
-                            run_id,
-                            "waiting_mcp",
-                            name,
-                        ),
-                    )
-                    for event in joined_events:
-                        if event.stopped:
-                            _run_set_status(run_id, "stopped", finished=True)
-                            return TurnCallAction.STOP_RUN
-                        split_tool = event.tool
-                        item_execution = event.execution
-                        if item_execution is None:
-                            continue
-                        item_result = item_execution.result
-                        item_failed = item_execution.failed
-                        item_error = item_execution.error
-                        item_result_text = item_execution.display_text
-                        compound_failed = compound_failed or item_failed
-                        _record_mcp_call(tool_persistence.ToolCallRecord(
-                            tool=split_tool, user_id=user_id, ai_config_id=ai_config_id,
-                            session_id=session_id, run_id=run_id, message_id=getattr(saved, "id", None),
-                            failed=item_failed, error=item_error,
-                        ))
-                        if plan_state is not None:
-                            phase_context.record_status(phase_mcp_statuses, split_tool, item_failed)
-                        saved.tags = _append_mcp_state_to_tags(
-                            saved.tags,
-                            split_tool,
-                            arguments,
-                            item_result_text,
-                        )
-                        bg.add(saved)
-                        bg.commit()
-                        item_screenshot_ref = {} if item_failed else _screenshot_display_ref(split_tool, item_result)
-                        _save_mcp_tool_bubble(tool_persistence.ToolBubbleRequest(
-                            session=bg,
+                    joined_outcome = tool_persistence.execute_and_persist_joined_batch(
+                        JoinedToolRequest(
+                            tools=tuple(joined_mcp_tools),
+                            arguments=arguments,
+                            allowed_tools=frozenset(effective_tool_allowlist),
                             user_id=user_id,
                             ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            model=model,
-                            tool=split_tool,
-                            arguments=arguments,
-                            result_text=item_result_text,
-                            failed=item_failed,
-                            image_url=item_screenshot_ref.get("url", ""),
-                            image_data_url=item_screenshot_ref.get("data_url", ""),
-                            tool_result=item_result if isinstance(item_result, dict) else None,
-                            latency=item_execution.latency,
-                        ))
-                        compound_results.append({
-                            "tool": split_tool,
-                            "failed": item_failed,
-                            "error": item_error,
-                            "result": item_result.get("result", item_result),
-                        })
-
-                    compound_payload = {
-                        "success": not compound_failed,
-                        "compat_mode": "split_concatenated_tool_names",
-                        "original_tool": tool,
-                        "tools": compound_results,
-                    }
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": _safe_json(compound_payload),
-                        })
-                    else:
-                        convo.append({"role": "user", "content": (
-                            "[MCP兼容处理完成]\n"
-                            "系统检测到多个 MCP 工具名被拼接，已按顺序拆分处理。\n"
-                            "其中安全且参数完整的工具已执行；缺少参数或不适合从拼接调用执行的工具已逐项标记失败。\n\n"
-                            "[工具处理结果]\n"
-                            f"{_safe_json(compound_payload)}\n\n"
-                            "请基于以上结果继续；如仍需调用失败的工具，请按标准格式提供所需参数重新调用。"
-                        )})
+                        ),
+                        tool_persistence.JoinedPersistenceContext(
+                            session=bg, saved_message=saved,
+                            user_id=user_id, ai_config_id=ai_config_id,
+                            ai_kind=ai_kind, session_id=session_id,
+                            session_name=session_name, model=model, run_id=run_id,
+                            plan_active=plan_state is not None,
+                            phase_mcp_statuses=phase_mcp_statuses,
+                            should_stop=lambda: _run_should_stop(run_id),
+                            mark_waiting=lambda name: _set_run_live_phase(
+                                run_id,
+                                "waiting_mcp",
+                                name,
+                            ),
+                        ),
+                    )
+                    if joined_outcome.stopped:
+                        _run_set_status(run_id, "stopped", finished=True)
+                        return TurnCallAction.STOP_RUN
+                    _append_joined_tool_response(
+                        convo,
+                        tool,
+                        joined_outcome.items,
+                        joined_outcome.failed,
+                        call_id,
+                        native=_has_native_tc,
+                    )
                     return TurnCallAction.NEXT_CALL
 
                 if tool not in effective_tool_allowlist:
-                    last_rejected_tool_sig, rejected_repeat = _track_repeated_tool_call(
-                        "disallowed", tool, arguments, last_rejected_tool_sig, rejected_repeat
+                    rejection = tool_rejections.handle_disallowed_tool(
+                        rejection_context, tool, arguments, call_id,
+                        effective_tool_allowlist,
+                        last_rejected_tool_sig, rejected_repeat,
                     )
-                    tool_error = f"Tool not allowed for this task: {tool}"
-                    tool_result = {"result": {"success": False, "error": tool_error}}
-                    result_text = _build_mcp_display_result(tool, tool_result, ok=False, error_message=tool_error)
-                    saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
-                    bg.add(saved)
-                    bg.commit()
-                    _save_mcp_tool_bubble(tool_persistence.ToolBubbleRequest(
-                        session=bg,
-                        user_id=user_id,
-                        ai_config_id=ai_config_id,
-                        ai_kind=ai_kind,
-                        session_id=session_id,
-                        session_name=session_name,
-                        model=model,
-                        tool=tool,
-                        arguments=arguments,
-                        result_text=result_text,
-                        failed=True,
-                    ))
-                    if _has_native_tc:
-                        convo.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": json.dumps(
-                                {"error": tool_error, "allowed_tools": sorted(effective_tool_allowlist)},
-                                ensure_ascii=False,
-                            ),
-                        })
-                    else:
-                        convo.append({"role": "user", "content": (
-                            "[MCP执行失败]\n"
-                            f"工具 `{tool}` 未在当前任务允许范围内。\n"
-                            f"可用工具: {', '.join(sorted(effective_tool_allowlist)) or '（空）'}\n"
-                            "请改用任务允许的 MCP 工具继续执行。"
-                        )})
-                    if rejected_repeat >= 3:
-                        _answer_pending_calls(
-                            convo,
-                            pending,
-                            {"success": False, "error": "Run aborted: repeated disallowed MCP tool call"},
-                            native=_has_native_tc,
-                        )
-                        _run_set_status(run_id, "error", f"Repeated disallowed MCP tool call: {tool}", finished=True)
-                        return TurnCallAction.STOP_RUN
-                    # A rejected tool does not invalidate the rest of the batch:
-                    # answer it and let the sibling calls run.
-                    return TurnCallAction.NEXT_CALL
+                    last_rejected_tool_sig = rejection.signature
+                    rejected_repeat = rejection.count
+                    return rejection.action
 
                 _set_run_live_phase(run_id, "waiting_mcp", tool)
                 execution = _execute_tool_call(
@@ -981,18 +815,19 @@ def _run_worker_impl(request: WorkerRequest):
                 ))
                 if plan_state is not None:
                     phase_context.record_status(phase_mcp_statuses, tool, tool_failed)
-                result_payload = tool_result.get("result", tool_result) if isinstance(tool_result, dict) else {}
-                if (
-                    (not tool_failed)
-                    and tool == "conversation.manage"
-                    and isinstance(result_payload, dict)
-                    and result_payload.get("action") == "rename"
-                    and str(result_payload.get("session_id") or "") == str(session_id)
-                ):
-                    renamed_session = str(result_payload.get("name") or "").strip()
-                    if renamed_session:
-                        session_name = renamed_session
-                        saved.session_name = renamed_session
+                renamed_session = tool_metadata.apply_tool_metadata(
+                    tool_metadata.ToolMetadataContext(
+                        session=bg, user_id=user_id, ai_config_id=ai_config_id,
+                        ai_kind=ai_kind, session_id=session_id,
+                        session_name=session_name,
+                        allowed_tools=frozenset(effective_tool_allowlist),
+                        exposed_tools=exposed_tool_allowlist,
+                    ),
+                    tool, tool_result, tool_failed,
+                )
+                session_name = tool_metadata.apply_session_rename(
+                    saved, session_name, renamed_session
+                )
                 saved.tags = _append_mcp_state_to_tags(saved.tags, tool, arguments, result_text)
                 bg.add(saved)
                 bg.commit()
@@ -1014,26 +849,6 @@ def _run_worker_impl(request: WorkerRequest):
                     tool_result=tool_result if isinstance(tool_result, dict) else None,
                     latency=execution.latency,
                 ))
-
-                if (not tool_failed) and tool == "mcp.describe+tool":
-                    described_items, described_names = _described_tool_entries(
-                        tool_result
-                    )
-                    for described_tool in described_names:
-                        if described_tool and described_tool in effective_tool_allowlist:
-                            exposed_tool_allowlist.add(described_tool)
-                    try:
-                        mcp_session_context.remember_described_tools(
-                            bg,
-                            user_id=user_id,
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            described=described_items,
-                        )
-                    except Exception:
-                        logger.exception("persist described MCP tools failed")
 
                 transition = plan_transitions.handle_plan_transition(
                     plan_transitions.PlanTransitionContext(
@@ -1067,11 +882,8 @@ def _run_worker_impl(request: WorkerRequest):
                         phase_mcp_statuses=phase_mcp_statuses,
                     ),
                     plan_transitions.ControlToolCall(
-                        tool=tool,
-                        arguments=arguments,
-                        tool_result=tool_result,
-                        failed=tool_failed,
-                        call_id=call_id,
+                        tool=tool, arguments=arguments, tool_result=tool_result,
+                        failed=tool_failed, call_id=call_id,
                     ),
                 )
                 if transition is not None:
@@ -1083,51 +895,20 @@ def _run_worker_impl(request: WorkerRequest):
                     return transition.action
 
                 # ---- ordinary tool: hand the result back and keep going --------
-                screenshot_message = _browser_screenshot_image_message(tool, tool_result)
-                attach_screenshot = bool(screenshot_message) and not image_input_disabled
-                if attach_screenshot:
-                    # Only prune screenshots from *earlier* turns. Two captures
-                    # inside one batch were both asked for and both stay attached.
-                    _prune_prior_runtime_screenshot_images(convo[:turn_convo_start])
-                if _has_native_tc:
-                    # Native path: use tool role so model sees structured result.
-                    convo.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _safe_json(_model_visible_tool_result(
-                            tool,
-                            tool_result,
-                            image_attached=attach_screenshot,
-                        )),
-                    })
-                    if attach_screenshot:
-                        # The image rides in a *user* message, and every tool
-                        # message for this assistant turn must stay contiguous
-                        # behind it — a user message wedged between two tool
-                        # responses orphans the later tool_call_ids and the next
-                        # request 400s. So hold the image until the batch drains.
-                        turn_screenshot_messages.append(screenshot_message)
-                else:
-                    follow_up_text = (
-                        f"[MCP执行{'失败' if tool_failed else '确认'}]\n"
-                        f"系统已执行工具：{tool}\n"
-                        f"执行状态：{'失败' if tool_failed else '成功'}\n\n"
-                        "[工具参数]\n"
-                        f"{_safe_json(arguments)}\n\n"
-                        "[工具执行结果]\n"
-                        f"{_safe_json(_model_visible_tool_result(tool, tool_result, image_attached=attach_screenshot))}\n\n"
-                        "请基于以上结果继续完成任务。"
-                    )
-                    if attach_screenshot:
-                        convo.append({
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": follow_up_text},
-                                *screenshot_message["content"],
-                            ],
-                        })
-                    else:
-                        convo.append({"role": "user", "content": follow_up_text})
+                _append_ordinary_tool_response(
+                    ToolResponseContext(
+                        conversation=convo,
+                        screenshot_messages=turn_screenshot_messages,
+                        turn_convo_start=turn_convo_start,
+                        image_input_disabled=image_input_disabled,
+                        native_tool_calls=_has_native_tc,
+                    ),
+                    tool,
+                    arguments,
+                    tool_result,
+                    tool_failed,
+                    call_id,
+                )
                 return TurnCallAction.NEXT_CALL
 
             # The configured step limit protects ordinary conversations from

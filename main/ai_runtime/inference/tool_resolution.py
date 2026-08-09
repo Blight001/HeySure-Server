@@ -1,12 +1,14 @@
 """Native provider tool-name encoding, aliases, and safe joined-call checks."""
 
 import copy
+from dataclasses import dataclass
 import json
 import re
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from api.chat_runtime.chat_prompt_utils import _safe_json
+from ai_runtime.inference import tool_media
 from connector_runtime.dispatch.desktop_device_tools import (
     build_endpoint_tools_payload,
     is_endpoint_agent_tool,
@@ -20,6 +22,97 @@ class TurnCallAction(str, Enum):
     NEXT_CALL = "next_call"
     NEXT_TURN = "next_turn"
     STOP_RUN = "stop_run"
+
+
+@dataclass(frozen=True)
+class ToolResponseContext:
+    conversation: List[Dict[str, Any]]
+    screenshot_messages: List[Dict[str, Any]]
+    turn_convo_start: int
+    image_input_disabled: bool
+    native_tool_calls: bool
+
+
+def append_ordinary_tool_response(
+    context: ToolResponseContext,
+    tool: str,
+    arguments: dict,
+    tool_result: Dict[str, object],
+    failed: bool,
+    call_id: str,
+) -> None:
+    screenshot_message = tool_media.tool_image_message(tool, tool_result)
+    attach_screenshot = bool(screenshot_message) and not context.image_input_disabled
+    if attach_screenshot:
+        tool_media.prune_prior_runtime_screenshot_images(
+            context.conversation[:context.turn_convo_start]
+        )
+    visible_result = tool_media.model_visible_tool_result(
+        tool,
+        tool_result,
+        image_attached=attach_screenshot,
+    )
+    if context.native_tool_calls:
+        context.conversation.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": _safe_json(visible_result),
+        })
+        if attach_screenshot:
+            context.screenshot_messages.append(screenshot_message)
+        return
+    follow_up = (
+        f"[MCP执行{'失败' if failed else '确认'}]\n"
+        f"系统已执行工具：{tool}\n"
+        f"执行状态：{'失败' if failed else '成功'}\n\n"
+        "[工具参数]\n"
+        f"{_safe_json(arguments)}\n\n"
+        "[工具执行结果]\n"
+        f"{_safe_json(visible_result)}\n\n"
+        "请基于以上结果继续完成任务。"
+    )
+    if attach_screenshot:
+        context.conversation.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": follow_up},
+                *screenshot_message["content"],
+            ],
+        })
+    else:
+        context.conversation.append({"role": "user", "content": follow_up})
+
+
+def append_joined_tool_response(
+    conversation: List[Dict[str, Any]],
+    original_tool: str,
+    items: tuple[Dict[str, object], ...],
+    failed: bool,
+    call_id: str,
+    *,
+    native: bool,
+) -> None:
+    payload = {
+        "success": not failed,
+        "compat_mode": "split_concatenated_tool_names",
+        "original_tool": original_tool,
+        "tools": list(items),
+    }
+    if native:
+        conversation.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": _safe_json(payload),
+        })
+        return
+    conversation.append({"role": "user", "content": (
+        "[MCP兼容处理完成]\n"
+        "系统检测到多个 MCP 工具名被拼接，已按顺序拆分处理。\n"
+        "其中安全且参数完整的工具已执行；缺少参数或不适合从拼接调用执行的工具已逐项标记失败。\n\n"
+        "[工具处理结果]\n"
+        f"{_safe_json(payload)}\n\n"
+        "请基于以上结果继续；如仍需调用失败的工具，请按标准格式提供所需参数重新调用。"
+    )})
 
 
 def infer_todo_action(arguments: dict) -> str:
