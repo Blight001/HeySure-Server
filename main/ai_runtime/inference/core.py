@@ -46,6 +46,12 @@ from ai_runtime.inference.policies import (
     coerce_max_steps as _coerce_max_steps,
     has_active_todo_plan as _has_active_todo_plan,
 )
+from ai_runtime.inference.plan_flow import (
+    PlanFinalizeContext,
+    append_plan_directive,
+    finalize_plan,
+    send_task_completion_notification as _notify_task_completion,
+)
 from ai_runtime.inference.tool_resolution import (
     build_native_tools_payload as _build_native_tools_payload,
     joined_tool_skip_reason as _joined_tool_skip_reason,
@@ -62,7 +68,6 @@ from ai_runtime.inference.runtime_clients import (
 )
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
-from api.services.tasks.task_completion_notify import notify_task_completion
 from connector_runtime.dispatch.desktop_device_tools import (
     endpoint_bridge_tools_for_config,
     endpoint_tools_for_config,
@@ -1301,161 +1306,31 @@ def _run_worker_impl(
                     plan_state = None
 
             def _inject_flow_directive(target_convo: List[Dict]) -> None:
-                """Re-anchor the model on the active plan: append the current
-                phase directive (or the finish notice when every phase is done).
-
-                Used both when (re)building a run and right after a context
-                compaction, so the model always knows the current phase and never
-                falls back to re-planning from phase 1. No-op without an active
-                plan; the optional plan-required nudge stays task-runtime only."""
-                if plan_state is None:
-                    return
-                # Re-anchor the full plan skeleton first (goal + every phase's
-                # status), then the active directive. Without the overview a
-                # rebuilt run only sees the current phase and loses the rest of
-                # the plan it had registered via todo.manage(action=create).
-                _prog = plan_service.plan_progress(bg, plan_state)
-                _overview = phase_context.render_plan_overview(_prog)
-                if _overview:
-                    target_convo.append({"role": "user", "content": _overview})
-                if flow_awaiting_finish:
-                    target_convo.append({
-                        "role": "user",
-                        "content": phase_context.render_finish_required_notice(plan_state.goal),
-                    })
-                    return
-                _cur = next(
-                    (p for p in _prog["phases"] if p["seq"] == plan_state.current_phase_seq),
-                    None,
+                append_plan_directive(
+                    target_convo,
+                    bg,
+                    plan_state,
+                    awaiting_finish=flow_awaiting_finish,
                 )
-                target_convo.append({
-                    "role": "user",
-                    "content": phase_context.render_phase_directive(_cur, _prog["phase_count"]),
-                })
 
             def _auto_finalize_plan(final_phase_since_ts: float) -> None:
-                """Close the whole plan automatically once its last phase is done.
-
-                The AI only edits the final phase through ``todo.manage``;
-                completing that phase *is* the finish. The outcome is derived
-                from the phase statuses and a summary is synthesized from each
-                phase's own summary, then the durable success/failure log is
-                written, the linked task job is completed and knowledge review is
-                triggered automatically."""
                 nonlocal plan_state, flow_awaiting_finish
                 if plan_state is None:
                     return
-                now_ts = time.time()
-                try:
-                    _prog = plan_service.plan_progress(bg, plan_state)
-                except Exception:
-                    logger.exception("auto plan finalize: progress load failed")
-                    _prog = {"phases": [], "goal": getattr(plan_state, "goal", "") or ""}
-                _phases = _prog.get("phases") or []
-                _outcome = "failure" if any(str(p.get("status")) == "failed" for p in _phases) else "success"
-                _summary_lines = ["计划各阶段已全部完成，系统自动收尾。"]
-                for _p in _phases:
-                    _title = str(_p.get("title") or f"阶段{int(_p.get('seq', 0)) + 1}")
-                    _s = str(_p.get("summary") or "").strip()
-                    _summary_lines.append(f"- {_title}：{_s or '（无小结）'}")
-                _summary = "\n".join(_summary_lines)
-                # Fold any still-verbose final-phase turns out of the persisted
-                # context (usually a no-op: todo.manage edit already folded them).
-                try:
-                    phase_context.mark_phase_messages_compressed(
-                        bg,
+                finalize_plan(
+                    PlanFinalizeContext(
+                        session=bg,
                         user_id=user_id,
-                        ai_config_id=ai_config_id,
+                        ai_config_id=int(ai_config_id),
                         ai_kind=ai_kind,
                         session_id=session_id,
-                        since_ts=final_phase_since_ts,
-                        until_ts=now_ts,
-                    )
-                except Exception:
-                    logger.exception("auto plan finalize: compaction tagging failed")
-                _log_path = ""
-                try:
-                    plan_service.finish_plan(bg, plan_state, outcome=_outcome, summary=_summary)
-                    _phases_orm = plan_service.list_phases(bg, plan_state.plan_id)
-                    try:
-                        _log_path = plan_service.write_outcome_log(
-                            get_project_root(user_id, int(ai_config_id)),
-                            plan_state,
-                            _phases_orm,
-                            summary=_summary,
-                        )
-                    except Exception:
-                        logger.exception("auto plan finalize: outcome log write failed")
-                except Exception:
-                    logger.exception("auto plan finalize: finish_plan failed")
-                try:
-                    from api.services.knowledge.knowledge_review_trigger import trigger_plan_knowledge_review
-
-                    trigger_plan_knowledge_review(
-                        user_id=user_id,
-                        executor_ai_config_id=int(ai_config_id),
-                        goal=_prog.get("goal") or "",
-                        outcome=_outcome,
-                        summary=_summary,
-                        phases=_phases,
-                        log_path=_log_path,
-                    )
-                except Exception:
-                    logger.exception("auto plan finalize: knowledge review trigger failed")
-                _next_loop_job = None
-                if task_job is not None and str(getattr(task_job, "status", "") or "").strip() not in {
-                    "completed", "cancelled", "stopped", "error",
-                }:
-                    try:
-                        try:
-                            notify_task_completion(
-                                user_id=user_id,
-                                job_id=str(task_job.job_id or ""),
-                                summary=_summary,
-                            )
-                        except Exception:
-                            logger.exception("auto plan finalize: completion notify failed")
-                        # 循环任务原地续期（同一 job 回到 queued 等待下一轮）；
-                        # 未续期（非循环 / 循环已结束）才真正标记完成。
-                        _next_loop_job = _renew_loop_scheduled_job(bg, task_job, now_ts)
-                        if _next_loop_job is None:
-                            task_job.status = "completed"
-                            task_job.finished_at = now_ts
-                            task_job.updated_at = now_ts
-                            bg.add(task_job)
-                    except Exception:
-                        logger.exception("auto plan finalize: task job completion failed")
-                _notice_lines = [
-                    "[系统提示]",
-                    f"所有阶段已完成，计划已自动收尾，结果：{'成功' if _outcome == 'success' else '失败'}。",
-                ]
-                if _log_path:
-                    _notice_lines.append(
-                        f"- 完整流程已写入{'成功' if _outcome == 'success' else '失败'}日志: {_log_path}"
-                    )
-                if _next_loop_job is not None:
-                    _notice_lines.append(f"- 循环任务已续期: {_next_loop_job.job_id} 回到待执行状态，等待下一轮定时触发")
-                try:
-                    _save_message(
-                        bg,
-                        user_id,
-                        ChatMessageCreate(
-                            role="system",
-                            content="\n".join(_notice_lines),
-                            tags="system_notice_task_complete",
-                            ai_config_id=ai_config_id,
-                            ai_kind=ai_kind,
-                            session_id=session_id,
-                            session_name=session_name,
-                            model=model,
-                            total_tokens=0,
-                        ),
-                    )
-                    bg.commit()
-                except Exception:
-                    logger.exception("auto plan finalize: notice persist failed")
-                    bg.rollback()
-                # Plan is closed; drop the flow state.
+                        session_name=session_name,
+                        model=model,
+                        task_job=task_job,
+                    ),
+                    plan_state,
+                    final_phase_since_ts=final_phase_since_ts,
+                )
                 plan_state = None
                 flow_awaiting_finish = False
 
@@ -2760,7 +2635,7 @@ def _run_worker_impl(
                             if active_plan is None:
                                 finished_at = time.time()
                                 try:
-                                    notify_task_completion(
+                                    _notify_task_completion(
                                         user_id=user_id,
                                         job_id=str(task_job.job_id or ""),
                                         summary="任务执行完成（简单任务，无计划流程）。",
