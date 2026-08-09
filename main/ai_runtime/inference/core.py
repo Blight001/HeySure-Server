@@ -40,6 +40,7 @@ from ai_runtime.inference.debug_support import (
     ai_short_run_id as _ai_short_run_id,
     heysure_provider_session_id as _heysure_provider_session_id,
 )
+from ai_runtime.inference.conversation_history import build_conversation_history
 from ai_runtime.inference.policies import (
     can_start_inference_step as _can_start_inference_step,
     coerce_max_steps as _coerce_max_steps,
@@ -55,11 +56,9 @@ from ai_runtime.inference.tool_resolution import (
 )
 from ai_runtime.inference.runtime_clients import (
     call_mcp_via_runtime as _call_mcp_via_runtime,
+    dispatch_endpoint_in_process as _dispatch_endpoint_in_process,
     dispatch_endpoint_via_runtime as _dispatch_endpoint_via_runtime,
     endpoint_dispatch_timeout as _endpoint_dispatch_timeout,
-)
-from connector_runtime.dispatch.device_dispatch import (
-    dispatch_endpoint_tool_and_wait,
 )
 get_run_session_context = run_context.get_run_session_context
 set_run_session_context = run_context.set_run_session_context
@@ -168,11 +167,11 @@ async def _call_mcp_or_endpoint_tool(
         return {
             "tool": tool,
             "destructive": True,
-            "result": await dispatch_endpoint_tool_and_wait(
+            "result": await _dispatch_endpoint_in_process(
                 user_id=user_id,
                 ai_config_id=ai_config_id,
                 tool=tool,
-                args=arguments,
+                arguments=arguments,
             ),
         }
     if is_endpoint_agent_tool(tool):
@@ -206,11 +205,11 @@ async def _call_mcp_or_endpoint_tool(
         return {
             "tool": tool,
             "destructive": True,
-            "result": await dispatch_endpoint_tool_and_wait(
+            "result": await _dispatch_endpoint_in_process(
                 user_id=user_id,
                 ai_config_id=ai_config_id,
                 tool=tool,
-                args=arguments,
+                arguments=arguments,
                 timeout_seconds=dispatch_timeout,
             ),
         }
@@ -1166,7 +1165,6 @@ def _run_worker_impl(
             if ai_config_id is not None:
                 msg_stmt = msg_stmt.where(ChatMessage.ai_config_id == ai_config_id)
             history = bg.exec(msg_stmt).all()
-            convo = [{"role": "system", "content": system_prompt}]
             # Compaction is a permanent safety valve now (no per-user toggle): the
             # cap only shortens a historical tool result that exceeds it, so with a
             # generous cap ordinary results replay in full while a giant dump can
@@ -1175,73 +1173,12 @@ def _run_worker_impl(
                 20,
                 min(10000, int(getattr(user, "mcp_history_result_max_chars", 8000) or 8000)),
             )
-            for m in history:
-                tags = str(getattr(m, "tags", "") or "")
-                if "system_notice_ai_error" in tags or "system_notice_ai_context_repaired" in tags:
-                    continue
-                # Messages folded into a conversation summary are excluded from
-                # the model context; the summary itself (conversation_summary)
-                # stays as a normal user message below.
-                if "compressed_away" in tags:
-                    continue
-                # A user message still waiting to be injected mid-run enters the
-                # conversation only through the step-boundary drain below, never
-                # via history — otherwise a run that rebuilt its context while the
-                # message was pending would double it (history + drain).
-                if chat_inject.PENDING_INJECT_TAG in tags:
-                    continue
-                if m.role in ("user", "assistant"):
-                    # Deliberately do NOT replay prior assistant turns' reasoning
-                    # (``m.think``) back to the model. Re-sending historical
-                    # ``reasoning_content`` makes reasoning models restate earlier
-                    # thinking, so each new reply's deep-thinking accumulates all
-                    # the previous ones and grows unboundedly. Only the in-flight
-                    # tool-call turn keeps its reasoning (appended later in this
-                    # loop with its tool_calls).
-                    convo.append({"role": m.role, "content": m.content})
-                elif m.role == "system":
-                    if _should_replay_system_notice_as_user(tags):
-                        convo.append({"role": "user", "content": m.content})
-                    elif "phase_summary" in tags:
-                        # The per-phase progress anchor: it carries which phase
-                        # finished + its status line. The phase's verbose turns are
-                        # compressed_away (intended), but this compact summary must
-                        # survive a run rebuild so the model knows phases already
-                        # done and does not re-plan from phase 1. Replayed as the
-                        # user role to match the live injection (see todo.manage edit
-                        # handler) and avoid mid-conversation system messages.
-                        convo.append({"role": "user", "content": m.content})
-                    elif "mcp_tool_call" in tags and "mode.manage" in (m.content or ""):
-                        # 旧「工作模式」记录（已废弃的 mode.manage 种子/切换气泡）：跳过不回放，
-                        # 避免把已删除的工具调用带回上下文。
-                        pass
-                    elif "mcp_tool_call" in tags:
-                        # Preserve the native call + full arguments across runs.
-                        # Only the historical result body is shortened; the
-                        # persisted UI bubble remains complete and untouched.
-                        compact_pair = mcp_session_context.compact_mcp_history_messages(
-                            getattr(m, "id", None),
-                            m.content or "",
-                            mcp_history_result_max_chars,
-                        )
-                        if compact_pair:
-                            # The preceding persisted assistant row is the turn
-                            # that issued this call. Reattach tool_calls to that
-                            # row instead of creating two consecutive assistant
-                            # messages (invalid for some providers).
-                            if convo and convo[-1].get("role") == "assistant" and not convo[-1].get("tool_calls"):
-                                convo[-1]["tool_calls"] = compact_pair[0]["tool_calls"]
-                                convo.append(compact_pair[1])
-                            else:
-                                convo.extend(compact_pair)
-
-            # 「工作模式」系统已移除：不再合成模式初始设置上下文消息。
-
-            if model_user_content:
-                for i in range(len(convo) - 1, -1, -1):
-                    if convo[i].get("role") == "user":
-                        convo[i] = {"role": "user", "content": model_user_content}
-                        break
+            convo = build_conversation_history(
+                history,
+                system_prompt=system_prompt,
+                mcp_result_max_chars=mcp_history_result_max_chars,
+                model_user_content=model_user_content,
+            )
 
             headers = {
                 "Content-Type": "application/json",

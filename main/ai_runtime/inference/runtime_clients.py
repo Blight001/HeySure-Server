@@ -7,6 +7,7 @@ import httpx
 
 from api.runtime.internal_http import internal_headers, internal_post
 from api.runtime.run_context import get_run_session_context
+from connector_runtime.dispatch.device_dispatch import dispatch_endpoint_tool_and_wait
 
 
 LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT = 900
@@ -31,6 +32,27 @@ async def call_mcp_via_runtime(
     if run_ctx:
         body["session_context"] = run_ctx
     return await internal_post(runtime_url, "/internal/mcp/call", json=body, timeout=120.0)
+
+
+async def dispatch_endpoint_in_process(
+    *,
+    user_id: int,
+    ai_config_id: Optional[int],
+    tool: str,
+    arguments: dict,
+    timeout_seconds: Optional[int] = None,
+) -> Dict[str, object]:
+    """Dispatch through the socket-owning process without an HTTP hop."""
+
+    kwargs: dict[str, object] = {
+        "user_id": user_id,
+        "ai_config_id": ai_config_id,
+        "tool": tool,
+        "args": arguments,
+    }
+    if timeout_seconds is not None:
+        kwargs["timeout_seconds"] = timeout_seconds
+    return await dispatch_endpoint_tool_and_wait(**kwargs)
 
 
 async def dispatch_endpoint_via_runtime(
