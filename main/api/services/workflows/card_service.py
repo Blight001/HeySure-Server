@@ -89,8 +89,18 @@ def owned_card(session: Session, user_id: int, card_id: str) -> Optional[Workflo
             WorkflowCard.id == card_id,
             WorkflowCard.user_id == user_id,
             WorkflowCard.deleted_at.is_(None),
+            WorkflowCard.status != "archived",
         )
     ).first()
+
+
+def delete_card(session: Session, row: WorkflowCard) -> None:
+    """Hide a card without breaking immutable versions, runs or audit rows."""
+    now = time.time()
+    row.deleted_at = now
+    row.updated_at = now
+    session.add(row)
+    session.commit()
 
 
 def update_card(session: Session, row: WorkflowCard, body) -> WorkflowCard:

@@ -12,6 +12,7 @@ from api.models import DevicePresence, WorkflowCard, WorkflowCardVersion
 from api.services.workflows.card_service import (
     card_payload,
     create_card,
+    delete_card,
     owned_card,
     publish_card,
     update_card,
@@ -41,11 +42,6 @@ def _validation_error(exc: WorkflowValidationError) -> HTTPException:
     )
 
 
-def _require_mutable(row: WorkflowCard) -> None:
-    if row.status == "archived":
-        raise HTTPException(status_code=409, detail={"code": "CARD_ARCHIVED", "message": "archived cards are read-only"})
-
-
 @router.get("")
 def list_cards(
     status: Optional[str] = Query(default=None),
@@ -60,6 +56,7 @@ def list_cards(
     statement = select(WorkflowCard).where(
         WorkflowCard.user_id == user.id,
         WorkflowCard.deleted_at.is_(None),
+        WorkflowCard.status != "archived",
     )
     if status:
         statement = statement.where(WorkflowCard.status == status)
@@ -153,7 +150,6 @@ def patch_card(
     row = owned_card(session, user.id, card_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    _require_mutable(row)
     return card_payload(update_card(session, row, body))
 
 
@@ -167,7 +163,6 @@ def validate(
     row = owned_card(session, user.id, card_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    _require_mutable(row)
     try:
         return validate_card(row, session)
     except WorkflowValidationError as exc:
@@ -185,7 +180,6 @@ def publish(
     row = owned_card(session, user.id, card_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    _require_mutable(row)
     try:
         version = publish_card(session, row, user.id, device_id=body.device_id)
     except WorkflowValidationError as exc:
@@ -276,21 +270,16 @@ def export_card(
 
 
 @router.delete("/{card_id}", status_code=204)
-def archive(
+def delete_card_route(
     card_id: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
-    import time
-
     user = get_current_user(authorization, session)
     row = owned_card(session, user.id, card_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    row.status = "archived"
-    row.updated_at = time.time()
-    session.add(row)
-    session.commit()
+    delete_card(session, row)
     return None
 
 
