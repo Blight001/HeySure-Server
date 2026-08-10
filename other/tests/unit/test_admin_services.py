@@ -1,4 +1,5 @@
 from gateway.routers import admin_services
+from gateway.routers import admin_service_probes
 from gateway.routers import admin_runtime_routes
 
 
@@ -75,6 +76,25 @@ def test_non_log_service_returns_structured_note():
 
     assert result["lines"] == []
     assert "结构化健康信息" in result["note"]
+
+
+def test_agent_socket_probe_bypasses_environment_proxy(monkeypatch):
+    observed = {}
+
+    def fake_http_probe(url, path, **kwargs):
+        observed.update({"url": url, "path": path, **kwargs})
+        return {
+            "status_code": 200,
+            "body": {"service_role": "connector", "ready": True},
+        }, 1.25
+
+    monkeypatch.setattr(admin_service_probes, "_http_probe", fake_http_probe)
+
+    result = admin_service_probes.probe_agent_socket("http://public.example:3002", required=True)
+
+    assert result["status"] == "running"
+    assert observed["path"] == "/internal/health/ready"
+    assert observed["trust_env"] is False
 
 
 def test_list_service_statuses_isolates_probe_failures(monkeypatch):

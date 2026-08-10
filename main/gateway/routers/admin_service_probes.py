@@ -49,9 +49,20 @@ def probe_migrations() -> Dict[str, Any]:
         return _result("down", "无法读取数据库迁移状态", {"error": type(exc).__name__})
 
 
-def _http_probe(url: str, path: str, *, headers: Dict[str, str] | None = None) -> tuple[dict, float]:
+def _http_probe(
+    url: str,
+    path: str,
+    *,
+    headers: Dict[str, str] | None = None,
+    trust_env: bool = True,
+) -> tuple[dict, float]:
     started = time.monotonic()
-    with httpx.Client(base_url=url.rstrip("/"), timeout=4.0, follow_redirects=True) as client:
+    with httpx.Client(
+        base_url=url.rstrip("/"),
+        timeout=4.0,
+        follow_redirects=True,
+        trust_env=trust_env,
+    ) as client:
         response = client.get(path, headers=headers)
     latency = round((time.monotonic() - started) * 1000, 2)
     body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
@@ -95,7 +106,12 @@ def probe_agent_socket(url: str, *, required: bool) -> Dict[str, Any]:
         status = "down" if required else "disabled"
         return _result(status, "未配置设备公网 Socket 地址", {"configured": False})
     try:
-        response, latency = _http_probe(url, "/internal/health/ready", headers=internal_headers())
+        response, latency = _http_probe(
+            url,
+            "/internal/health/ready",
+            headers=internal_headers(),
+            trust_env=False,
+        )
         body = response["body"] if isinstance(response["body"], dict) else {}
         role = body.get("service_role")
         ok = response["status_code"] == 200 and role == "connector" and bool(body.get("ready"))
