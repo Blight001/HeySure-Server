@@ -29,6 +29,8 @@ def is_image_input_unsupported_error(error_text: str) -> bool:
         "images are",
         "multimodal",
         "vision input",
+        "invalid image",
+        "image is not supported",
     )
     incompatibility_markers = (
         "unknown variant",
@@ -39,6 +41,7 @@ def is_image_input_unsupported_error(error_text: str) -> bool:
         "text-only",
         "invalid content type",
         "failed to deserialize",
+        "does not support image",
     )
     return any(marker in text for marker in image_markers) and any(
         marker in text for marker in incompatibility_markers
@@ -172,6 +175,7 @@ def image_path_to_data_url(path: str) -> str:
         "jpeg": "image/jpeg",
         "png": "image/png",
         "webp": "image/webp",
+        "gif": "image/gif",
     }.get(extension, "image/png")
     try:
         with open(server_path, "rb") as file_handle:

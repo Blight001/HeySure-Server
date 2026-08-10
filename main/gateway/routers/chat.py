@@ -37,6 +37,8 @@ async def _reject_external_controller_chat(
 router.dependencies.append(Depends(_reject_external_controller_chat))
 from api.chat_runtime.chat_scheduler import process_task_scheduler
 from . import chat_action_routes as _chat_action_routes  # noqa: F401 (副作用导入：注册路由)
+from . import chat_attachment_routes as _chat_attachment_routes  # noqa: F401 (副作用导入：注册路由)
+from . import chat_run_start_routes as _chat_run_start_routes  # noqa: F401 (副作用导入：注册路由)
 from . import chat_history_routes as _chat_history_routes  # noqa: F401 (副作用导入：注册路由)
 
 __all__ = [

@@ -146,6 +146,8 @@ def _history_statement(request: WorkerRequest):
 
 
 def _build_history(session, request, user, system_prompt):
+    from ai_runtime.inference.input_attachments import apply_current_message_images
+
     history = session.exec(_history_statement(request)).all()
     max_result_chars = max(
         20,
@@ -156,6 +158,13 @@ def _build_history(session, request, user, system_prompt):
         system_prompt=system_prompt,
         mcp_result_max_chars=max_result_chars,
         model_user_content=request.model_user_content,
+    )
+    apply_current_message_images(
+        session,
+        conversation,
+        message_id=request.current_user_message_id,
+        user_id=request.user_id,
+        ai_config_id=request.ai_config_id,
     )
     return history, conversation
 

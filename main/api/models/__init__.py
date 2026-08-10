@@ -31,6 +31,7 @@ from .ai_runtime import (
 )
 from .chat import (
     ChatMessage,
+    ChatMessageAttachment,
     ChatMessageCreate,
     ChatMessageMedia,
     ChatMessageUpdate,
@@ -128,6 +129,7 @@ __all__ = [
     "WorkshopAiBinding",
     # chat
     "ChatMessage",
+    "ChatMessageAttachment",
     "ChatMessageCreate",
     "ChatMessageMedia",
     "ChatMessageUpdate",

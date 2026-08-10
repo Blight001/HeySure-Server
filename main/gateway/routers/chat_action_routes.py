@@ -7,9 +7,7 @@ IS_ROUTER_ENTRY = False
 import json
 import mimetypes
 import os
-import threading
 import time
-import uuid
 from typing import List, Optional
 
 from fastapi import Depends, Header, HTTPException, Response
@@ -22,12 +20,10 @@ from api.runtime.http_client import ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
 from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMessageUpdate, ChatRun
 from .auth import get_current_user
-from ai_runtime.worker import notify_queue
-from api.core.settings import settings
 from api.services.model_presets import resolve_model_preset
 from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
-from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, _RUN_THREADS, router
+from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, router
 from api.services.chat.chat_persistence import _append_usage_snapshot, _rebuild_usage_snapshots, _save_message, _upsert_session
 from api.chat_runtime.chat_prompt_utils import (
     _append_prompt_section,
@@ -35,8 +31,7 @@ from api.chat_runtime.chat_prompt_utils import (
     _clear_run_live_text,
     _strip_runtime_injected_sections,
 )
-from api.chat_runtime.chat_runtime_helpers import _resolve_ai_runtime
-from ai_runtime.inference.core import _raise_for_upstream_error, _run_worker
+from ai_runtime.inference.core import _raise_for_upstream_error
 
 
 MAX_WORKSPACE_PREVIEW_BYTES = 1024 * 1024
@@ -89,16 +84,6 @@ def _is_probably_text(data: bytes) -> bool:
         return False
 
 
-def _ai_dispatch_mode() -> str:
-    """Return 'remote' when a dedicated ai-runtime service consumes the queue.
-
-    In 'remote' mode, api-gateway only enqueues queued ChatRun rows + NOTIFY;
-    it does NOT spawn a local thread to run the worker. In 'local' mode
-    (the historical monolith), api-gateway spawns a worker thread itself.
-    """
-    return "remote" if settings.ai_dispatch_mode == "remote" else "local"
-
-
 def _build_run_status_payload(row: ChatRun, live: dict) -> dict:
     live_text = str(live.get("text") or "")
     live_reasoning = str(live.get("reasoning") or "")
@@ -128,118 +113,6 @@ def _build_run_status_payload(row: ChatRun, live: dict) -> dict:
     }
 
 
-@router.post("/run/start")
-def start_chat_run(
-    req: dict,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None)
-):
-    user = get_current_user(authorization, session)
-    ai_config_id = req.get("ai_config_id")
-    ai_kind = req.get("ai_kind", "assistant")
-    session_id = str(req.get("session_id") or "default")
-    session_name = str(req.get("session_name") or "未命名会话")
-    visible_content = str(req.get("visible_content") or "").strip()
-    model_content = str(req.get("model_content") or visible_content).strip()
-    if not model_content:
-        raise HTTPException(status_code=400, detail="Message content is required")
-
-    active_stmt = select(ChatRun).where(
-        ChatRun.user_id == user.id,
-        ChatRun.ai_kind == ai_kind,
-        ChatRun.session_id == session_id,
-        ChatRun.status.in_(["queued", "running"]),
-    )
-    if ai_config_id is not None:
-        active_stmt = active_stmt.where(ChatRun.ai_config_id == ai_config_id)
-    else:
-        active_stmt = active_stmt.where(ChatRun.ai_config_id.is_(None))
-    active = session.exec(active_stmt).first()
-    if active:
-        raise HTTPException(status_code=409, detail="A run is already active in this session")
-
-    incoming_system_messages = req.get("system_messages") or []
-    if not isinstance(incoming_system_messages, list):
-        incoming_system_messages = []
-    _, _, _, _, system_prompt = _resolve_ai_runtime(
-        session, user, ai_kind, ai_config_id, session_id
-    )
-    trimmed_system = [str(v).strip() for v in incoming_system_messages if str(v).strip()]
-    merged_system_prompt = system_prompt
-    if trimmed_system:
-        merged_system_prompt = f"{system_prompt}\n\n" + "\n\n".join(trimmed_system)
-
-    raw_selected_mcp_tools = req.get("selected_mcp_tools")
-    selected_mcp_tools = None
-    if raw_selected_mcp_tools is not None:
-        if not isinstance(raw_selected_mcp_tools, list):
-            raise HTTPException(status_code=400, detail="selected_mcp_tools must be a list")
-        selected_mcp_tools = list(dict.fromkeys(
-            str(name).strip() for name in raw_selected_mcp_tools[:500] if str(name).strip()
-        ))
-
-    visible_tags = str(req.get("visible_tags") or "").strip()
-    user_msg = _save_message(
-        session,
-        user.id,
-        ChatMessageCreate(
-            role="user",
-            content=visible_content or model_content,
-            tags=visible_tags,
-            ai_config_id=ai_config_id,
-            ai_kind=ai_kind,
-            session_id=session_id,
-            session_name=session_name,
-        ),
-    )
-    run_id = f"run_{uuid.uuid4().hex}"
-    worker_extras = {
-        "model_user_content": model_content,
-        "merged_system_prompt": merged_system_prompt,
-        "max_steps": req.get("max_steps"),
-        "current_user_message_id": user_msg.id,
-        "selected_mcp_tools": selected_mcp_tools,
-    }
-    row = ChatRun(
-        run_id=run_id,
-        user_id=user.id,
-        ai_config_id=ai_config_id,
-        ai_kind=ai_kind,
-        session_id=session_id,
-        session_name=session_name,
-        status="queued",
-        stop_requested=False,
-        worker_kwargs_json=json.dumps(worker_extras, ensure_ascii=False),
-    )
-    session.add(row)
-    session.commit()
-
-    if _ai_dispatch_mode() == "remote":
-        # ai-runtime will pick the row up via NOTIFY/poll. Skip local thread.
-        notify_queue(run_id)
-        return {"run_id": run_id, "status": "queued", "user_message_id": user_msg.id}
-
-    worker = threading.Thread(
-        target=_run_worker,
-        kwargs={
-            "run_id": run_id,
-            "user_id": user.id,
-            "ai_config_id": ai_config_id,
-            "ai_kind": ai_kind,
-            "session_id": session_id,
-            "session_name": session_name,
-            "model_user_content": model_content,
-            "merged_system_prompt": merged_system_prompt,
-            "max_steps": req.get("max_steps"),
-            "current_user_message_id": user_msg.id,
-            "selected_mcp_tools": set(selected_mcp_tools) if selected_mcp_tools is not None else None,
-        },
-        daemon=True,
-    )
-    worker.start()
-    _RUN_THREADS[run_id] = worker
-    return {"run_id": run_id, "status": "queued", "user_message_id": user_msg.id}
-
 @router.post("/run/inject")
 def inject_chat_message(
     req: dict,
@@ -254,14 +127,26 @@ def inject_chat_message(
     ``{"active": false}`` when there is no run to inject into, so the caller can
     fall back to a normal send.
     """
+    from api.services.chat.chat_attachments import (
+        bind_message_attachments,
+        resolve_attachment_refs,
+    )
+
     user = get_current_user(authorization, session)
     ai_config_id = req.get("ai_config_id")
     ai_kind = req.get("ai_kind", "assistant")
     session_id = str(req.get("session_id") or "default")
     session_name = str(req.get("session_name") or "未命名会话")
     content = str(req.get("content") or "").strip()
-    if not content:
+    attachment_records = resolve_attachment_refs(
+        user_id=user.id,
+        ai_config_id=ai_config_id,
+        raw=req.get("attachments"),
+    )
+    if not content and not attachment_records:
         raise HTTPException(status_code=400, detail="Message content is required")
+    if not content:
+        content = f"已上传 {len(attachment_records)} 个附件"
 
     active = chat_inject.find_live_active_run(
         session,
@@ -282,6 +167,13 @@ def inject_chat_message(
         session_id=session_id,
         session_name=session_name,
         content=content,
+    )
+    bind_message_attachments(
+        session,
+        message_id=int(user_msg.id),
+        user_id=user.id,
+        ai_config_id=ai_config_id,
+        records=attachment_records,
     )
     return {"active": True, "run_id": active.run_id, "user_message_id": user_msg.id}
 

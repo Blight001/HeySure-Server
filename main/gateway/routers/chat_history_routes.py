@@ -82,7 +82,7 @@ def get_system_prompt_preview(
 # message): the conversation render never needs it, and the prompt panel reads the
 # last-run prompt from the dedicated ``/system-prompt-preview`` endpoint instead.
 # Keeping it out of every history row is the single biggest history-load win.
-def _history_row_to_dict(msg: ChatMessage) -> dict:
+def _history_row_to_dict(msg: ChatMessage, attachments: Optional[list[dict]] = None) -> dict:
     return {
         "id": msg.id,
         "user_id": msg.user_id,
@@ -102,7 +102,21 @@ def _history_row_to_dict(msg: ChatMessage) -> dict:
         "finish_reason": msg.finish_reason,
         "latency": msg.latency,
         "created_at": msg.created_at,
+        "attachments": attachments or [],
     }
+
+
+def _history_rows_to_dicts(session: Session, rows: list[ChatMessage]) -> list[dict]:
+    from api.services.chat.chat_attachments import message_attachment_map
+
+    attachment_map = message_attachment_map(
+        session,
+        [row.id for row in rows if row.id is not None],
+    )
+    return [
+        _history_row_to_dict(row, attachment_map.get(int(row.id), []))
+        for row in rows
+    ]
 
 
 @router.get("/history")
@@ -143,7 +157,7 @@ async def get_chat_history(
     if after_id is not None:
         statement = statement.where(ChatMessage.id > after_id)
         rows = session.exec(statement.order_by(ChatMessage.created_at.asc())).all()
-        return [_history_row_to_dict(row) for row in rows]
+        return _history_rows_to_dicts(session, rows)
 
     # Newest-first window (optionally older than a cursor), then flip to ascending.
     if before_id is not None:
@@ -153,7 +167,7 @@ async def get_chat_history(
         statement = statement.limit(limit)
     rows = session.exec(statement).all()
     rows.reverse()
-    out = [_history_row_to_dict(row) for row in rows]
+    out = _history_rows_to_dicts(session, rows)
     return out
 
 @router.get("/sessions")

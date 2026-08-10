@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from sqlmodel import Session, select
 
@@ -86,7 +86,7 @@ def pop_pending_injects(
     ai_config_id: Optional[int],
     ai_kind: str,
     session_id: str,
-) -> List[str]:
+) -> List[Any]:
     """Atomically fetch every pending user-inject message for this
     ``(user, AI, kind, session)`` in arrival order, clear its pending tag, and
     return their contents. Clearing the tag demotes each row to an ordinary user
@@ -95,7 +95,7 @@ def pop_pending_injects(
     session_id = (session_id or "").strip()
     if not session_id:
         return []
-    contents: List[str] = []
+    contents: List[Any] = []
     with Session(engine) as session:
         rows = session.exec(
             _pending_stmt(user_id, ai_config_id, ai_kind, session_id).order_by(
@@ -105,7 +105,15 @@ def pop_pending_injects(
         for row in rows:
             text = str(row.content or "").strip()
             if text:
-                contents.append(text)
+                from api.services.chat.chat_attachments import message_model_content
+
+                contents.append(message_model_content(
+                    session,
+                    message_id=int(row.id),
+                    user_id=user_id,
+                    ai_config_id=ai_config_id,
+                    text=text,
+                ))
             row.tags = ""
             session.add(row)
         if rows:

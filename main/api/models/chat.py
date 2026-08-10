@@ -73,6 +73,34 @@ class ChatMessageMedia(SQLModel, table=True):
     created_at: float = Field(default_factory=time.time)
 
 
+class ChatMessageAttachment(SQLModel, table=True):
+    """A persisted reference to a file already stored in an AI workspace.
+
+    File bytes deliberately stay out of PostgreSQL.  ``file_ref`` is resolved
+    through the member-scoped workspace registry when the file is served or
+    supplied to a model.
+    """
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    message_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("chatmessage.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    user_id: int = Field(foreign_key="user.id", index=True)
+    ai_config_id: Optional[int] = Field(default=None, index=True)
+    file_ref: str = Field(index=True)
+    workspace_path: str
+    file_name: str
+    mime_type: str = Field(default="application/octet-stream")
+    bytes: builtins.int = Field(default=0)
+    token: str = Field(index=True)
+    created_at: float = Field(default_factory=time.time)
+
+
 class ChatSession(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
