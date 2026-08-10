@@ -13,8 +13,13 @@ from sqlmodel import Session, select
 from api.core.settings import settings
 from api.database import engine
 from api.models import WorkflowRun, WorkflowSchedulerHeartbeat
-from api.services.workflows.run_service import advance_run, error_payload, fail_run, run_payload
+from api.services.workflows.run_service import error_payload, fail_run, run_payload
 from api.services.workflows.run_service import expire_confirmations
+from api.services.workflows.ai_interaction import (
+    advance_interactive_run,
+    expire_ai_interactions,
+)
+from api.services.workflows.ai_interaction_notifier import process_pending_ai_interactions
 from connector_runtime.dispatch.workflow_dispatch import (
     dispatch_pending_steps,
     reconcile_finished_dispatches,
@@ -63,7 +68,7 @@ def _advance_ready_runs(limit: int = 100) -> int:
     count = 0
     for row in rows:
         with Session(engine) as session:
-            advance_run(session, row.id)
+            advance_interactive_run(session, row.id)
             count += 1
     return count
 
@@ -75,7 +80,7 @@ def _expire_waiting_runs(limit: int = 100) -> int:
             select(WorkflowRun)
             .where(
                 WorkflowRun.status.in_([
-                    "waiting_device", "waiting_confirmation", "retry_wait",
+                    "waiting_device", "waiting_confirmation", "waiting_ai", "retry_wait",
                     "paused_offline", "pending", "running",
                 ]),
                 WorkflowRun.deadline_at <= now,
@@ -101,8 +106,10 @@ async def run_workflow_scheduler(stop_event: asyncio.Event) -> None:
             reconcile_finished_dispatches()
             _expire_waiting_runs()
             with Session(engine) as session:
+                expire_ai_interactions(session)
                 expire_confirmations(session)
             _advance_ready_runs()
+            process_pending_ai_interactions()
             await dispatch_pending_steps()
             await _emit_updated_runs(last_emit)
             last_emit = tick_started

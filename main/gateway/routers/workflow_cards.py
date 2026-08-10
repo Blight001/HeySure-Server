@@ -181,7 +181,13 @@ def publish(
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
     try:
-        version = publish_card(session, row, user.id, device_id=body.device_id)
+        version = publish_card(
+            session,
+            row,
+            user.id,
+            device_id=body.device_id,
+            device_ids=body.device_ids,
+        )
     except WorkflowValidationError as exc:
         raise _validation_error(exc)
     return version_payload(version, include_definition=True)

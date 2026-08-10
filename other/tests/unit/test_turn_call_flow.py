@@ -7,6 +7,20 @@ from ai_runtime.inference.tool_rejections import RejectionOutcome
 
 
 class FakeSession:
+    def __init__(self):
+        self.active = False
+        self.new = set()
+        self.dirty = set()
+        self.deleted = set()
+        self.rollback_count = 0
+
+    def in_transaction(self):
+        return self.active
+
+    def rollback(self):
+        self.active = False
+        self.rollback_count += 1
+
     def add(self, value):
         self.added = value
 
@@ -230,6 +244,71 @@ def test_machine_persists_regular_result_and_returns_explicit_state(monkeypatch)
     assert ("record", "workspace.read") in events
     assert ("bubble", "renamed") in events
     assert "response" in events
+
+
+def test_machine_releases_read_transaction_before_regular_tool(monkeypatch):
+    machine, _ = _machine()
+    machine.context.session.active = True
+    execution = ToolExecutionResult(
+        result={"result": {"success": True}},
+        failed=False,
+        error="",
+        display_text="ok",
+        latency=0.1,
+    )
+
+    def execute(*args):
+        assert machine.context.session.active is False
+        return execution
+
+    monkeypatch.setattr(turn_call_flow, "execute_tool_call", execute)
+    monkeypatch.setattr(machine, "_record_execution", lambda *args: None)
+    monkeypatch.setattr(machine, "_apply_metadata", lambda *args: None)
+    monkeypatch.setattr(machine, "_persist_execution", lambda *args: None)
+    monkeypatch.setattr(machine, "_plan_transition", lambda *args: None)
+    monkeypatch.setattr(turn_call_flow, "append_ordinary_tool_response", lambda *args: None)
+
+    action = machine.execute(
+        {"tool": "workspace.read", "arguments": {}, "id": "call-1"},
+        [],
+    )
+
+    assert action is TurnCallAction.NEXT_CALL
+    assert machine.context.session.rollback_count == 1
+
+
+def test_machine_releases_read_transaction_before_each_joined_tool(monkeypatch):
+    machine, _ = _machine(allowed={"workspace.read", "workspace.write"})
+    session = machine.context.session
+    session.active = True
+    monkeypatch.setattr(
+        turn_call_flow,
+        "split_concatenated_native_tool_name",
+        lambda *args: ["workspace__read", "workspace.write"],
+    )
+
+    def execute_batch(request, context):
+        context.mark_waiting("workspace.read")
+        assert session.active is False
+        session.active = True
+        context.mark_waiting("workspace.write")
+        assert session.active is False
+        return SimpleNamespace(stopped=False, failed=False, items=())
+
+    monkeypatch.setattr(
+        turn_call_flow.tool_persistence,
+        "execute_and_persist_joined_batch",
+        execute_batch,
+    )
+    monkeypatch.setattr(turn_call_flow, "append_joined_tool_response", lambda *args, **kwargs: None)
+
+    action = machine.execute(
+        {"tool": "joined", "arguments": {}, "id": "call-1"},
+        [],
+    )
+
+    assert action is TurnCallAction.NEXT_CALL
+    assert session.rollback_count == 2
 
 
 def test_machine_returns_control_transition_snapshot(monkeypatch):

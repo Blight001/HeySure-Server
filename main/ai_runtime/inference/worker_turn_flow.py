@@ -20,6 +20,9 @@ from ai_runtime.inference.debug_support import (
     ai_short,
     ai_short_run_id,
 )
+from ai_runtime.inference.transaction_boundary import (
+    release_clean_session_before_external_io,
+)
 
 
 class WorkerTurnAction(Enum):
@@ -106,6 +109,10 @@ def run_worker_turn(
     _debug_turn_start(context, request.step_label, state, exposure)
     started_at = time.time()
     try:
+        release_clean_session_before_external_io(
+            context.session,
+            boundary="model request",
+        )
         stream_result = model_gateway.run_model_turn(model_gateway.ModelTurnRequest(
             run_id=context.run_id,
             provider=context.provider,

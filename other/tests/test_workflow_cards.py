@@ -2,6 +2,7 @@ import pytest
 from pathlib import Path
 
 from api.services.workflows.compiler import WorkflowValidationError, compile_definition
+from api.services.workflows.interaction_steps import AI_INTERVENTION_TOOL
 from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.expression import (
     TemplateResolutionError,
@@ -188,3 +189,26 @@ def test_trace_to_draft_parameterizes_sensitive_values():
     assert args["password"] == "${input.step_1_password}"
     assert "plain-secret" not in str(definition)
     assert compile_definition(definition)["definition"]["startStepId"] == "call_1"
+
+
+def test_ai_intervention_step_is_compiled_as_a_result_producer():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "review",
+        "steps": {
+            "review": {
+                "type": "mcp",
+                "toolRef": {"namespace": "device", "name": AI_INTERVENTION_TOOL},
+                "arguments": {"prompt": "核对并返回参数"},
+                "saveAs": "review_result", "timeoutSeconds": 60, "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 120, "maxTransitions": 5},
+        "output": {"value": "${steps.review_result.result.value}"},
+    }
+
+    compiled = compile_definition(definition)
+
+    assert compiled["definition"]["steps"]["review"]["toolRef"]["name"] == AI_INTERVENTION_TOOL

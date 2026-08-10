@@ -20,12 +20,14 @@ from api.models import (
 from api.services.workflows.result_store import load_result
 from api.services.workflows.run_service import (
     cancel_run,
-    confirmation_payload,
-    create_run,
     decide_confirmation,
-    retry_failed_run,
     run_payload,
     step_payload,
+)
+from api.services.workflows.ai_interaction import (
+    create_validated_run,
+    interaction_confirmation_payload,
+    retry_validated_run,
 )
 from api.services.workflows.schemas import RunCancel, RunConfirm, RunCreate, RunRetry
 from api.core.settings import settings
@@ -136,7 +138,7 @@ def start_run(
         raise HTTPException(status_code=503, detail={"code": "WORKFLOW_SCHEDULER_DISABLED"})
     user = get_current_user(authorization, session)
     try:
-        row = create_run(
+        row = create_validated_run(
             session,
             user_id=user.id,
             card_id=card_id,
@@ -254,7 +256,7 @@ def confirmations(
         .where(WorkflowConfirmation.run_id == run_id)
         .order_by(WorkflowConfirmation.created_at.desc())
     ).all()
-    return {"items": [confirmation_payload(item) for item in items]}
+    return {"items": [interaction_confirmation_payload(item) for item in items]}
 
 
 @router.post("/workflow-runs/{run_id}/confirm")
@@ -287,7 +289,7 @@ def retry(
         raise HTTPException(status_code=404, detail={"code": "RUN_NOT_FOUND"})
     try:
         return run_payload(
-            retry_failed_run(
+            retry_validated_run(
                 session,
                 run=row,
                 user_id=user.id,

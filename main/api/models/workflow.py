@@ -37,6 +37,7 @@ class WorkflowCardVersion(SQLModel, table=True):
     definition_json: str
     definition_digest: str = Field(index=True)
     tool_contracts_json: str = Field(default="{}")
+    contract_device_ids_json: str = Field(default="[]")
     published_by: int = Field(foreign_key="user.id")
     published_at: float = Field(default_factory=time.time)
 
@@ -108,6 +109,11 @@ class WorkflowConfirmation(SQLModel, table=True):
     next_step_id: str = Field(default="")
     on_denied_step_id: str = Field(default="")
     requested_user_id: int = Field(foreign_key="user.id", index=True)
+    ai_config_id: Optional[int] = Field(default=None, foreign_key="assistantaiconfig.id", index=True)
+    save_as: str = Field(default="")
+    response_json: Optional[str] = None
+    notified_at: Optional[float] = None
+    notification_run_id: str = Field(default="", index=True)
     decided_by: Optional[int] = Field(default=None, foreign_key="user.id")
     decision: Optional[str] = None
     expires_at: float = Field(index=True)

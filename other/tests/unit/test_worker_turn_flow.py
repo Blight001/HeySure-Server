@@ -4,10 +4,26 @@ from ai_runtime.inference import step_preparation, turn_result, worker_turn_flow
 from ai_runtime.inference.model_error_flow import ModelErrorDecision
 
 
-def _context(conversation=None):
+class TrackingSession:
+    def __init__(self, *, active=True):
+        self.active = active
+        self.new = set()
+        self.dirty = set()
+        self.deleted = set()
+        self.rollback_count = 0
+
+    def in_transaction(self):
+        return self.active
+
+    def rollback(self):
+        self.active = False
+        self.rollback_count += 1
+
+
+def _context(conversation=None, session=None):
     events = []
     context = worker_turn_flow.WorkerTurnContext(
-        session=SimpleNamespace(),
+        session=session or SimpleNamespace(),
         conversation=conversation if conversation is not None else [],
         user_id=7,
         ai_config_id=3,
@@ -116,6 +132,24 @@ def test_successful_turn_resets_errors_and_returns_persisted_result(monkeypatch)
     assert captured["persist_context"].session_name == "session name"
     assert captured["latency"] >= 0
     assert events[-2:] == ["text-cleared", "usage-reset"]
+
+
+def test_model_request_releases_autobegun_read_transaction(monkeypatch):
+    session = TrackingSession()
+    context, events = _context(session=session)
+    _prepare_dependencies(monkeypatch)
+
+    def run_model(request):
+        assert session.active is False
+        return SimpleNamespace(stopped=True)
+
+    monkeypatch.setattr(worker_turn_flow.model_gateway, "run_model_turn", run_model)
+
+    outcome = worker_turn_flow.run_worker_turn(context, _request())
+
+    assert outcome.action is worker_turn_flow.WorkerTurnAction.STOP_RUN
+    assert session.rollback_count == 1
+    assert events == ["stopped"]
 
 
 def test_model_error_returns_retry_with_explicit_next_state(monkeypatch):

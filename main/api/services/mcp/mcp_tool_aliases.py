@@ -67,12 +67,17 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
 # normalization boundary so config allowlists, per-message scopes, prompt
 # previews and the AI runtime all apply identical semantics.
 TOOL_BUNDLE_EXPANSIONS: Dict[str, Set[str]] = {
+    "automation.status": {
+        "automation.status",
+        "automation.respond",
+    },
     "automation.manage": {
         "automation.list",
         "automation.get",
         "automation.run",
         "automation.status",
         "automation.cancel",
+        "automation.respond",
         "automation.manage",
     },
 }

@@ -1,6 +1,8 @@
 import json
 import os
 
+import pytest
+
 os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://test:test@127.0.0.1/test")
 os.environ.setdefault("HEYSURE_INTERNAL_TOKEN", "test")
 
@@ -8,6 +10,10 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from api.models import (
     AgentDispatchTask,
+    AssistantAIConfig,
+    ChatMessage,
+    ChatRun,
+    ChatSession,
     DevicePresence,
     User,
     WorkflowAuditEvent,
@@ -25,14 +31,22 @@ from api.services.workflows.run_service import (
     apply_step_result,
     cancel_run,
     create_run,
-    decide_confirmation,
 )
+from api.services.workflows.ai_interaction import (
+    AI_INTERVENTION_TOOL,
+    advance_interactive_run,
+    create_validated_run,
+    expire_ai_interactions,
+    respond_ai_interaction,
+)
+from api.services.workflows.ai_interaction_notifier import process_pending_ai_interactions
 
 
 def _database():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
     tables = [
-        User.__table__, DevicePresence.__table__, WorkflowCard.__table__, WorkflowCardVersion.__table__,
+        User.__table__, AssistantAIConfig.__table__, ChatSession.__table__, ChatMessage.__table__, ChatRun.__table__,
+        DevicePresence.__table__, WorkflowCard.__table__, WorkflowCardVersion.__table__,
         WorkflowRun.__table__, WorkflowStepRun.__table__, WorkflowConfirmation.__table__,
         WorkflowAuditEvent.__table__,
         AgentDispatchTask.__table__,
@@ -41,11 +55,13 @@ def _database():
     return engine
 
 
-def _seed(session: Session, definition: dict, *, tool_contracts=None):
+def _seed(session: Session, definition: dict, *, tool_contracts=None, contract_device_ids=None):
     user = User(name="Test", account="test", hashed_password="x")
     session.add(user)
     session.commit()
     session.refresh(user)
+    session.add(AssistantAIConfig(id=7, user_id=user.id, name="Device AI"))
+    session.add(AssistantAIConfig(id=9, user_id=user.id, name="Running AI"))
     card = WorkflowCard(
         id="card", user_id=user.id, created_by=user.id, name="Test", status="published",
         draft_definition_json=json.dumps(definition),
@@ -53,6 +69,7 @@ def _seed(session: Session, definition: dict, *, tool_contracts=None):
     version = WorkflowCardVersion(
         id="version", card_id=card.id, version_number=1, definition_json=json.dumps(definition),
         definition_digest=definition_digest(definition), tool_contracts_json=json.dumps(tool_contracts or {}),
+        contract_device_ids_json=json.dumps(contract_device_ids or []),
         published_by=user.id,
     )
     session.add(card)
@@ -60,12 +77,20 @@ def _seed(session: Session, definition: dict, *, tool_contracts=None):
     session.flush()
     card.latest_version_id = version.id
     session.add(card)
-    session.add(DevicePresence(user_id=user.id, device_id="device", device_type="desktop", online=True))
+    tool_defs = {
+        str(step.get("toolRef", {}).get("name")): {"input_schema": {}}
+        for step in definition.get("steps", {}).values()
+        if isinstance(step, dict) and step.get("type") == "mcp"
+    }
+    session.add(DevicePresence(
+        user_id=user.id, device_id="device", device_type="desktop", online=True,
+        ai_config_id=7, tool_defs_json=json.dumps(tool_defs),
+    ))
     session.commit()
     return user, card
 
 
-def test_condition_delay_confirmation_and_end_are_deterministic():
+def test_condition_delay_ai_mediated_confirmation_and_end_are_deterministic():
     definition = {
         "schemaVersion": 1,
         "inputSchema": {"type": "object", "properties": {"approved": {"type": "boolean"}}, "required": ["approved"]},
@@ -84,16 +109,149 @@ def test_condition_delay_confirmation_and_end_are_deterministic():
         user, card = _seed(session, definition)
         run = create_run(session, user_id=user.id, card_id=card.id, device_id="device", input_value={"approved": True})
         assert "approved" not in run.input_json
-        advance_run(session, run.id)
-        advance_run(session, run.id)
-        advance_run(session, run.id)
+        advance_interactive_run(session, run.id)
+        advance_interactive_run(session, run.id)
+        advance_interactive_run(session, run.id)
         session.refresh(run)
-        assert run.status == "waiting_confirmation"
-        decide_confirmation(session, run=run, user_id=user.id, approved=True)
+        assert run.status == "waiting_ai"
+        respond_ai_interaction(
+            session, run=run, user_id=user.id, ai_config_id=7, approved=True,
+        )
         advance_run(session, run.id)
         session.refresh(run)
         assert run.status == "succeeded"
         assert json.loads(run.output_json) == {"ok": True}
+
+
+def test_ai_step_callback_parameters_continue_as_a_step_result():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "review",
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 4},
+        "steps": {
+            "review": {
+                "type": "mcp", "toolRef": {"namespace": "device", "name": AI_INTERVENTION_TOOL},
+                "arguments": {"prompt": "核对并补充参数"}, "saveAs": "review",
+                "timeoutSeconds": 30, "next": "finish", "onError": "fail",
+            },
+            "finish": {"type": "end"},
+        },
+        "output": {"value": "${steps.review.result.value}"},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_validated_run(
+            session, user_id=user.id, card_id=card.id, device_id="device", input_value={},
+            actor=("ai", "9"),
+        )
+        advance_interactive_run(session, run.id)
+        session.refresh(run)
+        assert run.status == "waiting_ai"
+        respond_ai_interaction(
+            session, run=run, user_id=user.id, ai_config_id=9, approved=True,
+            parameters={"value": 42}, message="checked",
+        )
+        advance_run(session, run.id)
+        session.refresh(run)
+        assert run.status == "succeeded"
+        assert json.loads(run.output_json) == {"value": 42}
+
+
+def test_ai_mediated_confirmation_timeout_uses_denied_branch():
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "confirm",
+        "steps": {
+            "confirm": {
+                "type": "confirm", "message": "请用户确认", "timeoutSeconds": 1,
+                "next": "approved", "onDenied": "denied",
+            },
+            "approved": {"type": "end"},
+            "denied": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 4}, "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(session, user_id=user.id, card_id=card.id, device_id="device", input_value={})
+        advance_interactive_run(session, run.id)
+        confirmation = session.exec(select(WorkflowConfirmation).where(
+            WorkflowConfirmation.run_id == run.id,
+        )).one()
+
+        assert expire_ai_interactions(session, now=confirmation.expires_at + 1) == 1
+        session.refresh(run)
+        assert run.status == "running"
+        assert run.current_step_id == "denied"
+
+
+def test_ai_interaction_enqueues_a_durable_ai_turn(monkeypatch):
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "confirm",
+        "steps": {
+            "confirm": {"type": "confirm", "message": "请确认继续", "next": "finish"},
+            "finish": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 3}, "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(session, user_id=user.id, card_id=card.id, device_id="device", input_value={})
+        advance_interactive_run(session, run.id)
+        workflow_run_id = run.id
+    monkeypatch.setattr("api.services.workflows.ai_interaction_notifier.engine", engine)
+
+    assert process_pending_ai_interactions() == 1
+    with Session(engine) as session:
+        notice = session.exec(select(ChatMessage).where(ChatMessage.session_id == f"workflow_interaction_{workflow_run_id}")).one()
+        queued = session.exec(select(ChatRun).where(ChatRun.session_id == notice.session_id)).one()
+        confirmation = session.exec(select(WorkflowConfirmation).where(
+            WorkflowConfirmation.run_id == workflow_run_id,
+        )).one()
+        assert "主动向用户发送" in notice.content
+        assert queued.status == "queued"
+        assert confirmation.notified_at is not None
+        assert confirmation.notification_run_id == queued.run_id
+
+
+def test_run_preflight_rejects_offline_unbound_or_missing_mcp_device():
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "call",
+        "steps": {
+            "call": {
+                "type": "mcp", "toolRef": {"namespace": "device", "name": "demo"},
+                "arguments": {}, "saveAs": "demo", "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 4}, "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(
+            session, definition, tool_contracts={"demo": {}}, contract_device_ids=["device"],
+        )
+        device = session.exec(select(DevicePresence).where(DevicePresence.device_id == "device")).one()
+        device.online = False
+        session.add(device)
+        session.commit()
+        with pytest.raises(ValueError, match="DEVICE_OFFLINE"):
+            create_validated_run(session, user_id=user.id, card_id=card.id, device_id="device", input_value={})
+
+        device.online = True
+        device.tool_defs_json = "{}"
+        session.add(device)
+        session.commit()
+        with pytest.raises(ValueError, match="TOOL_NOT_AVAILABLE"):
+            create_validated_run(session, user_id=user.id, card_id=card.id, device_id="device", input_value={})
+
+        session.add(DevicePresence(user_id=user.id, device_id="other", online=True))
+        session.commit()
+        with pytest.raises(ValueError, match="DEVICE_NOT_BOUND_TO_CARD"):
+            create_validated_run(session, user_id=user.id, card_id=card.id, device_id="other", input_value={})
 
 
 def test_failed_mcp_attempt_retries_once_and_duplicate_result_does_not_advance():

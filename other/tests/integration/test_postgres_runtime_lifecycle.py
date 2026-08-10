@@ -3,9 +3,13 @@ import time
 import pytest
 from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
+from sqlmodel import Session
 
 from api.core.settings import settings
 from api.database import create_db_and_tables, engine, get_session
+from ai_runtime.inference.transaction_boundary import (
+    release_clean_session_before_external_io,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -82,3 +86,39 @@ def test_request_exception_rolls_back_session():
             )
         ).scalar_one()
     assert idle == 0
+
+
+def test_external_io_boundary_survives_idle_transaction_timeout():
+    with Session(engine) as session:
+        original_timeout = session.execute(
+            text("SHOW idle_in_transaction_session_timeout")
+        ).scalar_one()
+        session.execute(
+            text(
+                "SELECT set_config('idle_in_transaction_session_timeout', "
+                "'100ms', false)"
+            )
+        )
+        session.commit()
+        try:
+            session.execute(text("SELECT 1")).scalar_one()
+            assert session.in_transaction()
+
+            release_clean_session_before_external_io(
+                session,
+                boundary="integration test external wait",
+            )
+            assert not session.in_transaction()
+
+            time.sleep(0.2)
+            assert session.execute(text("SELECT 1")).scalar_one() == 1
+        finally:
+            session.rollback()
+            session.execute(
+                text(
+                    "SELECT set_config('idle_in_transaction_session_timeout', "
+                    ":timeout, false)"
+                ),
+                {"timeout": original_timeout},
+            )
+            session.commit()

@@ -16,6 +16,9 @@ from ai_runtime.inference import (
     tool_rejections,
 )
 from ai_runtime.inference.tool_execution import JoinedToolRequest, execute_tool_call
+from ai_runtime.inference.transaction_boundary import (
+    release_clean_session_before_external_io,
+)
 from ai_runtime.inference.tool_resolution import (
     ToolResponseContext,
     TurnCallAction,
@@ -176,7 +179,7 @@ class TurnCallMachine:
                 plan_active=self.state.plan.plan_state is not None,
                 phase_mcp_statuses=self.state.plan.phase_mcp_statuses,
                 should_stop=context.should_stop,
-                mark_waiting=lambda name: context.set_live_phase("waiting_mcp", name),
+                mark_waiting=self._mark_joined_waiting,
             ),
         )
         if outcome.stopped:
@@ -195,6 +198,10 @@ class TurnCallMachine:
     def _execute_regular(self, tool, arguments, call_id, pending):
         context = self.context
         context.set_live_phase("waiting_mcp", tool)
+        release_clean_session_before_external_io(
+            context.session,
+            boundary=f"MCP tool {tool}",
+        )
         execution = execute_tool_call(
             tool,
             context.user_id,
@@ -225,6 +232,13 @@ class TurnCallMachine:
             call_id,
         )
         return TurnCallAction.NEXT_CALL
+
+    def _mark_joined_waiting(self, tool: str) -> None:
+        release_clean_session_before_external_io(
+            self.context.session,
+            boundary=f"MCP tool {tool}",
+        )
+        self.context.set_live_phase("waiting_mcp", tool)
 
     def _record_execution(self, tool, execution) -> None:
         context = self.context

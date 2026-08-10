@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from jsonschema import Draft202012Validator
 from sqlmodel import Session, select
@@ -14,6 +14,7 @@ from api.models import DevicePresence, User, WorkflowCard, WorkflowCardVersion
 from api.services.device_tools.device_permission_policy import get_policy
 
 from .compiler import schema_digest
+from .interaction_steps import is_ai_intervention_step
 
 
 class WorkflowDispatchError(RuntimeError):
@@ -29,6 +30,87 @@ def _tool_defs(row: DevicePresence) -> Dict[str, dict]:
     except Exception:
         value = {}
     return value if isinstance(value, dict) else {}
+
+
+def _load_json(raw: str, fallback: Any) -> Any:
+    try:
+        return json.loads(raw or "")
+    except Exception:
+        return fallback
+
+
+def _bound_device_ids(version: WorkflowCardVersion, contracts: Dict[str, Any]) -> List[str]:
+    values = _load_json(version.contract_device_ids_json, [])
+    if isinstance(values, list) and values:
+        return [str(item).strip() for item in values if str(item).strip()]
+    legacy = []
+    for contract in contracts.values():
+        if not isinstance(contract, dict):
+            continue
+        published = contract.get("publishedDeviceIds")
+        if isinstance(published, list):
+            legacy.extend(str(item).strip() for item in published if str(item).strip())
+        elif str(contract.get("publishedDeviceId") or "").strip():
+            legacy.append(str(contract["publishedDeviceId"]).strip())
+    return list(dict.fromkeys(legacy))
+
+
+def _required_tools(definition: Dict[str, Any]) -> List[str]:
+    names = []
+    for step in definition.get("steps", {}).values():
+        if not isinstance(step, dict) or step.get("type") != "mcp" or is_ai_intervention_step(step):
+            continue
+        name = str(step.get("toolRef", {}).get("name") or "").strip()
+        if name:
+            names.append(name)
+    return sorted(set(names))
+
+
+def _validate_live_contract(
+    device: DevicePresence,
+    name: str,
+    live: Any,
+    contract: Dict[str, Any],
+) -> None:
+    if not isinstance(live, dict):
+        raise WorkflowDispatchError("TOOL_NOT_AVAILABLE", f"tool is not currently reported: {name}")
+    expected = str(contract.get("schemaDigest") or "")
+    current_schema = live.get("input_schema") if isinstance(live.get("input_schema"), dict) else {}
+    if expected and schema_digest(current_schema) != expected:
+        raise WorkflowDispatchError("TOOL_SCHEMA_INCOMPATIBLE", f"tool schema changed after publication: {name}")
+    providers = contract.get("providers")
+    device_type = str(device.device_type or "custom")
+    if isinstance(providers, list) and providers and device_type not in providers:
+        raise WorkflowDispatchError("TOOL_SCHEMA_INCOMPATIBLE", f"tool provider is incompatible: {name}")
+
+
+def validate_run_device(
+    session: Session,
+    *,
+    user_id: int,
+    device_id: str,
+    definition: Dict[str, Any],
+    version: WorkflowCardVersion,
+) -> DevicePresence:
+    """Fail before run creation unless the selected endpoint can execute the release."""
+    device = session.exec(select(DevicePresence).where(
+        DevicePresence.user_id == user_id,
+        DevicePresence.device_id == device_id,
+    )).first()
+    if not device:
+        raise WorkflowDispatchError("DEVICE_ACCESS_DENIED", "device is not owned by the run user")
+    if not device.online:
+        raise WorkflowDispatchError("DEVICE_OFFLINE", "device is offline", retryable=True)
+    contracts = _load_json(version.tool_contracts_json, {})
+    contracts = contracts if isinstance(contracts, dict) else {}
+    bound_ids = _bound_device_ids(version, contracts)
+    if bound_ids and device_id not in bound_ids:
+        raise WorkflowDispatchError("DEVICE_NOT_BOUND_TO_CARD", "device is not bound to this card version")
+    live_defs = _tool_defs(device)
+    for name in _required_tools(definition):
+        contract = contracts.get(name) if isinstance(contracts.get(name), dict) else {}
+        _validate_live_contract(device, name, live_defs.get(name), contract)
+    return device
 
 
 def validate_step_dispatch(

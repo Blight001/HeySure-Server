@@ -22,7 +22,8 @@ from api.services.workflows.card_service import (
 )
 from api.services.workflows.compiler import WorkflowValidationError
 from api.services.workflows.trace import definition_from_trace
-from api.services.workflows.run_service import cancel_run, create_run, run_payload
+from api.services.workflows.run_service import cancel_run, run_payload
+from api.services.workflows.ai_interaction import create_validated_run, respond_ai_interaction
 from api.services.workflows.schemas import CardCreate, CardUpdate
 
 
@@ -131,7 +132,7 @@ def _automation_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[i
     _require_enabled(run=True)
     with Session(engine) as session:
         try:
-            row = create_run(
+            row = create_validated_run(
                 session,
                 user_id=user_id,
                 card_id=str(args.get("card_id") or ""),
@@ -139,8 +140,7 @@ def _automation_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[i
                 input_value=args.get("input") if isinstance(args.get("input"), dict) else {},
                 version_id=str(args.get("version_id") or "") or None,
                 idempotency_key=str(args.get("idempotency_key") or "") or None,
-                actor_type="ai",
-                actor_id=str(ai_config_id or ""),
+                actor=("ai", str(ai_config_id or "")),
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
@@ -173,6 +173,31 @@ def _automation_cancel(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
         if not row:
             raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
         return run_payload(cancel_run(session, row, str(args.get("reason") or "cancelled by AI")))
+
+
+def _automation_respond(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+    _require_enabled(run=True)
+    if not ai_config_id:
+        raise HTTPException(status_code=403, detail="AI_INTERACTION_REQUIRES_AI")
+    with Session(engine) as session:
+        row = session.exec(select(WorkflowRun).where(
+            WorkflowRun.id == str(args.get("run_id") or ""),
+            WorkflowRun.user_id == user_id,
+        )).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
+        try:
+            return run_payload(respond_ai_interaction(
+                session,
+                run=row,
+                user_id=user_id,
+                ai_config_id=int(ai_config_id),
+                approved=bool(args.get("approved")),
+                parameters=args.get("parameters") if isinstance(args.get("parameters"), dict) else {},
+                message=str(args.get("message") or ""),
+            ))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
 
 def _automation_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
@@ -218,7 +243,13 @@ def _automation_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
                 return validate_card(card, session)
             if action == "publish":
                 return version_payload(
-                    publish_card(session, card, user_id, device_id=str(args.get("device_id") or "") or None),
+                    publish_card(
+                        session,
+                        card,
+                        user_id,
+                        device_id=str(args.get("device_id") or "") or None,
+                        device_ids=args.get("device_ids") if isinstance(args.get("device_ids"), list) else None,
+                    ),
                     include_definition=False,
                 )
         except WorkflowValidationError as exc:
@@ -257,6 +288,16 @@ AUTOMATION_CANCEL_SCHEMA = {
     "properties": {"run_id": {"type": "string"}, "reason": {"type": "string"}},
     "required": ["run_id"],
 }
+AUTOMATION_RESPOND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "run_id": {"type": "string"},
+        "approved": {"type": "boolean"},
+        "parameters": {"type": "object"},
+        "message": {"type": "string"},
+    },
+    "required": ["run_id", "approved"],
+}
 AUTOMATION_MANAGE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -265,6 +306,7 @@ AUTOMATION_MANAGE_SCHEMA = {
         "description": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}},
         "risk_level": {"type": "string"}, "definition": {"type": "object"},
         "device_id": {"type": "string"},
+        "device_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
         "calls": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"}},
     },
     "required": ["action"],

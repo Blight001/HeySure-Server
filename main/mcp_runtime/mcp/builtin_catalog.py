@@ -24,12 +24,14 @@ from tools.automation import (
     _automation_get,
     _automation_list,
     _automation_manage,
+    _automation_respond,
     _automation_run,
     _automation_status,
     AUTOMATION_CANCEL_SCHEMA,
     AUTOMATION_GET_SCHEMA,
     AUTOMATION_LIST_SCHEMA,
     AUTOMATION_MANAGE_SCHEMA,
+    AUTOMATION_RESPOND_SCHEMA,
     AUTOMATION_RUN_SCHEMA,
     AUTOMATION_STATUS_SCHEMA,
 )
@@ -325,6 +327,13 @@ BUILTIN_TOOLS = (
         description="取消一个尚未结束的自动化卡片运行，晚到设备结果不会继续推进。",
         input_schema=AUTOMATION_CANCEL_SCHEMA,
         handler=_automation_cancel,
+        destructive=True,
+    ),
+    MCPTool(
+        name="automation.respond",
+        description="回应自动化卡片中的 AI 介入或经 AI 转达的用户确认，并可回传结构化参数。",
+        input_schema=AUTOMATION_RESPOND_SCHEMA,
+        handler=_automation_respond,
         destructive=True,
     ),
     MCPTool(

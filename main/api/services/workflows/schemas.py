@@ -23,6 +23,7 @@ class CardUpdate(BaseModel):
 
 class PublishRequest(BaseModel):
     device_id: Optional[str] = None
+    device_ids: List[str] = Field(default_factory=list, max_length=20)
 
 
 class TraceDraftRequest(BaseModel):

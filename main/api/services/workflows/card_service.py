@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlmodel import Session, select
 
@@ -13,6 +13,7 @@ from api.devices.presence import tool_defs_for_agent
 from api.models import DevicePresence, WorkflowCard, WorkflowCardVersion
 
 from .compiler import WorkflowValidationError, compile_definition, definition_digest, schema_digest
+from .interaction_steps import is_ai_intervention_step
 
 
 
@@ -51,6 +52,7 @@ def version_payload(row: WorkflowCardVersion, *, include_definition: bool = Fals
         "schema_version": row.schema_version,
         "definition_digest": row.definition_digest,
         "tool_contracts": _load(row.tool_contracts_json, {}),
+        "contract_device_ids": _load(row.contract_device_ids_json, []),
         "published_by": row.published_by,
         "published_at": row.published_at,
     }
@@ -134,61 +136,132 @@ def validate_card(row: WorkflowCard, session: Optional[Session] = None) -> Dict[
     return {"valid": True, "digest": compiled["digest"], "warnings": compiled["warnings"]}
 
 
-def _snapshot_contracts(
-    session: Session, user_id: int, device_id: Optional[str], definition: Dict[str, Any]
+def _contract_device_ids(device_id: Optional[str], device_ids: Optional[List[str]]) -> List[str]:
+    values = [str(item).strip() for item in (device_ids or []) if str(item).strip()]
+    legacy = str(device_id or "").strip()
+    if legacy:
+        values.append(legacy)
+    return list(dict.fromkeys(values))
+
+
+def _device_snapshot(session: Session, user_id: int, device_id: str) -> Tuple[DevicePresence, Dict[str, Any]]:
+    device = session.exec(select(DevicePresence).where(
+        DevicePresence.user_id == user_id,
+        DevicePresence.device_id == device_id,
+    )).first()
+    if not device:
+        raise WorkflowValidationError([f"publish device is not owned by the current user: {device_id}"])
+    if not device.online:
+        raise WorkflowValidationError([f"publish device is offline: {device_id}"])
+    return device, tool_defs_for_agent(user_id, device_id)
+
+
+def _live_tool_contracts(
+    step_id: str,
+    name: str,
+    snapshots: List[Tuple[DevicePresence, Dict[str, Any]]],
+    errors: List[str],
+) -> List[Tuple[DevicePresence, Dict[str, Any], Dict[str, Any], str]]:
+    result = []
+    for device, live_defs in snapshots:
+        live = live_defs.get(name)
+        if not live:
+            errors.append(f"step {step_id}: tool {name} is not reported by device {device.device_id}")
+            continue
+        input_schema = live.get("input_schema", {})
+        result.append((device, live, input_schema, schema_digest(input_schema)))
+    return result
+
+
+def _resolved_digest(
+    step_id: str,
+    ref: Dict[str, Any],
+    snapshots: List[Tuple[DevicePresence, Dict[str, Any]]],
+    live: List[Tuple[DevicePresence, Dict[str, Any], Dict[str, Any], str]],
+    errors: List[str],
+) -> Optional[str]:
+    if snapshots and len(live) != len(snapshots):
+        return None
+    digests = {item[3] for item in live}
+    if len(digests) > 1:
+        errors.append(f"step {step_id}: tool {ref['name']} exposes different schemas on bound devices")
+        return None
+    supplied = str(ref.get("schemaDigest") or "").strip()
+    digest = next(iter(digests), supplied)
+    if supplied and digest and supplied != digest:
+        errors.append(f"step {step_id}: supplied schema digest does not match the current tool")
+        return None
+    if not snapshots and not supplied:
+        errors.append(f"step {step_id}: publish requires device_ids or toolRef.schemaDigest")
+        return None
+    return supplied or digest
+
+
+def _frozen_contract(
+    name: str,
+    ref: Dict[str, Any],
+    live: List[Tuple[DevicePresence, Dict[str, Any], Dict[str, Any], str]],
+    bound_ids: List[str],
 ) -> Dict[str, Any]:
-    live_defs = tool_defs_for_agent(user_id, device_id) if device_id else {}
-    device = session.exec(
-        select(DevicePresence).where(
-            DevicePresence.user_id == user_id,
-            DevicePresence.device_id == device_id,
-        )
-    ).first() if device_id else None
-    if device_id and not device:
-        raise WorkflowValidationError(["publish device is not owned by the current user"])
+    providers = sorted({str(item[0].device_type or "custom") for item in live})
+    return {
+        "namespace": "device",
+        "name": name,
+        "schemaDigest": ref["schemaDigest"],
+        "inputSchema": live[0][2] if live else ref.get("inputSchema", {}),
+        "destructive": any(bool(item[1].get("destructive")) for item in live),
+        "provider": providers[0] if len(providers) == 1 else "",
+        "providers": providers,
+        "publishedDeviceId": bound_ids[0] if len(bound_ids) == 1 else "",
+        "publishedDeviceIds": bound_ids,
+    }
+
+
+def _snapshot_contracts(
+    session: Session,
+    user_id: int,
+    definition: Dict[str, Any],
+    *,
+    device_id: Optional[str] = None,
+    device_ids: Optional[List[str]] = None,
+) -> Tuple[Dict[str, Any], List[str]]:
+    bound_ids = _contract_device_ids(device_id, device_ids)
+    snapshots = [_device_snapshot(session, user_id, item) for item in bound_ids]
     contracts: Dict[str, Any] = {}
     errors = []
     for step_id, step in definition["steps"].items():
         if step.get("type") != "mcp":
             continue
+        if is_ai_intervention_step(step):
+            continue
         ref = step["toolRef"]
         name = str(ref["name"]).strip()
-        live = live_defs.get(name)
-        supplied_digest = str(ref.get("schemaDigest") or "").strip()
-        if device_id and not live:
-            errors.append(f"step {step_id}: tool {name} is not reported by device {device_id}")
+        live_contracts = _live_tool_contracts(step_id, name, snapshots, errors)
+        digest = _resolved_digest(step_id, ref, snapshots, live_contracts, errors)
+        if digest is None:
             continue
-        input_schema = live.get("input_schema", {}) if live else ref.get("inputSchema", {})
-        digest = schema_digest(input_schema)
-        if supplied_digest and supplied_digest != digest:
-            errors.append(f"step {step_id}: supplied schema digest does not match the current tool")
-            continue
-        if not device_id and not supplied_digest:
-            errors.append(f"step {step_id}: publish requires device_id or toolRef.schemaDigest")
-            continue
-        ref["schemaDigest"] = supplied_digest or digest
-        if device:
-            ref["provider"] = str(device.device_type or "custom")
-        contracts[name] = {
-            "namespace": "device",
-            "name": name,
-            "schemaDigest": ref["schemaDigest"],
-            "inputSchema": input_schema,
-            "destructive": bool(live.get("destructive")) if live else False,
-            "provider": str(device.device_type or "custom") if device else str(ref.get("provider") or ""),
-            "publishedDeviceId": str(device_id or ""),
-        }
+        providers = sorted({str(item[0].device_type or "custom") for item in live_contracts})
+        ref["schemaDigest"] = digest
+        ref["provider"] = providers[0] if len(providers) == 1 else ""
+        contracts[name] = _frozen_contract(name, ref, live_contracts, bound_ids)
     if errors:
         raise WorkflowValidationError(errors)
-    return contracts
+    return contracts, bound_ids
 
 
 def publish_card(
-    session: Session, row: WorkflowCard, user_id: int, *, device_id: Optional[str] = None
+    session: Session,
+    row: WorkflowCard,
+    user_id: int,
+    *,
+    device_id: Optional[str] = None,
+    device_ids: Optional[List[str]] = None,
 ) -> WorkflowCardVersion:
     compiled = compile_definition(_load(row.draft_definition_json, {}))
     definition = compiled["definition"]
-    contracts = _snapshot_contracts(session, user_id, device_id, definition)
+    contracts, bound_ids = _snapshot_contracts(
+        session, user_id, definition, device_id=device_id, device_ids=device_ids,
+    )
     latest = session.exec(
         select(WorkflowCardVersion)
         .where(WorkflowCardVersion.card_id == row.id)
@@ -202,6 +275,7 @@ def publish_card(
         definition_json=_json(definition),
         definition_digest=definition_digest(definition),
         tool_contracts_json=_json(contracts),
+        contract_device_ids_json=_json(bound_ids),
         published_by=user_id,
     )
     session.add(version)
