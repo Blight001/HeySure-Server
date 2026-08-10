@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from api.models import AssistantAIConfig, WorkflowCard
 
 
-OWNER_TAG_PREFIX = "ai_owner:"
+OWNER_TAG_PREFIX = WorkflowCard.AI_OWNER_TAG_PREFIX
 
 
 def _load(raw: str, fallback: Any) -> Any:
@@ -34,19 +34,8 @@ def _admin_actor(session: Session, user_id: int, ai_config_id: Optional[int]) ->
     return bool(config and _is_admin_role(config.ai_role))
 
 
-def _owner_ids(tags: Any) -> set[str]:
-    return {
-        str(item).strip()[len(OWNER_TAG_PREFIX):]
-        for item in (tags if isinstance(tags, list) else [])
-        if str(item).strip().lower().startswith(OWNER_TAG_PREFIX)
-    }
-
-
 def _card_visible(card: WorkflowCard, ai_config_id: Optional[int]) -> bool:
-    if not ai_config_id:
-        return True
-    owners = _owner_ids(_load(card.tags_json, []))
-    return not owners or str(ai_config_id) in owners
+    return WorkflowCard.tags_visible_to_ai(_load(card.tags_json, []), ai_config_id)
 
 
 def _creation_tags(tags: Any, ai_config_id: Optional[int]) -> list[str]:

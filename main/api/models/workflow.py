@@ -10,6 +10,7 @@ from sqlmodel import Field, SQLModel
 class WorkflowCard(SQLModel, table=True):
     __table_args__ = (Index("ix_workflowcard_user_status", "user_id", "status"),)
     RUNNABLE_STATUSES: ClassVar[frozenset[str]] = frozenset({"active", "published", "deprecated"})
+    AI_OWNER_TAG_PREFIX: ClassVar[str] = "ai_owner:"
 
     id: str = Field(primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -28,6 +29,22 @@ class WorkflowCard(SQLModel, table=True):
     @classmethod
     def is_runnable_status(cls, status: object) -> bool:
         return str(status or "") in cls.RUNNABLE_STATUSES
+
+    @classmethod
+    def ai_owner_ids(cls, tags: object) -> set[str]:
+        values = tags if isinstance(tags, list) else []
+        return {
+            str(item).strip()[len(cls.AI_OWNER_TAG_PREFIX):]
+            for item in values
+            if str(item).strip().lower().startswith(cls.AI_OWNER_TAG_PREFIX)
+        }
+
+    @classmethod
+    def tags_visible_to_ai(cls, tags: object, ai_config_id: Optional[int]) -> bool:
+        if not ai_config_id:
+            return True
+        owners = cls.ai_owner_ids(tags)
+        return not owners or str(ai_config_id) in owners
 
 
 class WorkflowCardVersion(SQLModel, table=True):

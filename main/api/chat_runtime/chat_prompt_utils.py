@@ -437,7 +437,7 @@ def _build_dynamic_mcp_explanation(
     Falls back to flat if anything fails.
     """
     try:
-        from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
+        from api.services.mcp.mcp_prompt_groups import automation_card_prompt_sections, build_prompt_tool_groups
         from mcp_runtime.mcp import registry as mcp_registry
         from api.devices.presence import online_tool_defs
         from connector_runtime.dispatch.desktop_device_tools import is_endpoint_agent_tool
@@ -476,10 +476,8 @@ def _build_dynamic_mcp_explanation(
                     })
 
         groups = build_prompt_tool_groups(
-            user_id=int(user_id or 0),
-            ai_config_id=ai_config_id,
-            prompt_tools=prompt_tools,
-            allowed_tools=allowed_set,
+            user_id=int(user_id or 0), ai_config_id=ai_config_id,
+            prompt_tools=prompt_tools, allowed_tools=allowed_set,
         )
 
         sections: list[str] = []
@@ -497,6 +495,8 @@ def _build_dynamic_mcp_explanation(
             tool_names = {str(t.get("name") or "") for t in tools if str(t.get("name") or "").strip()}
             inner = _render_mcp_tool_catalog(tool_names, endpoint_allowed or set(), user_id)
             sections.append(f"{label}\n{inner}")
+
+        sections.extend(automation_card_prompt_sections(user_id, ai_config_id, allowed_set))
 
         if not sections:
             return "- （空）"
