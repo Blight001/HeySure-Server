@@ -6,7 +6,7 @@ from api.models import AssistantAIConfigUpdate
 from api.models.external_control import ExternalControllerRun
 from api.services.external_control.service import _safe_value
 from api.services.external_control.state import RunTransitionError, transition_run
-from gateway.routers.external_control import _handoff_markdown, _mcp_tool_definitions
+from gateway.routers.external_control import _handoff_markdown, _mcp_tool_definitions, _run_payload
 
 
 def _run(status: str = "queued") -> ExternalControllerRun:
@@ -61,6 +61,16 @@ def test_remote_mcp_contract_exposes_only_stable_controller_tools() -> None:
     }
     call_schema = next(item for item in _mcp_tool_definitions() if item["name"] == "heysure.call_mcp")
     assert call_schema["inputSchema"]["required"] == ["tool"]
+
+
+def test_run_payload_keeps_identifier_for_fresh_sqlmodel_instance() -> None:
+    row = _run("running")
+
+    payload = _run_payload(row)
+
+    assert payload["run_id"] == "xrun_test"
+    assert payload["status"] == "running"
+    assert payload["credential_id"] == 3
 
 
 def test_handoff_uses_environment_variable_instead_of_toml_secret() -> None:

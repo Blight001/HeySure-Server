@@ -55,6 +55,31 @@ def _credential_payload(row: ExternalControllerCredential) -> dict:
     }
 
 
+def _run_payload(row: ExternalControllerRun) -> dict:
+    """Serialize the stable controller-run contract explicitly.
+
+    Freshly committed SQLModel instances can serialize as an empty mapping on
+    some SQLModel/Pydantic combinations.  The MCP response must never lose the
+    run identifier that the controller needs for subsequent tool calls.
+    """
+    return {
+        "run_id": row.run_id,
+        "user_id": row.user_id,
+        "ai_config_id": row.ai_config_id,
+        "credential_id": row.credential_id,
+        "status": row.status,
+        "title": row.title,
+        "summary": row.summary,
+        "error_message": row.error_message,
+        "lease_owner": row.lease_owner,
+        "lease_expires_at": row.lease_expires_at,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "started_at": row.started_at,
+        "finished_at": row.finished_at,
+    }
+
+
 def _handoff_markdown(member_name: str, ai_config_id: int, endpoint: str, token: str) -> str:
     env_name = f"HEYSURE_CONTROLLER_TOKEN_{ai_config_id}"
     server_name = f"heysure_member_{ai_config_id}"
@@ -132,7 +157,7 @@ def controller_status(
         "ai_config_id": ai_config_id,
         "execution_mode": cfg.execution_mode,
         "credentials": [_credential_payload(row) for row in credentials],
-        "runs": [row.model_dump() for row in runs],
+        "runs": [_run_payload(row) for row in runs],
         "events": service.list_events(user.id, ai_config_id, 100),
     }
 
@@ -247,19 +272,21 @@ async def _tool_catalog(args, service, credential, user, cfg):
 
 
 async def _tool_start_run(args, service, credential, user, cfg):
-    return service.start_run(
+    row = service.start_run(
         credential, args.get("title", ""), args.get("lease_seconds", 300)
-    ).model_dump()
+    )
+    return _run_payload(row)
 
 
 async def _tool_finish_run(args, service, credential, user, cfg):
-    return service.finish_run(
+    row = service.finish_run(
         credential,
         str(args.get("run_id") or ""),
         str(args.get("status") or ""),
         str(args.get("summary") or ""),
         str(args.get("error") or ""),
-    ).model_dump()
+    )
+    return _run_payload(row)
 
 
 async def _tool_events(args, service, credential, user, cfg):
