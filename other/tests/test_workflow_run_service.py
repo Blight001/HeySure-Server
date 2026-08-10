@@ -25,6 +25,7 @@ from api.models import (
 )
 from api.services.workflows.compiler import definition_digest
 from api.services.workflows.compiler import schema_digest
+from api.services.workflows.card_service import _snapshot_contracts
 from api.services.workflows.permissions import WorkflowDispatchError, validate_step_dispatch
 from api.services.workflows.run_service import (
     advance_run,
@@ -32,6 +33,7 @@ from api.services.workflows.run_service import (
     cancel_run,
     create_run,
 )
+from api.services.workflows.step_device_binding import step_run_device_id
 from api.services.workflows.ai_interaction import (
     AI_INTERVENTION_TOOL,
     advance_interactive_run,
@@ -402,3 +404,112 @@ def test_cancel_run_terminalizes_pending_device_dispatch():
         assert dispatch.success is False
         assert dispatch.error == "user stopped workflow"
         assert dispatch.lease_expires_at is None
+
+
+def test_publish_freezes_each_mcp_node_against_its_own_device(monkeypatch):
+    definition = {
+        "steps": {
+            "linux": {
+                "type": "mcp",
+                "toolRef": {"namespace": "device", "deviceId": "device-a", "name": "linux.info"},
+            },
+            "desktop": {
+                "type": "mcp",
+                "toolRef": {"namespace": "device", "deviceId": "device-b", "name": "desktop.capture"},
+            },
+        },
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, _ = _seed(session, {"steps": {}, "inputSchema": {}, "startStepId": "", "limits": {}})
+        session.add(DevicePresence(user_id=user.id, device_id="device-a", device_type="linux", online=True))
+        session.add(DevicePresence(user_id=user.id, device_id="device-b", device_type="desktop", online=True))
+        session.commit()
+        schemas = {
+            "device-a": {"linux.info": {"input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}},
+            "device-b": {"desktop.capture": {"input_schema": {"type": "object", "properties": {"screen": {"type": "integer"}}}}},
+        }
+        monkeypatch.setattr(
+            "api.services.workflows.card_service.tool_defs_for_agent",
+            lambda _user_id, device_id: schemas[device_id],
+        )
+
+        contracts, bound_ids = _snapshot_contracts(
+            session, user.id, definition, device_ids=["device-a", "device-b"],
+        )
+
+        assert bound_ids == ["device-a", "device-b"]
+        assert contracts["linux"]["deviceId"] == "device-a"
+        assert contracts["desktop"]["deviceId"] == "device-b"
+        assert contracts["linux"]["schemaDigest"] != contracts["desktop"]["schemaDigest"]
+
+
+def test_run_preflight_and_steps_use_each_nodes_bound_device():
+    alpha_schema = {"type": "object", "properties": {"path": {"type": "string"}}}
+    beta_schema = {"type": "object", "properties": {"screen": {"type": "integer"}}}
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "alpha",
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 5},
+        "steps": {
+            "alpha": {
+                "type": "mcp",
+                "toolRef": {
+                    "namespace": "device", "deviceId": "device-a", "name": "alpha",
+                    "schemaDigest": schema_digest(alpha_schema), "provider": "linux",
+                },
+                "arguments": {}, "saveAs": "alpha_result", "next": "beta",
+            },
+            "beta": {
+                "type": "mcp",
+                "toolRef": {
+                    "namespace": "device", "deviceId": "device-b", "name": "beta",
+                    "schemaDigest": schema_digest(beta_schema), "provider": "desktop",
+                },
+                "arguments": {}, "saveAs": "beta_result", "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "output": {},
+    }
+    contracts = {
+        "alpha": {
+            "name": "alpha", "deviceId": "device-a", "schemaDigest": schema_digest(alpha_schema),
+            "provider": "linux", "providers": ["linux"], "destructive": False,
+        },
+        "beta": {
+            "name": "beta", "deviceId": "device-b", "schemaDigest": schema_digest(beta_schema),
+            "provider": "desktop", "providers": ["desktop"], "destructive": False,
+        },
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(
+            session, definition, tool_contracts=contracts,
+            contract_device_ids=["device-a", "device-b"],
+        )
+        session.add(DevicePresence(
+            user_id=user.id, device_id="device-a", device_type="linux", online=True,
+            tool_defs_json=json.dumps({"alpha": {"input_schema": alpha_schema}}),
+        ))
+        session.add(DevicePresence(
+            user_id=user.id, device_id="device-b", device_type="desktop", online=True,
+            tool_defs_json=json.dumps({"beta": {"input_schema": beta_schema}}),
+        ))
+        session.commit()
+
+        run = create_validated_run(
+            session, user_id=user.id, card_id=card.id, device_id="device-a", input_value={},
+        )
+        advance_run(session, run.id)
+        first = session.exec(select(WorkflowStepRun).where(WorkflowStepRun.run_id == run.id)).one()
+        assert step_run_device_id(session, first) == "device-a"
+
+        assert apply_step_result(session, dispatch_task_id=first.dispatch_task_id, success=True, result={})
+        advance_run(session, run.id)
+        steps = session.exec(
+            select(WorkflowStepRun).where(WorkflowStepRun.run_id == run.id).order_by(WorkflowStepRun.attempt, WorkflowStepRun.step_id)
+        ).all()
+        second = next(item for item in steps if item.step_id == "beta")
+        assert step_run_device_id(session, second) == "device-b"

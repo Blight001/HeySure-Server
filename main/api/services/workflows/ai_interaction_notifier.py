@@ -35,7 +35,7 @@ def _notice_content(run: WorkflowRun, item: WorkflowConfirmation) -> str:
     ]
     if item.confirmation_type == "ai_review":
         lines.extend([
-            "请核对说明与当前上下文；确认后调用 automation.respond，approved=true。",
+            "请核对说明与当前上下文；确认后调用 automation.manage，action=respond、approved=true。",
             "如流程需要补充参数，请将参数对象放入 parameters；拒绝时 approved=false 并说明原因。",
         ])
     else:

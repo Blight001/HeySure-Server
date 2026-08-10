@@ -30,7 +30,7 @@ from .secrets import decrypt_json
 INTERACTION_TYPES = {"ai_review", "user_via_ai"}
 ACTIVE_RUN_STATUSES = {
     "pending", "running", "waiting_device", "waiting_confirmation", "waiting_ai",
-    "retry_wait", "paused_offline",
+    "retry_wait", "paused_offline", "paused",
 }
 
 

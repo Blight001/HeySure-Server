@@ -55,15 +55,15 @@ def _bound_device_ids(version: WorkflowCardVersion, contracts: Dict[str, Any]) -
     return list(dict.fromkeys(legacy))
 
 
-def _required_tools(definition: Dict[str, Any]) -> List[str]:
-    names = []
-    for step in definition.get("steps", {}).values():
-        if not isinstance(step, dict) or step.get("type") != "mcp" or is_ai_intervention_step(step):
-            continue
-        name = str(step.get("toolRef", {}).get("name") or "").strip()
-        if name:
-            names.append(name)
-    return sorted(set(names))
+def _contract_for_step(
+    contracts: Dict[str, Any],
+    step_id: str,
+    tool_name: str,
+) -> Dict[str, Any]:
+    contract = contracts.get(step_id)
+    if not isinstance(contract, dict):
+        contract = contracts.get(tool_name)
+    return contract if isinstance(contract, dict) else {}
 
 
 def _validate_live_contract(
@@ -84,6 +84,18 @@ def _validate_live_contract(
         raise WorkflowDispatchError("TOOL_SCHEMA_INCOMPATIBLE", f"tool provider is incompatible: {name}")
 
 
+def _owned_online_device(session: Session, user_id: int, device_id: str) -> DevicePresence:
+    device = session.exec(select(DevicePresence).where(
+        DevicePresence.user_id == user_id,
+        DevicePresence.device_id == device_id,
+    )).first()
+    if not device:
+        raise WorkflowDispatchError("DEVICE_ACCESS_DENIED", f"device is not owned by the run user: {device_id}")
+    if not device.online:
+        raise WorkflowDispatchError("DEVICE_OFFLINE", f"device is offline: {device_id}", retryable=True)
+    return device
+
+
 def validate_run_device(
     session: Session,
     *,
@@ -92,25 +104,34 @@ def validate_run_device(
     definition: Dict[str, Any],
     version: WorkflowCardVersion,
 ) -> DevicePresence:
-    """Fail before run creation unless the selected endpoint can execute the release."""
-    device = session.exec(select(DevicePresence).where(
-        DevicePresence.user_id == user_id,
-        DevicePresence.device_id == device_id,
-    )).first()
-    if not device:
-        raise WorkflowDispatchError("DEVICE_ACCESS_DENIED", "device is not owned by the run user")
-    if not device.online:
-        raise WorkflowDispatchError("DEVICE_OFFLINE", "device is offline", retryable=True)
+    """Validate every MCP node against its own bound device before creating a run."""
+    fallback_device = _owned_online_device(session, user_id, device_id)
+    contracts = _load_json(version.tool_contracts_json, {})
+    contracts = contracts if isinstance(contracts, dict) else {}
+    bound_ids = _bound_device_ids(version, contracts)
+    for step_id, step in definition.get("steps", {}).items():
+        if not isinstance(step, dict) or step.get("type") != "mcp" or is_ai_intervention_step(step):
+            continue
+        ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
+        name = str(ref.get("name") or "").strip()
+        target_id = str(ref.get("deviceId") or device_id).strip()
+        if bound_ids and target_id not in bound_ids:
+            raise WorkflowDispatchError(
+                "DEVICE_NOT_BOUND_TO_CARD",
+                f"step {step_id} targets a device not bound to this card version",
+            )
+        target = fallback_device if target_id == device_id else _owned_online_device(session, user_id, target_id)
+        contract = _contract_for_step(contracts, str(step_id), name)
+        _validate_live_contract(target, name, _tool_defs(target).get(name), contract)
+    return fallback_device
+
+
+def _validate_bound_device(version: WorkflowCardVersion, device_id: str) -> None:
     contracts = _load_json(version.tool_contracts_json, {})
     contracts = contracts if isinstance(contracts, dict) else {}
     bound_ids = _bound_device_ids(version, contracts)
     if bound_ids and device_id not in bound_ids:
-        raise WorkflowDispatchError("DEVICE_NOT_BOUND_TO_CARD", "device is not bound to this card version")
-    live_defs = _tool_defs(device)
-    for name in _required_tools(definition):
-        contract = contracts.get(name) if isinstance(contracts.get(name), dict) else {}
-        _validate_live_contract(device, name, live_defs.get(name), contract)
-    return device
+        raise WorkflowDispatchError("DEVICE_NOT_BOUND_TO_CARD", "step device is not bound to this card version")
 
 
 def validate_step_dispatch(
@@ -136,6 +157,7 @@ def validate_step_dispatch(
             or not version or version.card_id != card.id
         ):
             raise WorkflowDispatchError("CARD_VERSION_NOT_RUNNABLE", "card version is no longer runnable")
+        _validate_bound_device(version, device_id)
     device = session.exec(
         select(DevicePresence).where(
             DevicePresence.user_id == user_id,

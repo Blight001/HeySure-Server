@@ -1,9 +1,10 @@
 import json
 
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
 from api.models import DevicePresence, User, WorkflowCard, WorkflowCardVersion
-from api.services.workflows.card_service import delete_card, owned_card, publish_card
+from api.services.workflows.card_service import create_card, delete_card, owned_card, update_card
+from api.services.workflows.schemas import CardCreate, CardUpdate
 
 
 def _database():
@@ -53,7 +54,7 @@ def test_legacy_archived_card_is_treated_as_deleted():
         assert owned_card(session, user.id, card.id) is None
 
 
-def test_publish_binds_multiple_devices_with_one_common_tool_contract(monkeypatch):
+def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch):
     schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     definition = {
         "schemaVersion": 1,
@@ -61,7 +62,7 @@ def test_publish_binds_multiple_devices_with_one_common_tool_contract(monkeypatc
         "startStepId": "call",
         "steps": {
             "call": {
-                "type": "mcp", "toolRef": {"namespace": "device", "name": "demo"},
+                "type": "mcp", "toolRef": {"namespace": "device", "deviceId": "one", "name": "demo"},
                 "arguments": {}, "saveAs": "demo", "next": "finish",
             },
             "finish": {"type": "end"},
@@ -71,22 +72,37 @@ def test_publish_binds_multiple_devices_with_one_common_tool_contract(monkeypatc
     }
     with Session(_database()) as session:
         user = _user(session)
-        card = WorkflowCard(
-            id="multi", user_id=user.id, created_by=user.id, name="Multi",
-            draft_definition_json=json.dumps(definition),
-        )
-        session.add(card)
         session.add(DevicePresence(user_id=user.id, device_id="one", device_type="desktop", online=True))
         session.add(DevicePresence(user_id=user.id, device_id="two", device_type="browser", online=True))
         session.commit()
         monkeypatch.setattr(
             "api.services.workflows.card_service.tool_defs_for_agent",
-            lambda *_: {"demo": {"input_schema": schema, "destructive": False}},
+            lambda _user_id, device_id: {"demo": {"input_schema": schema, "destructive": False}} if device_id == "one" else {},
         )
 
-        version = publish_card(session, card, user.id, device_ids=["one", "two"])
+        card = create_card(session, user.id, CardCreate(
+            name="Multi",
+            definition=definition,
+            device_ids=["one", "two"],
+        ))
+        version = session.get(WorkflowCardVersion, card.latest_version_id)
         payload = json.loads(version.tool_contracts_json)
 
+        assert card.status == "active"
+        assert version.version_number == 1
         assert json.loads(version.contract_device_ids_json) == ["one", "two"]
-        assert payload["demo"]["publishedDeviceIds"] == ["one", "two"]
-        assert payload["demo"]["providers"] == ["browser", "desktop"]
+        assert payload["call"]["deviceId"] == "one"
+        assert payload["call"]["publishedDeviceIds"] == ["one"]
+        assert payload["call"]["providers"] == ["desktop"]
+
+        update_card(
+            session,
+            card,
+            CardUpdate(description="saved again", definition=definition, device_ids=["one", "two"]),
+            user_id=user.id,
+        )
+        latest = session.get(WorkflowCardVersion, card.latest_version_id)
+        assert latest.version_number == 2
+        assert len(session.exec(
+            select(WorkflowCardVersion).where(WorkflowCardVersion.card_id == card.id)
+        ).all()) == 2

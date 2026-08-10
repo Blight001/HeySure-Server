@@ -19,6 +19,7 @@ from api.services.workflows.run_service import (
     render_step_arguments,
     request_confirmation,
 )
+from api.services.workflows.step_device_binding import step_run_device_id
 from connector_runtime.dispatch.device_dispatch import dispatch_task_to_agent, redeliver_dispatch
 
 
@@ -96,7 +97,7 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                 continue
             if run.status in {"cancelled", "failed", "succeeded", "timed_out"}:
                 continue
-            if run.status == "waiting_confirmation":
+            if run.status in {"waiting_confirmation", "paused"}:
                 continue
             if run.status == "paused_offline" and (run.next_wakeup_at or 0) > now:
                 continue
@@ -127,7 +128,7 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                     device = validate_step_dispatch(
                         session,
                         user_id=run.user_id,
-                        device_id=run.device_id,
+                        device_id=step_run_device_id(session, step),
                         tool_name=step.tool_name,
                         expected_provider=step.tool_provider,
                         expected_digest=step.tool_schema_digest,
@@ -182,7 +183,7 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                 prepared = {
                     "step_db_id": step.id,
                     "run_id": run.id,
-                    "device_id": run.device_id,
+                    "device_id": step_run_device_id(session, step),
                     "user_id": run.user_id,
                     "ai_config_id": device.ai_config_id,
                     "step_id": step.step_id,

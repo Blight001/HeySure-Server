@@ -1,4 +1,4 @@
-"""Authenticated workflow-card draft, validation and publishing endpoints."""
+"""Authenticated workflow-card immutable-version endpoints."""
 
 from __future__ import annotations
 
@@ -14,14 +14,13 @@ from api.services.workflows.card_service import (
     create_card,
     delete_card,
     owned_card,
-    publish_card,
     update_card,
     validate_card,
     version_payload,
 )
 from api.services.workflows.compiler import WorkflowValidationError
 from api.services.workflows.trace import definition_from_trace
-from api.services.workflows.schemas import CardCreate, CardUpdate, PublishRequest, TraceDraftRequest
+from api.services.workflows.schemas import CardCreate, CardUpdate, TraceDraftRequest
 from api.core.settings import settings
 from .auth import get_current_user
 
@@ -40,6 +39,13 @@ def _validation_error(exc: WorkflowValidationError) -> HTTPException:
         status_code=422,
         detail={"code": "CARD_VALIDATION_FAILED", "errors": exc.errors, "warnings": exc.warnings},
     )
+
+
+def _create_saved_card(session: Session, user_id: int, body: CardCreate):
+    try:
+        return card_payload(create_card(session, user_id, body))
+    except WorkflowValidationError as exc:
+        raise _validation_error(exc)
 
 
 @router.get("")
@@ -90,7 +96,7 @@ def create(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    return card_payload(create_card(session, user.id, body))
+    return _create_saved_card(session, user.id, body)
 
 
 @router.post("/import", status_code=201)
@@ -100,9 +106,8 @@ def import_card(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    # Imports are always drafts and must be validated/published locally so a
-    # foreign contract snapshot can never bypass current device checks.
-    return card_payload(create_card(session, user.id, body))
+    # Import is persisted only after it compiles into an immutable version.
+    return _create_saved_card(session, user.id, body)
 
 
 @router.post("/from-trace", status_code=201)
@@ -123,7 +128,7 @@ def create_from_trace(
         risk_level=body.risk_level,
         definition=definition,
     )
-    return card_payload(create_card(session, user.id, card))
+    return _create_saved_card(session, user.id, card)
 
 
 @router.get("/{card_id}")
@@ -150,7 +155,10 @@ def patch_card(
     row = owned_card(session, user.id, card_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    return card_payload(update_card(session, row, body))
+    try:
+        return card_payload(update_card(session, row, body, user_id=user.id))
+    except WorkflowValidationError as exc:
+        raise _validation_error(exc)
 
 
 @router.post("/{card_id}/validate")
@@ -167,30 +175,6 @@ def validate(
         return validate_card(row, session)
     except WorkflowValidationError as exc:
         raise _validation_error(exc)
-
-
-@router.post("/{card_id}/publish")
-def publish(
-    card_id: str,
-    body: PublishRequest,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None),
-):
-    user = get_current_user(authorization, session)
-    row = owned_card(session, user.id, card_id)
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    try:
-        version = publish_card(
-            session,
-            row,
-            user.id,
-            device_id=body.device_id,
-            device_ids=body.device_ids,
-        )
-    except WorkflowValidationError as exc:
-        raise _validation_error(exc)
-    return version_payload(version, include_definition=True)
 
 
 @router.get("/{card_id}/versions")
@@ -244,14 +228,16 @@ def clone_card(
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
     source = card_payload(row)
+    latest = session.get(WorkflowCardVersion, row.latest_version_id) if row.latest_version_id else None
+    definition = version_payload(latest, include_definition=True)["definition"] if latest else source["definition"]
     body = CardCreate(
         name=f"{row.name}（副本）",
         description=row.description,
         tags=source["tags"],
         risk_level=row.risk_level,
-        definition=source["definition"],
+        definition=definition,
     )
-    return card_payload(create_card(session, user.id, body))
+    return _create_saved_card(session, user.id, body)
 
 
 @router.get("/{card_id}/export")

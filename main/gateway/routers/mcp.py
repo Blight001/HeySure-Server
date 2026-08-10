@@ -61,6 +61,34 @@ class InheritanceMcpTestRequest(BaseModel):
     user_hint: str = ""
 
 
+async def _call_internal_mcp(runtime_url: str, req: MCPCallRequest, user_id: int) -> Any:
+    from api.runtime.internal_http import internal_post
+
+    try:
+        return await internal_post(
+            runtime_url,
+            "/internal/mcp/call",
+            json={
+                "tool": req.tool,
+                "user_id": user_id,
+                "ai_config_id": req.ai_config_id,
+                "arguments": req.arguments or {},
+            },
+            timeout=120.0,
+        )
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code < 400 or status_code > 599:
+            raise
+        try:
+            payload = response.json()
+            detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+        except Exception:
+            detail = "MCP runtime request failed"
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+
 @router.get("/tools")
 async def list_mcp_tools(
     ai_config_id: Optional[int] = Query(None),
@@ -316,18 +344,7 @@ async def call_mcp_tool(
     from api.core.settings import settings
     runtime_url = settings.mcp_runtime_url
     if runtime_url:
-        from api.runtime.internal_http import internal_post
-        return await internal_post(
-            runtime_url,
-            "/internal/mcp/call",
-            json={
-                "tool": req.tool,
-                "user_id": user.id,
-                "ai_config_id": req.ai_config_id,
-                "arguments": req.arguments or {},
-            },
-            timeout=120.0,
-        )
+        return await _call_internal_mcp(runtime_url, req, user.id)
 
     return await registry.call(req.tool, user.id, req.arguments, req.ai_config_id)
 

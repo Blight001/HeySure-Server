@@ -24,6 +24,7 @@ from .audit import add_audit
 from .expression import evaluate_expression, render_template
 from .result_store import save_result
 from .secrets import decrypt_json, encrypt_json
+from .step_device_binding import step_contract, step_device_id
 from .workflow_cancellation import cancel_workflow_run
 
 
@@ -85,7 +86,7 @@ def _context(run: WorkflowRun, device: Optional[DevicePresence] = None) -> Dict[
         "steps": variables.get("steps", {}),
         "run": {"id": run.id, "startedAt": run.started_at, "createdAt": run.created_at},
         "device": {
-            "id": run.device_id,
+            "id": getattr(device, "device_id", run.device_id) if device else run.device_id,
             "type": getattr(device, "device_type", "") if device else "",
             "platform": getattr(device, "platform", "") if device else "",
         },
@@ -182,7 +183,7 @@ def create_run(
             WorkflowCardVersion.card_id == card.id,
         )
     ).first()
-    if not version or card.status not in {"published", "deprecated"}:
+    if not version or card.status not in {"active", "published", "deprecated"}:
         raise ValueError("CARD_VERSION_NOT_RUNNABLE")
     device = session.exec(
         select(DevicePresence).where(
@@ -219,7 +220,7 @@ def create_run(
     active_user_runs = session.exec(
         select(WorkflowRun).where(
             WorkflowRun.user_id == user_id,
-            WorkflowRun.status.in_(["pending", "running", "waiting_device", "waiting_confirmation", "retry_wait", "paused_offline"]),
+            WorkflowRun.status.in_(["pending", "running", "waiting_device", "waiting_confirmation", "retry_wait", "paused_offline", "paused"]),
         )
     ).all()
     if len(active_user_runs) >= int(settings.workflow_max_concurrent_per_user):
@@ -288,7 +289,7 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
     run = session.exec(
         select(WorkflowRun).where(WorkflowRun.id == run_id).with_for_update(skip_locked=True)
     ).first()
-    if not run or run.status in TERMINAL_RUN_STATUSES or run.status in {"waiting_device", "waiting_confirmation"}:
+    if not run or run.status in TERMINAL_RUN_STATUSES or run.status in {"waiting_device", "waiting_confirmation", "paused"}:
         return run
     now = time.time()
     if run.status == "retry_wait" and (run.next_wakeup_at or 0) > now:
@@ -417,7 +418,7 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
     device = session.exec(
         select(DevicePresence).where(
             DevicePresence.user_id == run.user_id,
-            DevicePresence.device_id == run.device_id,
+            DevicePresence.device_id == step_device_id(step, run),
         )
     ).first()
     try:
@@ -488,7 +489,7 @@ def render_step_arguments(session: Session, step_run: WorkflowStepRun) -> Dict[s
         raise ValueError("workflow run or version is missing")
     definition = _load(version.definition_json, {})
     step = definition["steps"][step_run.step_id]
-    device = session.exec(select(DevicePresence).where(DevicePresence.device_id == run.device_id)).first()
+    device = session.exec(select(DevicePresence).where(DevicePresence.user_id == run.user_id, DevicePresence.device_id == step_device_id(step, run))).first()
     rendered = render_template(step.get("arguments", {}), _context(run, device))
     if not isinstance(rendered, dict):
         raise ValueError("rendered arguments must be an object")
@@ -694,8 +695,7 @@ def _handle_step_error(
     max_attempts = int(retry.get("maxAttempts", 1))
     retry_on = {str(item) for item in retry.get("retryOn", []) if isinstance(item, str)}
     retryable = bool(error.get("retryable")) or str(error.get("code")) in retry_on
-    contracts = definition.get("_toolContracts", {})
-    destructive = bool(contracts.get(step_run.tool_name, {}).get("destructive"))
+    destructive = bool(step_contract(definition, step_run).get("destructive"))
     has_idempotency = bool(retry.get("idempotencyKey") or step.get("idempotencyKey"))
     if retryable and step_run.attempt < max_attempts and (not destructive or has_idempotency):
         base = float(retry.get("delaySeconds", 1))

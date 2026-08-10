@@ -1,4 +1,4 @@
-"""CRUD, validation and immutable publishing for workflow cards."""
+"""CRUD, validation and immutable save-time versioning for workflow cards."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def create_card(session: Session, user_id: int, body) -> WorkflowCard:
         created_by=user_id,
         name=body.name.strip(),
         description=body.description.strip(),
-        status="draft",
+        status="active",
         risk_level=body.risk_level,
         tags_json=_json(sorted({tag.strip() for tag in body.tags if tag.strip()})),
         draft_definition_json=_json(definition),
@@ -80,7 +80,13 @@ def create_card(session: Session, user_id: int, body) -> WorkflowCard:
         updated_at=now,
     )
     session.add(row)
-    session.commit()
+    _save_version(
+        session,
+        row,
+        user_id,
+        device_id=getattr(body, "device_id", None),
+        device_ids=getattr(body, "device_ids", None),
+    )
     session.refresh(row)
     return row
 
@@ -105,7 +111,13 @@ def delete_card(session: Session, row: WorkflowCard) -> None:
     session.commit()
 
 
-def update_card(session: Session, row: WorkflowCard, body) -> WorkflowCard:
+def update_card(
+    session: Session,
+    row: WorkflowCard,
+    body,
+    *,
+    user_id: int,
+) -> WorkflowCard:
     payload = body.model_dump(exclude_unset=True)
     for key in ("name", "description", "risk_level"):
         if key in payload and payload[key] is not None:
@@ -116,23 +128,22 @@ def update_card(session: Session, row: WorkflowCard, body) -> WorkflowCard:
         definition = dict(payload["definition"])
         definition.setdefault("schemaVersion", 1)
         row.draft_definition_json = _json(definition)
-    # Editing the mutable draft must not make an already-published immutable
-    # version unrunnable. Cards without a release remain drafts.
-    row.status = "published" if row.latest_version_id else "draft"
+    row.status = "active"
     row.updated_at = time.time()
     session.add(row)
-    session.commit()
+    _save_version(
+        session,
+        row,
+        user_id,
+        device_id=payload.get("device_id"),
+        device_ids=payload.get("device_ids"),
+    )
     session.refresh(row)
     return row
 
 
 def validate_card(row: WorkflowCard, session: Optional[Session] = None) -> Dict[str, Any]:
     compiled = compile_definition(_load(row.draft_definition_json, {}))
-    if session is not None and not row.latest_version_id and row.status != "validated":
-        row.status = "validated"
-        row.updated_at = time.time()
-        session.add(row)
-        session.commit()
     return {"valid": True, "digest": compiled["digest"], "warnings": compiled["warnings"]}
 
 
@@ -150,70 +161,71 @@ def _device_snapshot(session: Session, user_id: int, device_id: str) -> Tuple[De
         DevicePresence.device_id == device_id,
     )).first()
     if not device:
-        raise WorkflowValidationError([f"publish device is not owned by the current user: {device_id}"])
+        raise WorkflowValidationError([f"save device is not owned by the current user: {device_id}"])
     if not device.online:
-        raise WorkflowValidationError([f"publish device is offline: {device_id}"])
+        raise WorkflowValidationError([f"save device is offline: {device_id}"])
     return device, tool_defs_for_agent(user_id, device_id)
 
 
-def _live_tool_contracts(
-    step_id: str,
-    name: str,
-    snapshots: List[Tuple[DevicePresence, Dict[str, Any]]],
-    errors: List[str],
-) -> List[Tuple[DevicePresence, Dict[str, Any], Dict[str, Any], str]]:
-    result = []
-    for device, live_defs in snapshots:
-        live = live_defs.get(name)
-        if not live:
-            errors.append(f"step {step_id}: tool {name} is not reported by device {device.device_id}")
-            continue
-        input_schema = live.get("input_schema", {})
-        result.append((device, live, input_schema, schema_digest(input_schema)))
-    return result
-
-
-def _resolved_digest(
+def _step_device_id(
     step_id: str,
     ref: Dict[str, Any],
-    snapshots: List[Tuple[DevicePresence, Dict[str, Any]]],
-    live: List[Tuple[DevicePresence, Dict[str, Any], Dict[str, Any], str]],
-    errors: List[str],
-) -> Optional[str]:
-    if snapshots and len(live) != len(snapshots):
-        return None
-    digests = {item[3] for item in live}
-    if len(digests) > 1:
-        errors.append(f"step {step_id}: tool {ref['name']} exposes different schemas on bound devices")
-        return None
-    supplied = str(ref.get("schemaDigest") or "").strip()
-    digest = next(iter(digests), supplied)
-    if supplied and digest and supplied != digest:
-        errors.append(f"step {step_id}: supplied schema digest does not match the current tool")
-        return None
-    if not snapshots and not supplied:
-        errors.append(f"step {step_id}: publish requires device_ids or toolRef.schemaDigest")
-        return None
-    return supplied or digest
-
-
-def _frozen_contract(
-    name: str,
-    ref: Dict[str, Any],
-    live: List[Tuple[DevicePresence, Dict[str, Any], Dict[str, Any], str]],
     bound_ids: List[str],
-) -> Dict[str, Any]:
-    providers = sorted({str(item[0].device_type or "custom") for item in live})
+    errors: List[str],
+) -> str:
+    target = str(ref.get("deviceId") or "").strip()
+    if not target and len(bound_ids) == 1:
+        target = bound_ids[0]
+    if not target:
+        errors.append(f"step {step_id}: select a contract device for this MCP node")
+        return ""
+    if bound_ids and target not in bound_ids:
+        errors.append(f"step {step_id}: device {target} is not selected as a contract device")
+        return ""
+    ref["deviceId"] = target
+    return target
+
+
+def _frozen_step_contract(
+    *,
+    name: str,
+    ref: Dict[str, Any],
+    target_id: str,
+    snapshot: Optional[Tuple[DevicePresence, Dict[str, Any]]],
+    errors: List[str],
+    step_id: str,
+) -> Optional[Dict[str, Any]]:
+    supplied = str(ref.get("schemaDigest") or "").strip()
+    if snapshot is None:
+        if not supplied:
+            errors.append(f"step {step_id}: saving requires a bound device or toolRef.schemaDigest")
+            return None
+        return {
+            "namespace": "device", "name": name, "deviceId": target_id,
+            "schemaDigest": supplied, "inputSchema": ref.get("inputSchema", {}),
+            "destructive": False, "provider": str(ref.get("provider") or ""),
+            "providers": [], "publishedDeviceId": target_id,
+            "publishedDeviceIds": [target_id] if target_id else [],
+        }
+    device, live_defs = snapshot
+    live = live_defs.get(name)
+    if not isinstance(live, dict):
+        errors.append(f"step {step_id}: tool {name} is not reported by device {target_id}")
+        return None
+    input_schema = live.get("input_schema") if isinstance(live.get("input_schema"), dict) else {}
+    digest = schema_digest(input_schema)
+    if supplied and supplied != digest:
+        errors.append(f"step {step_id}: supplied schema digest does not match device {target_id}")
+        return None
+    provider = str(device.device_type or "custom")
+    ref["schemaDigest"] = digest
+    ref["provider"] = provider
     return {
-        "namespace": "device",
-        "name": name,
-        "schemaDigest": ref["schemaDigest"],
-        "inputSchema": live[0][2] if live else ref.get("inputSchema", {}),
-        "destructive": any(bool(item[1].get("destructive")) for item in live),
-        "provider": providers[0] if len(providers) == 1 else "",
-        "providers": providers,
-        "publishedDeviceId": bound_ids[0] if len(bound_ids) == 1 else "",
-        "publishedDeviceIds": bound_ids,
+        "namespace": "device", "name": name, "deviceId": target_id,
+        "schemaDigest": digest, "inputSchema": input_schema,
+        "destructive": bool(live.get("destructive")), "provider": provider,
+        "providers": [provider], "publishedDeviceId": target_id,
+        "publishedDeviceIds": [target_id],
     }
 
 
@@ -226,30 +238,33 @@ def _snapshot_contracts(
     device_ids: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], List[str]]:
     bound_ids = _contract_device_ids(device_id, device_ids)
-    snapshots = [_device_snapshot(session, user_id, item) for item in bound_ids]
+    snapshots = {item: _device_snapshot(session, user_id, item) for item in bound_ids}
     contracts: Dict[str, Any] = {}
-    errors = []
+    errors: List[str] = []
     for step_id, step in definition["steps"].items():
-        if step.get("type") != "mcp":
-            continue
-        if is_ai_intervention_step(step):
+        if step.get("type") != "mcp" or is_ai_intervention_step(step):
             continue
         ref = step["toolRef"]
         name = str(ref["name"]).strip()
-        live_contracts = _live_tool_contracts(step_id, name, snapshots, errors)
-        digest = _resolved_digest(step_id, ref, snapshots, live_contracts, errors)
-        if digest is None:
+        target_id = _step_device_id(step_id, ref, bound_ids, errors)
+        if not target_id:
             continue
-        providers = sorted({str(item[0].device_type or "custom") for item in live_contracts})
-        ref["schemaDigest"] = digest
-        ref["provider"] = providers[0] if len(providers) == 1 else ""
-        contracts[name] = _frozen_contract(name, ref, live_contracts, bound_ids)
+        contract = _frozen_step_contract(
+            name=name,
+            ref=ref,
+            target_id=target_id,
+            snapshot=snapshots.get(target_id),
+            errors=errors,
+            step_id=step_id,
+        )
+        if contract is not None:
+            contracts[step_id] = contract
     if errors:
         raise WorkflowValidationError(errors)
     return contracts, bound_ids
 
 
-def publish_card(
+def _save_version(
     session: Session,
     row: WorkflowCard,
     user_id: int,
@@ -259,6 +274,7 @@ def publish_card(
 ) -> WorkflowCardVersion:
     compiled = compile_definition(_load(row.draft_definition_json, {}))
     definition = compiled["definition"]
+    row.draft_definition_json = _json(definition)
     contracts, bound_ids = _snapshot_contracts(
         session, user_id, definition, device_id=device_id, device_ids=device_ids,
     )
@@ -281,7 +297,7 @@ def publish_card(
     session.add(version)
     session.flush()
     row.latest_version_id = version.id
-    row.status = "published"
+    row.status = "active"
     row.updated_at = time.time()
     session.add(row)
     session.commit()

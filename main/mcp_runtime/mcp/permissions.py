@@ -64,12 +64,6 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # switch/new) — every tier can manage its own scoped sessions.
     "conversation.manage": ROLE_MEMBER,
     "device+mcp.manage": ROLE_MEMBER,
-    "automation.list": ROLE_MEMBER,
-    "automation.get": ROLE_MEMBER,
-    "automation.run": ROLE_MEMBER,
-    "automation.status": ROLE_MEMBER,
-    "automation.cancel": ROLE_MEMBER,
-    "automation.respond": ROLE_MEMBER,
     "automation.manage": ROLE_MEMBER,
 }
 
@@ -84,8 +78,6 @@ LIBRARY_BOUND_TOOLS: Set[str] = {
     "member.manage",
     "device+mcp.manage",
     "knowledge.manage",
-    "automation.manage",
-    "automation.respond",
 }
 
 

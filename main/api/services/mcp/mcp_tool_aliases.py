@@ -56,6 +56,13 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
     "message.send_to_user": "message.send+to",
     "message.send_to_ai": "message.send+to",
     "device_mcp.manage": "device+mcp.manage",
+    # 自动化卡片细粒度 MCP 合并为唯一 automation.manage。
+    "automation.list": "automation.manage",
+    "automation.get": "automation.manage",
+    "automation.run": "automation.manage",
+    "automation.status": "automation.manage",
+    "automation.cancel": "automation.manage",
+    "automation.respond": "automation.manage",
     # 2026-07 send+to+user / send+to+ai 合并成统一的 message.send+to（to 参数选收件方）。
     "message.send+to+user": "message.send+to",
     "message.send+to+ai": "message.send+to",
@@ -67,19 +74,7 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
 # normalization boundary so config allowlists, per-message scopes, prompt
 # previews and the AI runtime all apply identical semantics.
 TOOL_BUNDLE_EXPANSIONS: Dict[str, Set[str]] = {
-    "automation.status": {
-        "automation.status",
-        "automation.respond",
-    },
-    "automation.manage": {
-        "automation.list",
-        "automation.get",
-        "automation.run",
-        "automation.status",
-        "automation.cancel",
-        "automation.respond",
-        "automation.manage",
-    },
+    "automation.manage": {"automation.manage"},
 }
 
 # Consolidated tools retired from the registry.  Old AI configs and saved role

@@ -11,6 +11,8 @@ class CardCreate(BaseModel):
     tags: List[str] = Field(default_factory=list)
     risk_level: str = "read_only"
     definition: Dict[str, Any] = Field(default_factory=dict)
+    device_id: Optional[str] = None
+    device_ids: List[str] = Field(default_factory=list, max_length=20)
 
 
 class CardUpdate(BaseModel):
@@ -19,11 +21,8 @@ class CardUpdate(BaseModel):
     tags: Optional[List[str]] = None
     risk_level: Optional[str] = None
     definition: Optional[Dict[str, Any]] = None
-
-
-class PublishRequest(BaseModel):
     device_id: Optional[str] = None
-    device_ids: List[str] = Field(default_factory=list, max_length=20)
+    device_ids: Optional[List[str]] = Field(default=None, max_length=20)
 
 
 class TraceDraftRequest(BaseModel):

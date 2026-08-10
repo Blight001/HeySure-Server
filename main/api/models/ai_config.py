@@ -8,7 +8,7 @@ _DEFAULT_MCP_TOOLS = (
     '"member.manage","device+mcp.manage",'
     '"todo.manage","knowledge.manage",'
     '"message.send+to","conversation.manage",'
-    '"automation.list","automation.get","automation.run","automation.status","automation.cancel","automation.respond"]'
+    '"automation.manage"]'
 )
 
 _DEFAULT_SYSTEM_AUTO_CONTROL = (
