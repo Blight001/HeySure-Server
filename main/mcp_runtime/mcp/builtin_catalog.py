@@ -287,7 +287,8 @@ BUILTIN_TOOLS = (
         description=(
             "自动化卡片唯一聚合工具：action=list/get/create/import/from_trace/clone/edit/delete/"
             "validate/versions/get_version/export/start/list_runs/status/pause/resume/cancel/retry/respond。"
-            "AI 创建的卡片会自动添加 ai_owner:<成员ID> 标签；每个 AI 只能访问自己的标签卡片或无所有者标签的公共卡片。"
+            "AI 创建的卡片会自动添加 ai_owner:<成员ID> 标签；普通成员只能访问自己的标签卡片或无所有者标签的公共卡片，"
+            "管理员与辅助管理员可全局读取和治理同一用户下的卡片。"
         ),
         input_schema=AUTOMATION_MANAGE_SCHEMA,
         handler=_automation_manage,

@@ -235,7 +235,7 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
     if action in {"create", "import", "from_trace"}:
         return _create_card(user_id, args, ai_config_id)
     with Session(engine) as session:
-        admin_read = action in {"get", "clone", "versions", "get_version", "export"}
+        admin_read = action in {"get", "clone", "validate", "versions", "get_version", "export"}
         card = _accessible_card(
             session,
             user_id,
