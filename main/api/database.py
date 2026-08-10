@@ -16,6 +16,7 @@ from .core.config import DATABASE_URL
 
 # Importing the models package side-effect populates ``SQLModel.metadata``.
 from . import models  # noqa: F401
+from .models import external_control as _external_control_models  # noqa: F401
 
 logger = logging.getLogger(__name__)
 _BOOTSTRAP_ADVISORY_LOCK_KEY = 518_329_771_405_339_013

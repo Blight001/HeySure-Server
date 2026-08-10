@@ -12,6 +12,8 @@ __pycache__/
 # Pytest / mypy
 .pytest_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 
 # Data and runtime
 data/
