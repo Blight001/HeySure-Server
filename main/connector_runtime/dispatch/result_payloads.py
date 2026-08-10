@@ -26,6 +26,15 @@ def explicit_send_disabled(args: Any) -> bool:
     )
 
 
+def explicit_save_disabled(args: Any) -> bool:
+    if not isinstance(args, dict):
+        return False
+    return any(
+        key in args and args.get(key) is False
+        for key in ("save_to_server", "save_to_workspace", "upload_to_server")
+    )
+
+
 def should_send_screenshot_to_user(tool: str, result: Any, args: Any = None) -> bool:
     if explicit_send_disabled(args):
         return False
@@ -36,17 +45,17 @@ def should_send_screenshot_to_user(tool: str, result: Any, args: Any = None) -> 
     result_requested = isinstance(result, dict) and any(
         result.get(key) is True for key in ("send_to_user", "bot_send_to_user", "deliver_to_user")
     )
-    return requested or result_requested or tool_kind in {
-        "vision_capture", "vision_capture_mouse", "screen_capture", "screen_capture_region"
-    }
+    return bool(tool_kind) and (requested or result_requested or not explicit_send_disabled(args))
 
 
 def normalize_screenshot_result_for_delivery(tool: str, result: Any, args: Any = None) -> Any:
-    if not isinstance(result, dict) or not should_send_screenshot_to_user(tool, result, args):
+    tool_kind = canonical_screenshot_tool_name(tool)
+    if not isinstance(result, dict) or not tool_kind:
         return result
     normalized = dict(result)
-    normalized["send_to_user"] = True
-    normalized["save_to_server"] = True
+    normalized["send_to_user"] = should_send_screenshot_to_user(tool, result, args)
+    if not explicit_save_disabled(args):
+        normalized["save_to_server"] = True
     return normalized
 
 
@@ -67,32 +76,9 @@ def omit_screenshot_bytes(value: Any) -> Any:
 
 
 def _workspace_dir(user_id: int, ai_config_id: Optional[int]) -> str:
-    from api.core.config import ai_workspace_dirname, user_workspace_dir
+    from api.services.storage.workspace_scope import member_workspace_dir
 
-    user_root = user_workspace_dir(user_id)
-    if not ai_config_id:
-        return user_root
-    try:
-        from api.models import AssistantAIConfig
-
-        with Session(engine) as session:
-            config = session.exec(
-                select(AssistantAIConfig).where(
-                    AssistantAIConfig.id == ai_config_id,
-                    AssistantAIConfig.user_id == user_id,
-                )
-            ).first()
-        if not config:
-            return os.path.abspath(os.path.join(user_root, f"{ai_config_id}-ai"))
-        role = str(config.ai_role or "").strip().lower()
-        member_role = str(config.digital_member_role or "").strip().lower()
-        if role == "digital_member" and member_role == "manager":
-            return user_root
-        return os.path.abspath(
-            os.path.join(user_root, ai_workspace_dirname(config.id, config.name, config.ai_role))
-        )
-    except Exception:
-        return os.path.abspath(os.path.join(user_root, f"{ai_config_id}-ai"))
+    return member_workspace_dir(user_id, ai_config_id, create=True)
 
 
 def _cookie_payload(result: dict, data: dict, cookies: Any, browser_storage: Any) -> dict:

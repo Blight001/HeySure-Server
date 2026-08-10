@@ -547,7 +547,7 @@ def list_files(
     user = get_current_user(authorization, session)
     project_root = get_project_root(user.id, None)
     all_paths = []
-    ignored_dirs = {".git", "__pycache__", "venv", "node_modules", ".aider", ".sandbox_home", ".sandbox_tmp", "_admins"}
+    ignored_dirs = {".git", ".heysure", "__pycache__", "venv", "node_modules", ".aider", ".sandbox_home", ".sandbox_tmp", "_admins"}
     for root, dirs, files in os.walk(project_root):
         dirs[:] = [
             d for d in dirs

@@ -11,14 +11,14 @@ from typing import Any, Callable, Dict, List, Optional
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from api.core.config import ai_workspace_dirname, user_workspace_dir
 from api.database import engine
 from api.models import AIRuntimeStatus, AssistantAIConfig
+from api.services.storage.workspace_scope import member_workspace_dir
 from api.sio import sio
 
 logger = logging.getLogger(__name__)
 MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
-_IGNORED_WORKSPACE_DIRS = {".git", "__pycache__", "venv", "node_modules", ".aider"}
+_IGNORED_WORKSPACE_DIRS = {".git", ".heysure", "__pycache__", "venv", "node_modules", ".aider"}
 
 def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
     """Resolve the working directory available to an AI.
@@ -30,26 +30,7 @@ def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
     Note: the shared knowledge base is resolved separately
     (``user_shared_knowledge_dir``) so it stays one-per-user across AIs.
     """
-    user_root = user_workspace_dir(user_id)
-
-    if not ai_config_id:
-        return user_root
-    with Session(engine) as session:
-        cfg = session.exec(
-            select(AssistantAIConfig).where(
-                AssistantAIConfig.user_id == user_id,
-                AssistantAIConfig.id == ai_config_id,
-            )
-        ).first()
-    if not cfg:
-        return user_root
-
-    ai_role = str(cfg.ai_role or "").strip().lower()
-    member_role = str(cfg.digital_member_role or "").strip().lower()
-    if ai_role == "digital_member" and member_role == "manager":
-        return user_root
-
-    return os.path.abspath(os.path.join(user_root, ai_workspace_dirname(cfg.id, cfg.name, cfg.ai_role)))
+    return member_workspace_dir(user_id, ai_config_id)
 
 def get_project_root(user_id: int, ai_config_id: Optional[int] = None) -> str:
     workspace_dir = _resolve_ai_workspace(user_id, ai_config_id)
@@ -73,7 +54,7 @@ def generate_file_tree(path: str, prefix: str = "") -> str:
         if not os.path.exists(path):
             return "Path not found\n"
         items = sorted(os.listdir(path))
-        items = [i for i in items if i not in [".git", "__pycache__", "venv", "node_modules", ".aider"]]
+        items = [i for i in items if i not in _IGNORED_WORKSPACE_DIRS]
 
         for i, item in enumerate(items):
             is_last = i == len(items) - 1

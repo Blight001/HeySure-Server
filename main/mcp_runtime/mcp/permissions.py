@@ -48,6 +48,7 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
     # Shell command execution is allowed for every member inside the workspace
     # resolved for that AI. Regular members cannot choose an outside cwd.
     "workspace.run+command": ROLE_MEMBER,
+    "workspace.file+manage": ROLE_MEMBER,
     # Library tools use library binding as their only authorization boundary.
     # Every bound AI may use every action, regardless of its role tier.
     "member.manage": ROLE_MEMBER,
@@ -211,6 +212,7 @@ def clamp_tools_json(user, tier: str, mcp_tools_json: Optional[str]) -> str:
         if tool.startswith("workspace.") and tool not in {
             "workspace.search",
             "workspace.run+command",
+            "workspace.file+manage",
         }:
             continue
         # Endpoint desktop/browser tools are governed exclusively by

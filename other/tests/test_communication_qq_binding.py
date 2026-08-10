@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from connector_runtime.bots.messaging import Recipient
+from connector_runtime.bots.messaging import DeliveryResult, Recipient
 from mcp_runtime.mcp import registry as _registry  # noqa: F401 - initialize tools before direct import
 from tools import communication
 
@@ -152,3 +152,91 @@ def test_qq_notification_returns_unbound_result_instead_of_sending(monkeypatch):
     assert result["delivered"] is False
     assert result["reason"] == "qq_recipient_not_bound"
     assert "未绑定 QQ" in result["message"]
+
+
+def test_file_ref_attachment_is_resolved_without_exposing_absolute_path(monkeypatch):
+    monkeypatch.setattr(
+        communication,
+        "resolve_file_ref",
+        lambda **_kwargs: {
+            "server_path": "/workspace/report.pdf",
+            "file_name": "report.pdf",
+        },
+    )
+
+    payloads = communication._attachment_payloads(3, 9, {
+        "attachments": [{"file_ref": "file_" + "a" * 32}],
+    })
+
+    assert len(payloads) == 1
+    assert payloads[0].path == "/workspace/report.pdf"
+    assert payloads[0].file_name == "report.pdf"
+
+
+def test_multiple_attachments_send_caption_only_once(monkeypatch):
+    sent = []
+    monkeypatch.setattr(communication.dispatcher, "resolve_channel", lambda *_args: "feishu")
+    monkeypatch.setattr(
+        communication.dispatcher,
+        "send_media",
+        lambda **kwargs: sent.append(kwargs["media"]) or DeliveryResult(
+            ok=True,
+            channel="feishu",
+            detail={"message_id": f"m{len(sent)}"},
+        ),
+    )
+    monkeypatch.setattr(
+        communication,
+        "resolve_file_ref",
+        lambda **kwargs: {
+            "server_path": f"/workspace/{kwargs['file_ref']}.bin",
+            "file_name": f"{kwargs['file_ref']}.bin",
+        },
+    )
+    monkeypatch.setattr(
+        communication,
+        "Session",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("notice lookup unavailable")),
+    )
+
+    result = communication._user_send_message(3, {
+        "to": "user",
+        "text": "两个附件",
+        "attachments": ["file_" + "a" * 32, "file_" + "b" * 32],
+    }, 9)
+
+    assert result["delivered"] is True
+    assert result["attachment_count"] == 2
+    assert result["message_ids"] == ["m1", "m2"]
+    assert [item.text for item in sent] == ["两个附件", ""]
+
+
+def test_multiple_attachments_report_partial_delivery_without_false_success(monkeypatch):
+    calls = []
+    monkeypatch.setattr(communication.dispatcher, "resolve_channel", lambda *_args: "feishu")
+
+    def send_media(**kwargs):
+        calls.append(kwargs["media"])
+        if len(calls) == 2:
+            raise RuntimeError("second upload failed")
+        return DeliveryResult(ok=True, channel="feishu", detail={"message_id": "m1"})
+
+    monkeypatch.setattr(communication.dispatcher, "send_media", send_media)
+    monkeypatch.setattr(
+        communication,
+        "resolve_file_ref",
+        lambda **kwargs: {
+            "server_path": f"/workspace/{kwargs['file_ref']}.bin",
+            "file_name": "file.bin",
+        },
+    )
+
+    result = communication._user_send_message(3, {
+        "text": "附件",
+        "attachments": ["file_" + "a" * 32, "file_" + "b" * 32],
+    }, 9)
+
+    assert result["delivered"] is False
+    assert result["partial"] is True
+    assert result["sent_count"] == 1
+    assert result["attachment_count"] == 2

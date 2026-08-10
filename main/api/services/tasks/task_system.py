@@ -55,7 +55,7 @@ def with_workspace_read_by_name_compat(tools: set[str]) -> set[str]:
         if str(item).strip()
         and (
             not str(item).strip().startswith("workspace.")
-            or str(item).strip() in {"workspace.search", "workspace.run+command"}
+            or str(item).strip() in {"workspace.search", "workspace.run+command", "workspace.file+manage"}
         )
     }
 

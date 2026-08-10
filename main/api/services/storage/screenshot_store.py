@@ -6,11 +6,13 @@ import base64
 import os
 import re
 import time
+import uuid
 from typing import Any, Dict, Optional
 
-from ...core.config import user_workspace_dir
 from ...core.settings import settings
 from .temp_image_store import save_temp_image
+from .workspace_files import MAX_SENDABLE_FILE_BYTES, register_workspace_file
+from .workspace_scope import member_workspace_dir
 
 DATA_URL_RE = re.compile(r"^data:image/(?P<ext>png|jpeg|jpg|webp);base64,(?P<data>.+)$", re.IGNORECASE | re.DOTALL)
 
@@ -57,13 +59,15 @@ def persist_screenshot_result(
     raw = base64.b64decode(match.group("data"), validate=False)
     if not raw:
         return None
+    if len(raw) > MAX_SENDABLE_FILE_BYTES:
+        return None
 
-    root = user_workspace_dir(int(user_id))
+    root = member_workspace_dir(int(user_id), ai_config_id, create=True)
     folder = os.path.join(root, "Screenshots")
     os.makedirs(folder, exist_ok=True)
     cfg_part = f"ai{int(ai_config_id)}" if ai_config_id else "ai"
     tool_part = _safe_segment(tool.replace(".", "_"), "screenshot")
-    filename = f"{cfg_part}_{tool_part}_{int(time.time() * 1000)}.{ext}"
+    filename = f"{cfg_part}_{tool_part}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.{ext}"
     abs_path = os.path.abspath(os.path.join(folder, filename))
     with open(abs_path, "wb") as fh:
         fh.write(raw)
@@ -75,6 +79,19 @@ def persist_screenshot_result(
         "bytes": len(raw),
         "media_type": "image",
     }
+    try:
+        saved.update(register_workspace_file(
+            user_id=int(user_id),
+            ai_config_id=ai_config_id,
+            workspace_path=rel_path,
+        ))
+    except Exception:
+        try:
+            os.remove(abs_path)
+        except OSError:
+            pass
+        raise
+    saved["server_path"] = abs_path
     if settings.public_base_url:
         try:
             temp_filename, temp_media_type, _ = save_temp_image(raw, ext)
@@ -111,6 +128,9 @@ def attach_persisted_screenshot(
     next_result["file_name"] = saved["file_name"]
     next_result["media_type"] = saved["media_type"]
     next_result["bytes"] = saved["bytes"]
+    next_result["file_ref"] = saved["file_ref"]
+    next_result["mime_type"] = saved["mime_type"]
+    next_result["can_send_to_user"] = saved["can_send_to_user"]
     for key in ("public_url", "image_url", "temp_file_name", "temp_media_type", "temp_ttl_seconds"):
         if key in saved:
             next_result[key] = saved[key]

@@ -108,16 +108,20 @@ def resolve_media_source(
 
 def infer_media_kind(source: MediaSource, explicit: str = "") -> str:
     value = str(explicit or "").strip().lower()
-    if value in {"image", "video"}:
+    if value in {"image", "video", "audio", "file"}:
         return value
     mime = str(source.mime_type or "").lower()
     if mime.startswith("image/"):
         return "image"
     if mime.startswith("video/"):
         return "video"
+    if mime.startswith("audio/"):
+        return "audio"
     suffix = Path(source.filename or source.path).suffix.lower()
     if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".heic"}:
         return "image"
     if suffix in {".mp4", ".mov", ".m4v"}:
         return "video"
-    raise HTTPException(status_code=400, detail="unsupported media type; expected image or video")
+    if suffix in {".mp3", ".wav", ".ogg", ".opus", ".m4a", ".aac", ".flac"}:
+        return "audio"
+    return "file"

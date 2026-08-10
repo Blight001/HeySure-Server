@@ -69,7 +69,7 @@ def test_namespaced_ai_free_screenshot_honors_send_to_user_delivery():
     assert normalized["save_to_server"] is True
 
 
-def test_explicit_send_to_user_false_still_prevents_delivery():
+def test_explicit_send_to_user_false_prevents_delivery_but_still_saves():
     result = {"success": True, "dataUrl": DATA_URL, "send_to_user": True}
 
     normalized = _normalize_screenshot_result_for_delivery(
@@ -78,5 +78,27 @@ def test_explicit_send_to_user_false_still_prevents_delivery():
         {"send_to_user": False},
     )
 
-    assert normalized == result
+    assert normalized["send_to_user"] is False
+    assert normalized["save_to_server"] is True
+
+
+def test_namespaced_ai_free_screenshot_defaults_to_save_and_send():
+    normalized = _normalize_screenshot_result_for_delivery(
+        AI_FREE_SCREENSHOT,
+        {"success": True, "dataUrl": DATA_URL},
+        {},
+    )
+
+    assert normalized["send_to_user"] is True
+    assert normalized["save_to_server"] is True
+
+
+def test_explicit_save_false_is_independent_from_send_setting():
+    normalized = _normalize_screenshot_result_for_delivery(
+        AI_FREE_SCREENSHOT,
+        {"success": True, "dataUrl": DATA_URL},
+        {"save_to_workspace": False, "send_to_user": True},
+    )
+
+    assert normalized["send_to_user"] is True
     assert "save_to_server" not in normalized

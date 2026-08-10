@@ -12,15 +12,16 @@
 """
 
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from connector_runtime.bots.messaging import MediaPayload, Recipient, dispatcher
 from api.database import engine
-from mcp_runtime.mcp.core import get_project_root, safe_join
+from mcp_runtime.mcp.core import get_project_root
 from api.models import AssistantAIConfig, User
+from api.services.storage.workspace_files import resolve_file_ref
 from ai_runtime.inference import ai_message_service
 from api.runtime.run_context import get_run_session_context
 
@@ -38,10 +39,105 @@ def _resolve_server_media_path(user_id: int, ai_config_id: Optional[int], media_
     value = str(media_path or "").strip()
     if not value:
         return ""
-    if os.path.isabs(value):
-        return value
     root = get_project_root(user_id, ai_config_id)
-    return safe_join(root, value.replace("\\", "/"))
+    candidate = value if os.path.isabs(value) else os.path.join(root, value.replace("\\", "/"))
+    root_real = os.path.realpath(root)
+    candidate_real = os.path.realpath(candidate)
+    try:
+        common = os.path.commonpath([root_real, candidate_real])
+    except ValueError:
+        common = ""
+    if common != root_real:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "FILE_SCOPE_VIOLATION", "message": "media path must stay inside the current AI workspace"},
+        )
+    return candidate_real
+
+
+def _legacy_media_payload(user_id: int, ai_config_id: Optional[int], args: Dict[str, Any]) -> Optional[MediaPayload]:
+    media_url = str(
+        args.get("media_url") or args.get("image_url") or args.get("video_url") or args.get("file_url") or ""
+    ).strip()
+    media_path = str(
+        args.get("media_path") or args.get("image_path") or args.get("video_path") or args.get("file_path") or ""
+    ).strip()
+    file_ref = str(args.get("file_ref") or "").strip()
+    file_name = str(args.get("file_name") or args.get("filename") or "").strip()
+    media_type = str(
+        args.get("media_type")
+        or ("image" if (args.get("image_url") or args.get("image_path")) else "")
+        or ("video" if (args.get("video_url") or args.get("video_path")) else "")
+    ).strip()
+    if file_ref:
+        resolved = resolve_file_ref(user_id=user_id, ai_config_id=ai_config_id, file_ref=file_ref)
+        media_path = str(resolved["server_path"])
+        file_name = file_name or str(resolved["file_name"])
+    elif media_path:
+        media_path = _resolve_server_media_path(user_id, ai_config_id, media_path)
+    if not media_url and not media_path:
+        return None
+    return MediaPayload(
+        url=media_url,
+        path=media_path,
+        media_type=media_type,
+        file_name=file_name,
+        duration=args.get("duration"),
+    )
+
+
+def _attachment_payloads(user_id: int, ai_config_id: Optional[int], args: Dict[str, Any]) -> List[MediaPayload]:
+    raw = args.get("attachments")
+    if raw is None:
+        legacy = _legacy_media_payload(user_id, ai_config_id, args)
+        return [legacy] if legacy else []
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(status_code=400, detail="attachments must be a non-empty array")
+    if len(raw) > 5:
+        raise HTTPException(status_code=400, detail="at most 5 attachments may be sent at once")
+    payloads: List[MediaPayload] = []
+    for item in raw:
+        values = {"file_ref": item} if isinstance(item, str) else item
+        if not isinstance(values, dict):
+            raise HTTPException(status_code=400, detail="each attachment must be a file_ref string or object")
+        payload = _legacy_media_payload(user_id, ai_config_id, values)
+        if payload is None:
+            raise HTTPException(status_code=400, detail="each attachment requires file_ref, media_url, or media_path")
+        payloads.append(payload)
+    return payloads
+
+
+def _send_attachment_batch(
+    *,
+    user_id: int,
+    ai_config_id: Optional[int],
+    channel: str,
+    recipient: Optional[Recipient],
+    raw_target: Dict[str, Any],
+    text: str,
+    attachments: List[MediaPayload],
+) -> tuple[List[Any], Optional[Exception]]:
+    deliveries = []
+    for index, media in enumerate(attachments):
+        try:
+            deliveries.append(dispatcher.send_media(
+                user_id=user_id,
+                ai_config_id=ai_config_id,
+                channel=channel,
+                media=MediaPayload(
+                    text=text if index == 0 else "",
+                    url=media.url,
+                    path=media.path,
+                    media_type=media.media_type,
+                    file_name=media.file_name,
+                    duration=media.duration,
+                ),
+                recipient=recipient,
+                raw_target=None if recipient is not None else raw_target,
+            ))
+        except Exception as exc:
+            return deliveries, exc
+    return deliveries, None
 
 
 def _coerce_message_type(raw: Any) -> str:
@@ -153,25 +249,9 @@ def _resolve_qq_notification_recipient(
 def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     """主动向用户推送一条消息。当前支持：飞书机器人、QQ机器人。"""
     text = str(args.get("text") or args.get("content") or args.get("message") or "").strip()
-    media_url = str(
-        args.get("media_url")
-        or args.get("image_url")
-        or args.get("video_url")
-        or args.get("file_url")
-        or ""
-    ).strip()
-    media_path = str(
-        args.get("media_path")
-        or args.get("image_path")
-        or args.get("video_path")
-        or args.get("file_path")
-        or ""
-    ).strip()
-    media_path = _resolve_server_media_path(user_id, ai_config_id, media_path)
-    media_type = str(args.get("media_type") or ("image" if (args.get("image_url") or args.get("image_path")) else "") or ("video" if (args.get("video_url") or args.get("video_path")) else "")).strip()
-    file_name = str(args.get("file_name") or args.get("filename") or "").strip()
-    if not text and not media_url and not media_path:
-        raise HTTPException(status_code=400, detail="text or media_url/media_path is required when message.send+to targets the user")
+    attachments = _attachment_payloads(user_id, ai_config_id, args)
+    if not text and not attachments:
+        raise HTTPException(status_code=400, detail="text or an attachment is required when message.send+to targets the user")
     channel = str(args.get("channel") or "").strip().lower()
     resolved_channel = dispatcher.resolve_channel(channel or None, ai_config_id, user_id)
     recipient: Optional[Recipient] = None
@@ -198,33 +278,40 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     # payload; each channel's adapter (parse_recipient) picks the aliases it
     # understands. Channel resolution + default-receiver fallback live in the
     # dispatcher / adapter, not here.
-    if media_url or media_path:
-        delivery = dispatcher.send_media(
+    if attachments:
+        deliveries, batch_error = _send_attachment_batch(
             user_id=user_id,
             ai_config_id=ai_config_id,
             channel=resolved_channel,
-            media=MediaPayload(
-                text=text,
-                url=media_url,
-                path=media_path,
-                media_type=media_type,
-                file_name=file_name,
-                duration=args.get("duration"),
-            ),
             recipient=recipient,
-            raw_target=None if recipient is not None else args,
+            raw_target=args,
+            text=text,
+            attachments=attachments,
         )
+        if batch_error is not None:
+            if not deliveries:
+                raise batch_error
+            detail = getattr(batch_error, "detail", str(batch_error))
+            return {
+                "delivered": False,
+                "partial": True,
+                "channel": resolved_channel,
+                "attachment_count": len(attachments),
+                "sent_count": len(deliveries),
+                "error_code": type(batch_error).__name__,
+                "error": detail,
+            }
     else:
-        delivery = dispatcher.send_text(
+        deliveries = [dispatcher.send_text(
             user_id=user_id,
             ai_config_id=ai_config_id,
             channel=resolved_channel,
             text=text,
             recipient=recipient,
             raw_target=None if recipient is not None else args,
-        )
+        )]
+    delivery = deliveries[-1]
     channel = delivery.channel
-    result = delivery.detail
     # 套一层 user 语义包装 + 拼出"已送达"提示
     notice_template = ""
     try:
@@ -247,17 +334,26 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
             notice = notice_template
 
     out: Dict[str, Any] = {
-        "delivered": bool(delivery.ok),
+        "delivered": all(bool(item.ok) for item in deliveries),
         "channel": channel,
     }
+    if attachments:
+        out["attachment_count"] = len(attachments)
     if binding_source:
         out["binding_source"] = binding_source
     # 底层机器人返回里若带消息 id，保留一个轻量引用即可，不回吐整包响应。
-    if isinstance(result, dict):
-        data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        sent_id = result.get("message_id") or result.get("msg_id") or data.get("message_id")
-        if sent_id:
-            out["message_id"] = sent_id
+    sent_ids = []
+    for item in deliveries:
+        result = item.detail
+        if isinstance(result, dict):
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            sent_id = result.get("message_id") or result.get("msg_id") or data.get("message_id")
+            if sent_id:
+                sent_ids.append(sent_id)
+    if sent_ids:
+        out["message_id"] = sent_ids[0]
+        if len(sent_ids) > 1:
+            out["message_ids"] = sent_ids
     if notice:
         out["notice"] = notice
     return out

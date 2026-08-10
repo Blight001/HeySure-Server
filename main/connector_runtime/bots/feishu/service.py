@@ -1,5 +1,6 @@
 import json
 import mimetypes
+import os
 from typing import Any, Dict, Optional
 
 import requests
@@ -230,6 +231,23 @@ def upload_feishu_file(
     return file_key
 
 
+def _feishu_file_type(source: MediaSource) -> str:
+    suffix = os.path.splitext(source.filename or source.path)[1].lower()
+    if suffix == ".opus":
+        return "opus"
+    if suffix in {".mp4", ".mov", ".m4v"}:
+        return "mp4"
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix in {".doc", ".docx"}:
+        return "doc"
+    if suffix in {".xls", ".xlsx", ".csv"}:
+        return "xls"
+    if suffix in {".ppt", ".pptx"}:
+        return "ppt"
+    return "stream"
+
+
 def send_feishu_media_message(
     user_id: int,
     ai_config_id: Optional[int],
@@ -267,15 +285,23 @@ def send_feishu_media_message(
                 msg_type="image",
                 content={"image_key": image_key},
             )
-        # 非图片（视频等）走文件/媒体上传分支。此前该分支因上方 return 缩进错误而不可达，
-        # 导致非图片素材会因 image_key 未定义而报错——此处恢复原本意图的分支结构。
+        # 非图片统一走文件上传；视频使用 media 消息，其余使用 file 消息。
         file_key = upload_feishu_file(
             user_id,
             ai_config_id,
             source,
-            file_type="mp4",
+            file_type=_feishu_file_type(source),
             duration=duration,
         )
+        if kind != "video":
+            return _send_feishu_open_message(
+                cfg,
+                token=token,
+                receive_id=target_id,
+                receive_id_type=target_type,
+                msg_type="file",
+                content={"file_key": file_key},
+            )
         return _send_feishu_open_message(
             cfg,
             token=token,

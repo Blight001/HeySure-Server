@@ -3,6 +3,7 @@ from tools.introspection import (
     _mcp_describe_tool,
 )
 from tools.workspace import _run_command
+from tools.workspace_files import _workspace_file_manage, WORKSPACE_FILE_MANAGE_SCHEMA
 from tools.members import _member_manage, MEMBER_MANAGE_SCHEMA
 from tools.task_plan import (
     _todo_manage,
@@ -116,6 +117,17 @@ BUILTIN_TOOLS = (
         destructive=True,
     ),
     MCPTool(
+        name="workspace.file+manage",
+        description=(
+            "管理当前 AI 工作区内可发送给用户的文件引用。register 将相对工作区路径注册为不暴露服务器绝对路径的 file_ref；"
+            "import_chat_media 可把 /api/chat/media/{media_id}/{token} 对话图片保存到成员工作区；"
+            "info/list 查看引用；unregister 仅移除引用，不删除原文件。保存结果会返回可直接调用 message.send+to 的示例。"
+        ),
+        input_schema=WORKSPACE_FILE_MANAGE_SCHEMA,
+        handler=_workspace_file_manage,
+        destructive=True,
+    ),
+    MCPTool(
         name="member.manage",
         description=(
             "AI 数字成员统一管理工具：查询、创建和编辑成员的名称、身份、平台、模型、"
@@ -146,7 +158,8 @@ BUILTIN_TOOLS = (
         description=(
             "统一发消息工具，用 to 指定收件方。\n"
             "to=\"user\"：通过该 AI 已绑定的机器人渠道（飞书或 QQ）给真人用户发送通知。"
-            "正常调用只需提供 text 或媒体；不要向用户询问会话 id、openid、target_id 等寻址参数。"
+            "正常调用只需提供 text、file_ref 或 attachments；图片、视频、音频、文档、压缩包等统一按文件发送。"
+            "工作区文件先用 workspace.file+manage(action=register) 获取 file_ref；不要向用户询问会话 id、openid、target_id 等寻址参数。"
             "QQ 会自动使用当前会话绑定、配置的默认接收目标或最近一次已绑定 QQ 会话；"
             "尚未绑定时工具会返回 delivered=false 和明确原因。\n"
             "to=成员 ID 或名字：给同一数字社会中的另一个 AI 发消息，"
@@ -184,9 +197,34 @@ BUILTIN_TOOLS = (
                 },
                 "media_url": {"type": "string", "description": "图片或视频的 HTTP(S) 链接，服务端拉取后发送。"},
                 "media_path": {"type": "string", "description": "服务端本地的图片或视频路径。"},
-                "media_type": {"type": "string", "enum": ["image", "video"], "description": "可选，显式指定媒体类型；省略时按 url/path 推断。"},
+                "media_type": {"type": "string", "enum": ["image", "video", "audio", "file"], "description": "兼容参数；省略时按文件推断。"},
                 "file_name": {"type": "string", "description": "可选，上传媒体时使用的文件名。"},
                 "duration": {"type": "integer", "description": "可选，飞书视频上传时的时长（毫秒）。"},
+                "file_ref": {
+                    "type": "string",
+                    "description": "单个工作区文件引用（file_...）；推荐使用 attachments 统一发送。",
+                },
+                "attachments": {
+                    "type": "array",
+                    "maxItems": 5,
+                    "description": "最多 5 个附件。优先传 file_ref；兼容对象内 media_url/media_path。",
+                    "items": {
+                        "oneOf": [
+                            {"type": "string", "description": "file_ref 字符串。"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "file_ref": {"type": "string"},
+                                    "media_url": {"type": "string"},
+                                    "media_path": {"type": "string"},
+                                    "media_type": {"type": "string", "enum": ["image", "video", "audio", "file"]},
+                                    "file_name": {"type": "string"},
+                                    "duration": {"type": "integer"},
+                                },
+                            },
+                        ],
+                    },
+                },
                 # ---- to=AI（发给另一个 AI）时 ----
                 "content": {"type": "string", "description": "发给 AI 的消息正文。"},
                 "message_type": {

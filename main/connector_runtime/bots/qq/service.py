@@ -206,9 +206,9 @@ def upload_qq_media_file_info(
     cfg = _load_qq_config(user_id, ai_config_id)
     final_target_type = _normalize_target_type(target_type)
     if final_target_type not in {"c2c", "group"}:
-        raise HTTPException(status_code=400, detail="QQ image/video messages are supported for c2c or group targets")
+        raise HTTPException(status_code=400, detail="QQ file messages are supported for c2c or group targets")
     kind = infer_media_kind(source, media_type)
-    file_type = 1 if kind == "image" else 2
+    file_type = {"image": 1, "video": 2, "audio": 3, "file": 4}[kind]
     payload: Dict[str, Any] = {
         "file_type": file_type,
         "srv_send_msg": False,
@@ -463,7 +463,7 @@ def send_qq_media_message(
     bot_cfg = read_qq_config(cfg)
     final_target_id, final_target_type = _resolve_qq_target(bot_cfg, target_id, target_type)
     if final_target_type not in {"c2c", "group"}:
-        raise HTTPException(status_code=400, detail="QQ image/video messages are supported for c2c or group targets")
+        raise HTTPException(status_code=400, detail="QQ file messages are supported for c2c or group targets")
     source = resolve_media_source(
         url=media_url,
         path=media_path,
