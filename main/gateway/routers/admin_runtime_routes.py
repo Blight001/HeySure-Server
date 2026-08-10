@@ -139,6 +139,8 @@ def restart_service(
     target = service_target(key)
     if target is None:
         raise HTTPException(status_code=404, detail="未知的子服务")
+    if not target.restartable:
+        raise HTTPException(status_code=400, detail=f"{target.name} 仅支持状态查看，不能从应用容器内重启")
     if key == "gateway":
         return _restart_gateway(session, admin, target)
     if not target.base_url:
@@ -166,6 +168,43 @@ def restart_service(
         detail=f"重启服务 {target.name}（{target.base_url}）",
     )
     return {"ok": True, "key": key, "name": target.name, **payload}
+
+
+@router.post("/services/restart-all")
+def restart_all_services(
+    session: Session = Depends(get_session),
+    admin: User = Depends(require_admin_user),
+) -> dict:
+    """Restart the four application runtimes, scheduling Gateway last."""
+    restarted = []
+    errors = {}
+    for key in ("mcp", "connector", "ai"):
+        target = service_target(key)
+        if target is None or not target.base_url:
+            continue
+        try:
+            restart_remote_service(target)
+            restarted.append(key)
+        except ServiceRequestError as exc:
+            errors[key] = str(exc)
+    if errors:
+        return {"ok": False, "restarting": restarted, "errors": errors, "gateway_scheduled": False}
+
+    from api.runtime.process_control import request_restart
+
+    request_restart(delay=2.0)
+    restarted.append("gateway")
+    _record_audit(
+        session,
+        admin,
+        "restart_all_services",
+        target_type="service",
+        target_id="all-runtimes",
+        target_label="全部应用 Runtime",
+        detail="依次重启 MCP、Connector、AI，并最后重启 Gateway",
+    )
+    logger.warning("admin %s triggered restart of all application runtimes", admin.account)
+    return {"ok": True, "restarting": restarted, "errors": {}, "gateway_scheduled": True}
 
 
 def _restart_gateway(session: Session, admin: User, target) -> dict:

@@ -113,6 +113,11 @@ class Settings(BaseSettings):
         description="HTTP base of the ai-runtime worker's internal status server "
         "(health + console tail). Empty = admin panel skips the worker.",
     )
+    web_runtime_url: str = Field(
+        default="",
+        description="HTTP base of the Web console as reached by api-gateway. "
+        "Docker deployments normally use http://web:58150.",
+    )
     repo_updater_url: str = Field(
         default="",
         description="HTTP base of the host-side repository updater used by Docker "
@@ -338,6 +343,7 @@ class Settings(BaseSettings):
         "mcp_runtime_url",
         "connector_runtime_url",
         "ai_runtime_url",
+        "web_runtime_url",
         "repo_updater_url",
         "repo_updater_token",
         "agent_token",
