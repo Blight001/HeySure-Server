@@ -16,6 +16,34 @@ ROOT = Path(DATA_DIR) / "workflow_results"
 PREFIX = "workflow-result:"
 
 
+def _reported_failure(value: Any, depth: int = 0) -> dict[str, Any] | None:
+    if depth > 3 or not isinstance(value, dict):
+        return None
+    has_error = any(value.get(key) not in (None, "") for key in ("error", "errorCode", "code"))
+    if value.get("success") is False and has_error:
+        return {
+            "code": str(value.get("errorCode") or value.get("code") or "DEVICE_TOOL_FAILED")[:120],
+            "message": str(value.get("error") or value.get("message") or "device tool reported failure")[:2000],
+            "phase": "device_result",
+            "retryable": bool(value.get("retryable")),
+        }
+    return _reported_failure(value.get("result"), depth + 1)
+
+
+def device_step_error(
+    *, success: bool, result: Any, transport_error: str | None
+) -> dict[str, Any] | None:
+    """Normalize transport or explicit tool-level failure for workflow state."""
+    if not success:
+        return {
+            "code": "DISPATCH_FAILED",
+            "message": str(transport_error or "device tool failed")[:2000],
+            "phase": "device",
+            "retryable": False,
+        }
+    return _reported_failure(result)
+
+
 def save_result(user_id: int, run_id: str, value: Any, *, max_bytes: int | None = None) -> Tuple[str, int]:
     raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     allowed = min(int(settings.workflow_max_result_bytes), int(max_bytes or settings.workflow_max_result_bytes))

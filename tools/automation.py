@@ -40,6 +40,7 @@ from tools.automation_access import (
     _card_visible,
     _creation_tags,
     _is_admin_role,
+    _pending_confirmation_guidance,
     _updated_tags,
 )
 
@@ -434,7 +435,16 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
             lock=action in {"cancel", "retry", "respond"},
         )
         if action == "status":
-            return run_payload(run)
+            payload = run_payload(run)
+            pending = session.exec(select(WorkflowConfirmation).where(
+                WorkflowConfirmation.run_id == run.id,
+                WorkflowConfirmation.status == "pending",
+            ).order_by(WorkflowConfirmation.created_at.desc())).first()
+            if pending:
+                payload["pending_confirmation"] = _pending_confirmation_guidance(
+                    pending, ai_config_id
+                )
+            return payload
         if action == "cancel":
             return run_payload(cancel_run(session, run, str(args.get("reason") or "cancelled by AI")))
         if action == "retry":
@@ -454,6 +464,16 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
         if action == "respond":
             if not ai_config_id:
                 raise HTTPException(status_code=403, detail="AI_INTERACTION_REQUIRES_AI")
+            pending = session.exec(select(WorkflowConfirmation).where(
+                WorkflowConfirmation.run_id == run.id,
+                WorkflowConfirmation.status == "pending",
+            ).order_by(WorkflowConfirmation.created_at.desc())).first()
+            guidance = _pending_confirmation_guidance(pending, ai_config_id) if pending else None
+            if guidance and not guidance["can_respond"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "USER_CONFIRMATION_REQUIRED", "pending_confirmation": guidance},
+                )
             try:
                 return run_payload(respond_ai_interaction(
                     session,
@@ -501,7 +521,11 @@ AUTOMATION_MANAGE_SCHEMA = {
                 "validate", "versions", "get_version", "export", "start",
                 "list_runs", "status", "pause", "resume", "cancel", "retry", "respond",
             ],
-            "description": "唯一动作选择器；start 启动，pause/resume 暂停恢复，edit 编辑卡片。",
+            "description": (
+                "唯一动作选择器；start 启动，status 查看运行且会返回 pending_confirmation；"
+                "respond 仅处理分配给当前 AI 的 waiting_ai 交互，真人门禁会明确返回 user_confirmation；"
+                "pause/resume 暂停恢复，edit 编辑卡片。"
+            ),
         },
         "card_id": {"type": "string"},
         "version_id": {"type": "string"},
@@ -520,7 +544,10 @@ AUTOMATION_MANAGE_SCHEMA = {
         "status": {"type": "string"},
         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
         "reason": {"type": "string"},
-        "approved": {"type": "boolean"},
+        "approved": {
+            "type": "boolean",
+            "description": "仅用于 action=respond 且 status 返回 can_respond=true 的 AI 交互；真人确认门禁不能由 AI 代批。",
+        },
         "parameters": {"type": "object"},
         "message": {"type": "string"},
     },

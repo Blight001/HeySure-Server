@@ -295,6 +295,52 @@ def test_failed_mcp_attempt_retries_once_and_duplicate_result_does_not_advance()
         assert json.loads(run.output_json) == {"value": 7}
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"success": False, "errorCode": "ELEMENT_NOT_FOUND", "error": "未找到目标元素"},
+        {"result": {"success": False, "code": "WINDOW_CLOSED", "error": "窗口已关闭"}},
+    ],
+)
+def test_tool_level_failure_cannot_be_recorded_as_success(result):
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "call",
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 3},
+        "steps": {
+            "call": {
+                "type": "mcp",
+                "toolRef": {"namespace": "device", "name": "demo", "schemaDigest": "sha256:x"},
+                "arguments": {},
+                "saveAs": "demo",
+                "timeoutSeconds": 10,
+                "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition, tool_contracts={"demo": {"destructive": False}})
+        run = create_run(session, user_id=user.id, card_id=card.id, device_id="device", input_value={})
+        advance_run(session, run.id)
+        step = session.exec(select(WorkflowStepRun).where(WorkflowStepRun.run_id == run.id)).one()
+
+        assert apply_step_result(
+            session,
+            dispatch_task_id=step.dispatch_task_id,
+            success=True,
+            result=result,
+        )
+        session.refresh(run)
+        session.refresh(step)
+        assert run.status == "failed"
+        assert step.status == "failed"
+        assert json.loads(run.error_json)["phase"] == "device_result"
+
+
 def test_active_card_dispatch_rechecks_scope_schema_arguments_and_confirmation(monkeypatch):
     definition = {"schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "finish", "steps": {"finish": {"type": "end"}}, "limits": {"timeoutSeconds": 60, "maxTransitions": 2}, "output": {}}
     engine = _database()

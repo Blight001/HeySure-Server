@@ -7,6 +7,7 @@ from tools.automation import (
     _card_visible,
     _creation_tags,
     _is_admin_role,
+    _pending_confirmation_guidance,
     _updated_tags,
 )
 
@@ -47,3 +48,29 @@ def test_registry_exposes_one_aggregated_automation_toolbox_mcp():
     assert not requires_library_binding("automation.manage")
     actions = set(AUTOMATION_MANAGE_SCHEMA["properties"]["action"]["enum"])
     assert {"create", "edit", "start", "pause", "resume", "cancel", "delete"} <= actions
+
+
+def test_pending_confirmation_guidance_distinguishes_user_and_ai_actions():
+    explicit = SimpleNamespace(
+        id="confirm-user",
+        step_id="dangerous",
+        confirmation_type="explicit",
+        risk_summary="需要真人确认",
+        expires_at=123.0,
+        ai_config_id=None,
+    )
+    user_guidance = _pending_confirmation_guidance(explicit, 19)
+    assert user_guidance["required_action"] == "user_confirmation"
+    assert user_guidance["can_respond"] is False
+
+    ai_review = SimpleNamespace(
+        id="confirm-ai",
+        step_id="review",
+        confirmation_type="ai_review",
+        risk_summary="请 AI 核对",
+        expires_at=456.0,
+        ai_config_id=19,
+    )
+    ai_guidance = _pending_confirmation_guidance(ai_review, 19)
+    assert ai_guidance["required_action"] == "automation.manage:respond"
+    assert ai_guidance["can_respond"] is True

@@ -22,7 +22,7 @@ from api.models import (
 from api.core.settings import settings
 from .audit import add_audit
 from .expression import evaluate_expression, render_template
-from .result_store import save_result
+from .result_store import device_step_error, save_result
 from .secrets import decrypt_json, encrypt_json
 from .step_device_binding import step_contract, step_device_id
 from .workflow_cancellation import cancel_workflow_run
@@ -809,8 +809,8 @@ def apply_step_result(
     definition = _load(version.definition_json, {}) if version else {}
     definition["_toolContracts"] = _load(version.tool_contracts_json, {}) if version else {}
     step = definition.get("steps", {}).get(step_run.step_id, {})
-    if not success:
-        normalized = error_payload("DISPATCH_FAILED", str(error or "device tool failed"), "device")
+    normalized = device_step_error(success=success, result=result, transport_error=error)
+    if normalized:
         _handle_step_error(
             session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
         )

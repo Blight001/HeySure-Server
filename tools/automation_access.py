@@ -56,3 +56,29 @@ def _updated_tags(card: WorkflowCard, tags: Any) -> list[str]:
         if str(item).strip().lower().startswith(OWNER_TAG_PREFIX)
     ]
     return list(dict.fromkeys(_creation_tags(tags, None) + owners))
+
+
+def _pending_confirmation_guidance(row: Any, ai_config_id: Optional[int]) -> dict[str, Any]:
+    interaction_types = {"ai_review", "user_via_ai"}
+    confirmation_type = str(getattr(row, "confirmation_type", "explicit") or "explicit")
+    assigned_ai_id = getattr(row, "ai_config_id", None)
+    can_respond = bool(
+        ai_config_id
+        and assigned_ai_id == int(ai_config_id)
+        and confirmation_type in interaction_types
+    )
+    return {
+        "id": str(getattr(row, "id", "") or ""),
+        "step_id": str(getattr(row, "step_id", "") or ""),
+        "type": confirmation_type,
+        "risk_summary": str(getattr(row, "risk_summary", "") or ""),
+        "expires_at": getattr(row, "expires_at", None),
+        "assigned_ai_config_id": assigned_ai_id,
+        "can_respond": can_respond,
+        "required_action": "automation.manage:respond" if can_respond else "user_confirmation",
+        "guidance": (
+            "调用 automation.manage action=respond，并提供 approved。"
+            if can_respond
+            else "此门禁必须由真人用户确认；AI 不应反复调用 respond。"
+        ),
+    }
