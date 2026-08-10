@@ -27,7 +27,7 @@ from api.models import AssistantAIConfig
 from .auth import get_current_user
 from api.runtime.internal_http import require_internal_token
 from api.services.mcp.mcp_tool_runner import run_inheritance_mcp_test
-from connector_runtime.dispatch.device_dispatch import dispatch_endpoint_tool_and_wait
+from ai_runtime.inference.tool_execution import call_mcp_or_endpoint_tool
 from connector_runtime.dispatch.desktop_device_tools import (
     connected_endpoint_tool_catalog,
     endpoint_bridge_tools_for_config,
@@ -321,16 +321,15 @@ async def call_mcp_tool(
             )
 
     if is_endpoint_agent_tool(req.tool):
-        return {
-            "tool": req.tool,
-            "destructive": True,
-            "result": await dispatch_endpoint_tool_and_wait(
-                user_id=user.id,
-                ai_config_id=req.ai_config_id,
-                tool=req.tool,
-                args=req.arguments or {},
-            ),
-        }
+        # The Connector process owns live endpoint sockets in split deployments.
+        # Reuse the runtime-aware dispatch path instead of consulting Gateway's
+        # empty in-process agent registry.
+        return await call_mcp_or_endpoint_tool(
+            req.tool,
+            user.id,
+            req.arguments or {},
+            req.ai_config_id,
+        )
 
     # Search is a direct outbound API call and must not depend on the internal
     # MCP runtime port being reachable.

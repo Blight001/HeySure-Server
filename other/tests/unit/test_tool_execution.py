@@ -58,6 +58,67 @@ def test_call_keeps_workspace_search_in_process(monkeypatch):
     assert result["result"]["items"] == []
 
 
+def test_call_routes_endpoint_tool_to_connector_runtime(monkeypatch):
+    observed = {}
+
+    async def fake_runtime_dispatch(
+        runtime_url,
+        tool,
+        user_id,
+        arguments,
+        ai_config_id,
+        timeout_seconds,
+    ):
+        observed["call"] = (
+            runtime_url,
+            tool,
+            user_id,
+            arguments,
+            ai_config_id,
+            timeout_seconds,
+        )
+        return {"success": True, "result": {"total": 1}}
+
+    async def unexpected_in_process_dispatch(**_kwargs):
+        raise AssertionError("split Gateway must not use its in-process agent registry")
+
+    monkeypatch.setattr(tool_execution, "is_workshop_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: True)
+    monkeypatch.setattr(tool_execution.settings, "service_role", "gateway")
+    monkeypatch.setattr(
+        tool_execution.settings,
+        "connector_runtime_url",
+        "http://connector-runtime:3002",
+    )
+    monkeypatch.setattr(tool_execution.settings, "api_gateway_url", "http://api-gateway:3000")
+    monkeypatch.setattr(tool_execution, "endpoint_dispatch_timeout", lambda *_args: 120)
+    monkeypatch.setattr(tool_execution, "dispatch_endpoint_via_runtime", fake_runtime_dispatch)
+    monkeypatch.setattr(
+        tool_execution,
+        "dispatch_endpoint_in_process",
+        unexpected_in_process_dispatch,
+    )
+
+    result = asyncio.run(
+        tool_execution.call_mcp_or_endpoint_tool(
+            "aifree.windows+tab",
+            1,
+            {"action": "list"},
+            19,
+        )
+    )
+
+    assert observed["call"] == (
+        "http://connector-runtime:3002",
+        "aifree.windows+tab",
+        1,
+        {"action": "list"},
+        19,
+        120,
+    )
+    assert result["result"]["success"] is True
+
+
 def test_execute_tool_call_returns_normalized_success(monkeypatch):
     async def fake_call(tool, user_id, arguments, ai_config_id):
         return {"tool": tool, "result": {"success": True, "value": 7}}
