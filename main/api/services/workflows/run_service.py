@@ -183,7 +183,7 @@ def create_run(
             WorkflowCardVersion.card_id == card.id,
         )
     ).first()
-    if not version or card.status not in {"active", "published", "deprecated"}:
+    if not version or not WorkflowCard.is_runnable_status(card.status):
         raise ValueError("CARD_VERSION_NOT_RUNNABLE")
     device = session.exec(
         select(DevicePresence).where(

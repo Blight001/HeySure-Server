@@ -295,7 +295,7 @@ def test_failed_mcp_attempt_retries_once_and_duplicate_result_does_not_advance()
         assert json.loads(run.output_json) == {"value": 7}
 
 
-def test_dispatch_rechecks_scope_schema_arguments_and_confirmation(monkeypatch):
+def test_active_card_dispatch_rechecks_scope_schema_arguments_and_confirmation(monkeypatch):
     definition = {"schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "finish", "steps": {"finish": {"type": "end"}}, "limits": {"timeoutSeconds": 60, "maxTransitions": 2}, "output": {}}
     engine = _database()
     tool_schema = {
@@ -311,6 +311,8 @@ def test_dispatch_rechecks_scope_schema_arguments_and_confirmation(monkeypatch):
             "demo": {"input_schema": tool_schema, "destructive": True, "permissions": ["filesystem"]}
         })
         session.add(device)
+        card.status = "active"
+        session.add(card)
         session.commit()
         monkeypatch.setattr("api.services.workflows.permissions.get_scope", lambda *_: {"demo"})
         monkeypatch.setattr("api.services.workflows.permissions.get_policy", lambda *_: {"filesystem": "allow"})

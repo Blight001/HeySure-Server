@@ -153,7 +153,7 @@ def validate_step_dispatch(
         card = session.get(WorkflowCard, card_id)
         version = session.get(WorkflowCardVersion, card_version_id)
         if (
-            not card or card.user_id != user_id or card.status not in {"published", "deprecated"}
+            not card or card.user_id != user_id or not WorkflowCard.is_runnable_status(card.status)
             or not version or version.card_id != card.id
         ):
             raise WorkflowDispatchError("CARD_VERSION_NOT_RUNNABLE", "card version is no longer runnable")

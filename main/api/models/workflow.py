@@ -1,7 +1,7 @@
 """Persistent workflow-card definitions and deterministic device runs."""
 
 import time
-from typing import Optional
+from typing import ClassVar, Optional
 
 from sqlalchemy import Index, UniqueConstraint
 from sqlmodel import Field, SQLModel
@@ -9,6 +9,7 @@ from sqlmodel import Field, SQLModel
 
 class WorkflowCard(SQLModel, table=True):
     __table_args__ = (Index("ix_workflowcard_user_status", "user_id", "status"),)
+    RUNNABLE_STATUSES: ClassVar[frozenset[str]] = frozenset({"active", "published", "deprecated"})
 
     id: str = Field(primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -23,6 +24,10 @@ class WorkflowCard(SQLModel, table=True):
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time, index=True)
     deleted_at: Optional[float] = Field(default=None, index=True)
+
+    @classmethod
+    def is_runnable_status(cls, status: object) -> bool:
+        return str(status or "") in cls.RUNNABLE_STATUSES
 
 
 class WorkflowCardVersion(SQLModel, table=True):
