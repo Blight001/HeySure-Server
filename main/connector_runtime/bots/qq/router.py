@@ -20,7 +20,7 @@ from ai_runtime.inference.core import _run_worker
 from api.services.chat.chat_persistence import _save_message
 from ._config import read_qq_config
 from .long_connection import get_qq_long_connection_state
-from .routes_store import register_qq_session_route
+from .routes_store import external_mcp_route_response, qq_session_name, register_qq_session_route
 from .service import diagnose_qq_config, parse_qq_text_event, send_qq_text_message
 from connector_runtime.bots.session_cursor import get_active_session_id
 from connector_runtime.bots.commands import handle_bot_command
@@ -363,13 +363,9 @@ def handle_qq_event_payload(
         # Defaults to the user's home session; follows the cursor when the AI
         # has switched/created another conversation for this identity.
         session_id = get_active_session_id(
-            session,
-            channel="qq",
-            user_id=int(cfg.user_id),
-            ai_config_id=int(cfg.id or config_id),
-            ai_kind=ai_kind,
-            identity_key=target_id,
-            default=home_session_id,
+            session, channel="qq", user_id=int(cfg.user_id),
+            ai_config_id=int(cfg.id or config_id), ai_kind=ai_kind,
+            identity_key=target_id, default=home_session_id,
         )
         existing_session = session.exec(
             select(ChatSession).where(
@@ -379,10 +375,7 @@ def handle_qq_event_payload(
                 ChatSession.session_id == session_id,
             )
         ).first()
-        session_name = (
-            str(existing_session.session_name) if existing_session and existing_session.session_name
-            else f"QQ对话 {session_key}"
-        )
+        session_name = qq_session_name(existing_session, session_key)
         register_qq_session_route(
             session,
             user_id=int(cfg.user_id),
@@ -395,6 +388,11 @@ def handle_qq_event_payload(
             source_event_id=qq_event_id,
             next_msg_seq=1,
         )
+
+        external_response = external_mcp_route_response(cfg)
+        if external_response is not None:
+            logger.info("registered QQ route for external MCP member config_id=%s event_type=%s", config_id, event_type)
+            return external_response
 
         user = session.get(User, cfg.user_id)
         if not user:
