@@ -287,24 +287,3 @@ def delete_card_route(
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
     delete_card(session, row)
     return None
-
-
-@router.post("/{card_id}/deprecate")
-def deprecate(
-    card_id: str,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None),
-):
-    user = get_current_user(authorization, session)
-    row = owned_card(session, user.id, card_id)
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    if not row.latest_version_id:
-        raise HTTPException(status_code=409, detail={"code": "CARD_VERSION_NOT_RUNNABLE"})
-    row.status = "deprecated"
-    import time
-    row.updated_at = time.time()
-    session.add(row)
-    session.commit()
-    session.refresh(row)
-    return card_payload(row)

@@ -212,3 +212,9 @@ def test_ai_intervention_step_is_compiled_as_a_result_producer():
     compiled = compile_definition(definition)
 
     assert compiled["definition"]["steps"]["review"]["toolRef"]["name"] == AI_INTERVENTION_TOOL
+
+
+def test_workflow_card_router_does_not_expose_deprecation_action():
+    from gateway.routers.workflow_cards import router
+
+    assert all(not route.path.endswith("/deprecate") for route in router.routes)
