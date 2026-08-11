@@ -233,6 +233,21 @@ async def _push_pending_confirmations(ctx: Registration) -> None:
     await sio.emit("workflow:confirmation_snapshot", {"items": items}, to=ctx.sid)
 
 
+async def _push_pending_user_notifications(ctx: Registration) -> None:
+    """Backfill unread app-fallback messages after an Android reconnect."""
+    if ctx.user_id is None:
+        return
+    from api.services.notifications.user_notifications import (
+        notification_room,
+        pending_device_notifications,
+    )
+
+    await sio.enter_room(ctx.sid, notification_room(ctx.user_id))
+    with Session(engine) as session:
+        items = pending_device_notifications(session, user_id=ctx.user_id)
+    await sio.emit("user:notification_snapshot", {"items": items}, to=ctx.sid)
+
+
 async def handle_agent_register(sid: str, raw_info: object) -> None:
     try:
         info = validated_payload(AgentRegistrationPayload, raw_info)
@@ -259,6 +274,10 @@ async def handle_agent_register(sid: str, raw_info: object) -> None:
         await _push_pending_confirmations(ctx)
     except Exception:
         logger.exception("Failed to backfill workflow confirmations: %s", ctx.device_id)
+    try:
+        await _push_pending_user_notifications(ctx)
+    except Exception:
+        logger.exception("Failed to backfill user notifications: %s", ctx.device_id)
     try:
         await _push_dynamic_tools(ctx, previous_full)
     except Exception:

@@ -157,11 +157,12 @@ BUILTIN_TOOLS = (
         name="message.send+to",
         description=(
             "统一发消息工具，用 to 指定收件方。\n"
-            "to=\"user\"：通过该 AI 已绑定的机器人渠道（飞书或 QQ）给真人用户发送通知。"
+            "to=\"user\"：优先通过该 AI 已绑定的飞书或 QQ 给真人用户发送通知；"
+            "未绑定或机器人发送失败时自动进入 HeySure 收件箱，并向在线安卓端/网页推送，不会因外部机器人缺失而报错。"
             "正常调用只需提供 text、file_ref 或 attachments；图片、视频、音频、文档、压缩包等统一按文件发送。"
             "工作区文件先用 workspace.file+manage(action=register) 获取 file_ref；不要向用户询问会话 id、openid、target_id 等寻址参数。"
             "QQ 会自动使用当前会话绑定、配置的默认接收目标或最近一次已绑定 QQ 会话；"
-            "尚未绑定时工具会返回 delivered=false 和明确原因。\n"
+            "返回 accepted/pending/fallback_used 区分已接收、待客户端领取和是否启用兜底；delivered 只表示外部机器人已确认送达。\n"
             "to=成员 ID 或名字：给同一数字社会中的另一个 AI 发消息，"
             "成员名单见系统提示的 [数字社会成员名单] 段。消息会作为强制系统提示送达；"
             "若目标 AI 正在运行，会中断它当前的运行，并以这条消息打头开启新一轮。"

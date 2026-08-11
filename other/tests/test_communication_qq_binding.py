@@ -146,12 +146,16 @@ def test_qq_notification_returns_unbound_result_instead_of_sending(monkeypatch):
         "send_text",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not send")),
     )
+    monkeypatch.setattr(communication, "_persist_user_notification", lambda **_kwargs: "notice_test")
 
     result = communication._user_send_message(3, {"text": "任务完成"}, 9)
 
+    assert result["accepted"] is True
     assert result["delivered"] is False
-    assert result["reason"] == "qq_recipient_not_bound"
-    assert "未绑定 QQ" in result["message"]
+    assert result["pending"] is True
+    assert result["fallback_used"] is True
+    assert result["fallback_reason"] == "qq_recipient_not_bound"
+    assert result["notification_id"] == "notice_test"
 
 
 def test_file_ref_attachment_is_resolved_without_exposing_absolute_path(monkeypatch):
@@ -193,11 +197,7 @@ def test_multiple_attachments_send_caption_only_once(monkeypatch):
             "file_name": f"{kwargs['file_ref']}.bin",
         },
     )
-    monkeypatch.setattr(
-        communication,
-        "Session",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("notice lookup unavailable")),
-    )
+    monkeypatch.setattr(communication, "_persist_user_notification", lambda **_kwargs: "notice_test")
 
     result = communication._user_send_message(3, {
         "to": "user",
@@ -230,6 +230,7 @@ def test_multiple_attachments_report_partial_delivery_without_false_success(monk
             "file_name": "file.bin",
         },
     )
+    monkeypatch.setattr(communication, "_persist_user_notification", lambda **_kwargs: "notice_test")
 
     result = communication._user_send_message(3, {
         "text": "附件",
@@ -237,6 +238,54 @@ def test_multiple_attachments_report_partial_delivery_without_false_success(monk
     }, 9)
 
     assert result["delivered"] is False
+    assert result["accepted"] is True
+    assert result["fallback_used"] is True
     assert result["partial"] is True
     assert result["sent_count"] == 1
     assert result["attachment_count"] == 2
+
+
+def test_bot_delivery_is_archived_without_duplicate_app_push(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(communication.dispatcher, "resolve_channel", lambda *_args: "feishu")
+    monkeypatch.setattr(
+        communication.dispatcher,
+        "send_text",
+        lambda **_kwargs: DeliveryResult(ok=True, channel="feishu", detail={"message_id": "m1"}),
+    )
+    monkeypatch.setattr(
+        communication,
+        "_persist_user_notification",
+        lambda **kwargs: captured.update(kwargs) or "notice_test",
+    )
+
+    result = communication._user_send_message(3, {"text": "完成通知"}, 9)
+
+    assert result["accepted"] is True
+    assert result["delivered"] is True
+    assert result["pending"] is False
+    assert result["fallback_used"] is False
+    assert captured["external_delivered"] is True
+
+
+def test_bot_transport_failure_falls_back_without_raising(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(communication.dispatcher, "resolve_channel", lambda *_args: "feishu")
+    monkeypatch.setattr(
+        communication.dispatcher,
+        "send_text",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("upstream unavailable")),
+    )
+    monkeypatch.setattr(
+        communication,
+        "_persist_user_notification",
+        lambda **kwargs: captured.update(kwargs) or "notice_test",
+    )
+
+    result = communication._user_send_message(3, {"text": "完成通知"}, 9)
+
+    assert result["accepted"] is True
+    assert result["delivered"] is False
+    assert result["delivery_status"] == "app_pending"
+    assert result["fallback_reason"] == "RuntimeError"
+    assert captured["external_delivered"] is False

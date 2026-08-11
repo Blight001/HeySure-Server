@@ -20,7 +20,7 @@ from sqlmodel import Session, select
 from connector_runtime.bots.messaging import MediaPayload, Recipient, dispatcher
 from api.database import engine
 from mcp_runtime.mcp.core import get_project_root
-from api.models import AssistantAIConfig, User
+from api.models import AssistantAIConfig
 from api.services.storage.workspace_files import resolve_file_ref
 from ai_runtime.inference import ai_message_service
 from api.runtime.run_context import get_run_session_context
@@ -246,116 +246,174 @@ def _resolve_qq_notification_recipient(
     )
 
 
-def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
-    """主动向用户推送一条消息。当前支持：飞书机器人、QQ机器人。"""
-    text = str(args.get("text") or args.get("content") or args.get("message") or "").strip()
-    attachments = _attachment_payloads(user_id, ai_config_id, args)
-    if not text and not attachments:
-        raise HTTPException(status_code=400, detail="text or an attachment is required when message.send+to targets the user")
-    channel = str(args.get("channel") or "").strip().lower()
-    resolved_channel = dispatcher.resolve_channel(channel or None, ai_config_id, user_id)
-    recipient: Optional[Recipient] = None
-    binding_source = ""
-
-    # Backward-compatible explicit addressing still wins. In the normal MCP
-    # path the model supplies only content; QQ is then resolved from the
-    # current/known binding instead of asking the model for opaque ids.
-    if resolved_channel == "qq":
-        qq_bot = dispatcher.resolve_bot("qq")
-        explicit_recipient = qq_bot.parse_recipient(args) if qq_bot is not None else Recipient()
-        if explicit_recipient.is_explicit:
-            recipient = explicit_recipient
-            binding_source = "explicit"
+def _notification_attachment_records(
+    user_id: int,
+    ai_config_id: Optional[int],
+    args: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    raw = args.get("attachments")
+    if raw is None:
+        file_ref = str(args.get("file_ref") or "").strip()
+        raw = [{"file_ref": file_ref}] if file_ref else []
+    records: List[Dict[str, Any]] = []
+    for value in raw if isinstance(raw, list) else []:
+        item = {"file_ref": value} if isinstance(value, str) else value
+        if not isinstance(item, dict):
+            continue
+        file_ref = str(item.get("file_ref") or "").strip()
+        if file_ref:
+            resolved = resolve_file_ref(user_id=user_id, ai_config_id=ai_config_id, file_ref=file_ref)
+            records.append({
+                "file_ref": file_ref,
+                "file_name": resolved.get("file_name") or "file",
+                "mime_type": resolved.get("mime_type") or "application/octet-stream",
+                "bytes": resolved.get("bytes") or 0,
+            })
         else:
-            recipient, binding_source, unavailable = _resolve_qq_notification_recipient(
-                user_id,
-                ai_config_id,
-            )
-            if unavailable is not None:
-                return unavailable
+            records.append({
+                "file_name": item.get("file_name") or item.get("filename") or "file",
+                "mime_type": item.get("media_type") or "application/octet-stream",
+            })
+    return records
 
-    # The whole arg bag is handed to the dispatcher as the raw addressing
-    # payload; each channel's adapter (parse_recipient) picks the aliases it
-    # understands. Channel resolution + default-receiver fallback live in the
-    # dispatcher / adapter, not here.
+
+def _external_recipient(
+    user_id: int,
+    ai_config_id: Optional[int],
+    args: Dict[str, Any],
+    channel: str,
+) -> tuple[Optional[Recipient], str, Optional[Dict[str, Any]]]:
+    if channel != "qq":
+        return None, "", None
+    qq_bot = dispatcher.resolve_bot("qq")
+    explicit = qq_bot.parse_recipient(args) if qq_bot is not None else Recipient()
+    if explicit.is_explicit:
+        return explicit, "explicit", None
+    return _resolve_qq_notification_recipient(user_id, ai_config_id)
+
+
+def _send_external_user_message(
+    *,
+    user_id: int,
+    ai_config_id: Optional[int],
+    args: Dict[str, Any],
+    text: str,
+    attachments: List[MediaPayload],
+    channel: str,
+    recipient: Optional[Recipient],
+) -> tuple[List[Any], Optional[Exception]]:
     if attachments:
-        deliveries, batch_error = _send_attachment_batch(
+        return _send_attachment_batch(
             user_id=user_id,
             ai_config_id=ai_config_id,
-            channel=resolved_channel,
+            channel=channel,
             recipient=recipient,
             raw_target=args,
             text=text,
             attachments=attachments,
         )
-        if batch_error is not None:
-            if not deliveries:
-                raise batch_error
-            detail = getattr(batch_error, "detail", str(batch_error))
-            return {
-                "delivered": False,
-                "partial": True,
-                "channel": resolved_channel,
-                "attachment_count": len(attachments),
-                "sent_count": len(deliveries),
-                "error_code": type(batch_error).__name__,
-                "error": detail,
-            }
-    else:
-        deliveries = [dispatcher.send_text(
+    try:
+        return [dispatcher.send_text(
             user_id=user_id,
             ai_config_id=ai_config_id,
-            channel=resolved_channel,
+            channel=channel,
             text=text,
             recipient=recipient,
             raw_target=None if recipient is not None else args,
-        )]
-    delivery = deliveries[-1]
-    channel = delivery.channel
-    # 套一层 user 语义包装 + 拼出"已送达"提示
-    notice_template = ""
-    try:
-        with Session(engine) as session:
-            user = session.get(User, user_id)
-            if user:
-                from api.services.knowledge import kb_store
+        )], None
+    except Exception as exc:
+        return [], exc
 
-                notice_template = kb_store.effective_system_value(
-                    user_id, "prompt_user_message_notice",
-                    getattr(user, "prompt_user_message_notice", ""),
-                )
-    except Exception:
-        notice_template = ""
-    notice = ""
-    if notice_template:
-        try:
-            notice = notice_template.format(channel=channel)
-        except Exception:
-            notice = notice_template
 
-    out: Dict[str, Any] = {
-        "delivered": all(bool(item.ok) for item in deliveries),
-        "channel": channel,
-    }
-    if attachments:
-        out["attachment_count"] = len(attachments)
-    if binding_source:
-        out["binding_source"] = binding_source
-    # 底层机器人返回里若带消息 id，保留一个轻量引用即可，不回吐整包响应。
-    sent_ids = []
+def _delivery_message_ids(deliveries: List[Any]) -> List[str]:
+    sent_ids: List[str] = []
     for item in deliveries:
         result = item.detail
-        if isinstance(result, dict):
-            data = result.get("data") if isinstance(result.get("data"), dict) else {}
-            sent_id = result.get("message_id") or result.get("msg_id") or data.get("message_id")
-            if sent_id:
-                sent_ids.append(sent_id)
+        if not isinstance(result, dict):
+            continue
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        sent_id = result.get("message_id") or result.get("msg_id") or data.get("message_id")
+        if sent_id:
+            sent_ids.append(str(sent_id))
+    return sent_ids
+
+
+def _persist_user_notification(
+    *,
+    user_id: int,
+    ai_config_id: Optional[int],
+    text: str,
+    attachment_records: List[Dict[str, Any]],
+    channel: str,
+    external_delivered: bool,
+) -> str:
+    from api.services.notifications.user_notifications import create_notification
+
+    with Session(engine) as session:
+        item = create_notification(
+            session,
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            body=text or f"发送了 {len(attachment_records)} 个文件",
+            attachments=attachment_records,
+            app_push_required=not external_delivered,
+            external_channel=channel,
+            external_delivered=external_delivered,
+        )
+    return item.id
+
+
+def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+    """Send through a bound bot, with the durable HeySure inbox as fallback."""
+    text = str(args.get("text") or args.get("content") or args.get("message") or "").strip()
+    attachments = _attachment_payloads(user_id, ai_config_id, args)
+    if not text and not attachments:
+        raise HTTPException(status_code=400, detail="text or an attachment is required when message.send+to targets the user")
+    attachment_records = _notification_attachment_records(user_id, ai_config_id, args)
+    channel = dispatcher.resolve_channel(str(args.get("channel") or "").strip().lower() or None, ai_config_id, user_id)
+    recipient, binding_source, unavailable = _external_recipient(user_id, ai_config_id, args, channel)
+    deliveries: List[Any] = []
+    external_error: Optional[Exception] = None
+    if unavailable is None:
+        deliveries, external_error = _send_external_user_message(
+            user_id=user_id, ai_config_id=ai_config_id, args=args, text=text,
+            attachments=attachments, channel=channel, recipient=recipient,
+        )
+    external_delivered = bool(deliveries) and all(bool(item.ok) for item in deliveries) and external_error is None
+    notification_id = _persist_user_notification(
+        user_id=user_id,
+        ai_config_id=ai_config_id,
+        text=text,
+        attachment_records=attachment_records,
+        channel=channel,
+        external_delivered=external_delivered,
+    )
+    out: Dict[str, Any] = {
+        "accepted": True,
+        "delivered": external_delivered,
+        "pending": not external_delivered,
+        "fallback_used": not external_delivered,
+        "channel": channel if external_delivered else "heysure",
+        "external_channel": channel,
+        "delivery_status": "external_delivered" if external_delivered else "app_pending",
+        "notification_id": notification_id,
+    }
+    if attachment_records:
+        out["attachment_count"] = len(attachment_records)
+    if binding_source:
+        out["binding_source"] = binding_source
+    if unavailable is not None:
+        out["fallback_reason"] = unavailable.get("reason") or "bot_not_bound"
+    elif external_error is not None:
+        out["fallback_reason"] = type(external_error).__name__
+        if deliveries:
+            out["partial"] = True
+            out["sent_count"] = len(deliveries)
+    sent_ids = _delivery_message_ids(deliveries)
     if sent_ids:
         out["message_id"] = sent_ids[0]
         if len(sent_ids) > 1:
             out["message_ids"] = sent_ids
-    if notice:
-        out["notice"] = notice
     return out
 
 

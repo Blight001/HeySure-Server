@@ -34,6 +34,7 @@ def notification_payload(session: Session, item: WorkflowConfirmation) -> Dict[s
         "requested_user_id": item.requested_user_id,
         "card_id": run.card_id if run else "",
         "card_name": _clean_text(card.name if card else "自动化卡片", 80),
+        "risk_level": _clean_text(card.risk_level if card else "", 32),
         "actor_name": _clean_text(actor.name if actor else "", 80),
         "risk_summary": _clean_text(item.risk_summary, 300),
         "type": item.confirmation_type,
