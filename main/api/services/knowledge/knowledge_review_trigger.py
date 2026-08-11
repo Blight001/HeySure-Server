@@ -1,7 +1,7 @@
 """Plan-completion → knowledge review trigger.
 
 当一个**非图书馆**的 AI 完成 todo 计划并由系统自动收尾时，主动把这份计划的
-总结投喂给"绑定了图书馆（知识工坊）的那个 AI"，并唤醒它一次，由它**自己决定**
+总结投喂给"绑定了图书馆设备的那个 AI"，并唤醒它一次，由它**自己决定**
 是否把其中可复用的经验/教训沉淀进知识库（``knowledge.manage action=record_experience``，
 直接 active、无需用户审批）。
 

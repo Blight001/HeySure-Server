@@ -32,7 +32,7 @@ def _devices():
 
 def test_devices_returns_device_number_for_member_binding(monkeypatch):
     monkeypatch.setattr(device_mcp, "connected_agent_rows_for_user", lambda _user_id: _devices())
-    monkeypatch.setattr(device_mcp, "get_scope", lambda _user_id, _device_id: None)
+    monkeypatch.setattr(device_mcp, "get_scope", lambda *_args: None)
 
     result = asyncio.run(device_mcp._device_mcp_manage(1, {"action": "devices"}, 2))
 
@@ -45,7 +45,7 @@ def test_devices_returns_device_number_for_member_binding(monkeypatch):
 
 def test_scope_get_filters_transport_capabilities(monkeypatch):
     monkeypatch.setattr(device_mcp, "connected_agent_rows_for_user", lambda _user_id: _devices())
-    monkeypatch.setattr(device_mcp, "get_scope", lambda _user_id, _device_id: {"fs.read"})
+    monkeypatch.setattr(device_mcp, "get_scope", lambda *_args: {"fs.read"})
 
     result = asyncio.run(device_mcp._device_mcp_manage(
         1,
@@ -60,7 +60,7 @@ def test_scope_get_filters_transport_capabilities(monkeypatch):
 
 def test_scope_set_rejects_unknown_tool_without_writing(monkeypatch):
     monkeypatch.setattr(device_mcp, "connected_agent_rows_for_user", lambda _user_id: _devices())
-    monkeypatch.setattr(device_mcp, "get_scope", lambda _user_id, _device_id: {"fs.read"})
+    monkeypatch.setattr(device_mcp, "get_scope", lambda *_args: {"fs.read"})
     save = AsyncMock()
     monkeypatch.setattr(device_mcp, "emit_agent_list_for_user", save)
     writes = []
@@ -81,7 +81,7 @@ def test_scope_set_rejects_unknown_tool_without_writing(monkeypatch):
 def test_scope_set_persists_exact_allowlist_and_refreshes_ui(monkeypatch):
     monkeypatch.setattr(device_mcp, "connected_agent_rows_for_user", lambda _user_id: _devices())
     scopes = {"linux-abc-123": {"fs.read", "shell.run"}}
-    monkeypatch.setattr(device_mcp, "get_scope", lambda _user_id, device_id: scopes.get(device_id))
+    monkeypatch.setattr(device_mcp, "get_scope", lambda _user_id, device_id, *_args: scopes.get(device_id))
 
     def save_scope(_user_id, device_id, tools, **_kwargs):
         scopes[device_id] = set(tools)

@@ -65,6 +65,7 @@ def test_fallback_notification_is_durable_and_device_payload_is_safe():
         assert "server_path" not in json.dumps(inbox, ensure_ascii=False)
         assert "attachments" not in device[0]
         assert device[0]["attachment_count"] == 1
+        assert item.push_status == "pending"
 
 
 def test_read_transitions_cancel_device_notification_and_are_idempotent():
@@ -86,6 +87,7 @@ def test_read_transitions_cancel_device_notification_and_are_idempotent():
 
         updated = mark_read(session, user_id=user.id, notification_id=first.id)
         assert updated and updated.status == "read"
+        assert updated.push_status == "cancelled"
         same = mark_read(session, user_id=user.id, notification_id=first.id)
         assert same and same.read_at == updated.read_at
         assert [row["notification_id"] for row in pending_device_notifications(session, user_id=user.id)] == [second.id]
@@ -93,6 +95,8 @@ def test_read_transitions_cancel_device_notification_and_are_idempotent():
         _, read = notification_events_since(session, since=since)
         assert any(row["notification_id"] == first.id for row in read)
         assert mark_all_read(session, user_id=user.id) == 1
+        session.refresh(second)
+        assert second.push_status == "cancelled"
         assert mark_all_read(session, user_id=user.id) == 0
         assert pending_device_notifications(session, user_id=user.id) == []
 

@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.devices.bindings import get_binding
+from api.devices.bindings import get_bindings
 from api.models import AIRuntimeStatus, AssistantAIConfig
 from api.sio import agents
 from mcp_runtime.mcp.core import generate_file_tree, get_project_root, safe_join
@@ -363,9 +363,12 @@ def _list_connected_socket_agents(
             continue
 
         device_id = str(row.get("id") or "").strip()
-        bound_ai_config_id = get_binding(expected_user_id, device_id) if expected_user_id and device_id else None
-        if expected_ai_config_id and bound_ai_config_id != expected_ai_config_id:
+        bound_ai_config_ids = get_bindings(expected_user_id, device_id) if expected_user_id and device_id else []
+        if expected_ai_config_id and expected_ai_config_id not in bound_ai_config_ids:
             continue
+        bound_ai_config_id = expected_ai_config_id if expected_ai_config_id in bound_ai_config_ids else (
+            bound_ai_config_ids[0] if bound_ai_config_ids else None
+        )
 
         # 只暴露 AI 需要的字段，避免把整包 socket 元数据塞进工具结果。
         out.append({
@@ -373,6 +376,7 @@ def _list_connected_socket_agents(
             "name": row.get("name") or row.get("deviceName") or device_id,
             "platform": row.get("platform") or row.get("os") or "",
             "ai_config_id": bound_ai_config_id,
+            "bound_ai_config_ids": bound_ai_config_ids,
             "source": "socket",
             "dispatchable": bound_ai_config_id is not None,
         })

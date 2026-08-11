@@ -185,6 +185,34 @@ class Settings(BaseSettings):
         default=10 * 1024 * 1024,
         description="Maximum size accepted by the temporary image upload endpoints.",
     )
+    huawei_push_client_id: str = Field(
+        default="",
+        description="AppGallery Connect OAuth client/app ID for HMS Push Kit.",
+    )
+    huawei_push_client_secret: str = Field(
+        default="",
+        description="AppGallery Connect OAuth client secret. Never expose it to clients or logs.",
+    )
+    huawei_push_auth_url: str = Field(
+        default="https://oauth-login.cloud.huawei.com/oauth2/v3/token",
+        description="HMS OAuth client-credentials endpoint.",
+    )
+    huawei_push_api_base: str = Field(
+        default="https://push-api.cloud.huawei.com",
+        description="HMS Push Kit REST API origin.",
+    )
+    huawei_push_timeout_seconds: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=30.0,
+        description="Timeout for HMS OAuth and message delivery requests.",
+    )
+    huawei_push_poll_interval_seconds: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=60.0,
+        description="Connector interval for durable user push delivery.",
+    )
     ai_run_lease_seconds: int = Field(
         default=60,
         description="Lease duration renewed by an AI worker while a ChatRun is running.",

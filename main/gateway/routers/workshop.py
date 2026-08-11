@@ -1,12 +1,13 @@
-"""``/api/workshop`` — 服务端内置图书馆 Agent 的绑定接口。
+"""内置图书馆与工具箱设备的绑定接口。
 
-工坊按账号自动上线（无需用户运行独立程序），本路由只管"哪个 AI 绑定了
-工坊"：当前提供传承思想列表、带行号详情、安装、按行编辑和删除 MCP。
-工坊与 AI 是 **1:1 绑定**——同一时间只能绑定一个 AI 数字成员；
-已被占用的工坊必须先解绑，不能由新成员直接替换。
+内置设备按账号自动上线（无需用户运行独立程序），本路由只管"哪个 AI 绑定了
+设备"。图书馆与工具箱均支持同时绑定多个 AI 成员；工具箱在成员创建时默认绑定，
+图书馆则由用户显式选择。
 
-工具执行不走 REST：调度层（device_dispatch 的 workshop 分支）直接进程内
+工具执行不走 REST：调度层的兼容 workshop 分支直接进程内
 调用 ``library.engine.execute_tool``，其中完成白名单/归属/绑定复核。
+
+``/api/devices/*`` 是当前公开接口；``/api/workshop/*`` 仅保留给旧客户端兼容。
 """
 
 import json
@@ -20,18 +21,19 @@ from sqlmodel import Session, select
 from api.database import get_session
 from api.models import AssistantAIConfig
 from api.devices.workshop_bindings import (
-    bound_config_id_for_agent,
     bound_config_ids_for_agent,
     set_workshop_binding,
     workshop_device_ids_for_config,
 )
 from .auth import get_current_user
 
-# 自动挂载默认前缀 /api → 实际路径 /api/workshop/*
-router = APIRouter(prefix="/workshop", tags=["workshop"])
+# 自动挂载默认前缀 /api；公开设备路由与旧 workshop 兼容路由共同注册。
+router = APIRouter()
+device_router = APIRouter(prefix="/devices", tags=["devices"])
+legacy_router = APIRouter(prefix="/workshop", tags=["devices"])
 
 
-class WorkshopBindRequest(BaseModel):
+class DeviceBindRequest(BaseModel):
     ai_config_id: int
     device_id: str
     bound: bool = True
@@ -92,7 +94,8 @@ def _library_scope_payload(cfg: AssistantAIConfig) -> dict:
     }
 
 
-@router.get("/mcp-scope")
+@device_router.get("/library-mcp-scope")
+@legacy_router.get("/mcp-scope", include_in_schema=False)
 def get_library_mcp_scope(
     ai_config_id: int,
     session: Session = Depends(get_session),
@@ -104,7 +107,8 @@ def get_library_mcp_scope(
     return _library_scope_payload(cfg)
 
 
-@router.put("/mcp-scope")
+@device_router.put("/library-mcp-scope")
+@legacy_router.put("/mcp-scope", include_in_schema=False)
 def update_library_mcp_scope(
     payload: LibraryMcpScopeRequest,
     session: Session = Depends(get_session),
@@ -140,15 +144,16 @@ def update_library_mcp_scope(
     return _library_scope_payload(cfg)
 
 
-@router.get("/bindings")
+@device_router.get("/builtin-bindings")
+@legacy_router.get("/bindings", include_in_schema=False)
 def list_workshop_bindings(
     ai_config_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
-    """列出该用户的工坊（在线状态 + 当前绑定的成员 + 是否绑定到指定 AI）。
+    """列出该用户的内置设备（在线状态 + 当前绑定成员 + 是否绑定到指定 AI）。
 
-    内置工坊自动上线，所以列表至少包含一条常在线条目。"""
+    内置设备自动上线，所以列表至少包含一条常在线条目。"""
     user = get_current_user(authorization, session)
     cfg = _load_owned_config(session, user.id, ai_config_id)
 
@@ -168,10 +173,11 @@ def list_workshop_bindings(
     }
 
     items = []
-    # 图书馆与工具箱两个内置作坊始终出现在列表里（工具箱无 presence，靠这里补齐）。
+    # 图书馆与工具箱两个内置设备始终出现在列表里（工具箱无 presence，靠这里补齐）。
     for device_id in sorted(set(online) | bound_ids | {library_device_id, toolbox_device_id}):
         is_toolbox = device_id == toolbox_device_id
-        bound_cfg_id = bound_config_id_for_agent(user.id, device_id)
+        bound_cfg_ids = sorted(bound_config_ids_for_agent(user.id, device_id))
+        bound_cfg_id = bound_cfg_ids[0] if bound_cfg_ids else None
         if is_toolbox:
             tools = toolbox_engine.toolbox_capability_names()
             online_state = True  # 工具箱内置常在线（无 socket presence）
@@ -185,16 +191,18 @@ def list_workshop_bindings(
             "tools": tools,
             "bound": device_id in bound_ids,
             "bound_ai_config_id": bound_cfg_id,
+            "bound_ai_config_ids": bound_cfg_ids,
             "bound_ai_name": _config_name(session, user.id, bound_cfg_id),
             "is_toolbox": is_toolbox,
-            "multi": is_toolbox,
+            "multi": True,
         })
     return {"ai_config_id": cfg.id, "agents": items}
 
 
-@router.post("/bindings")
+@device_router.post("/builtin-bindings")
+@legacy_router.post("/bindings", include_in_schema=False)
 def update_workshop_binding(
-    payload: WorkshopBindRequest,
+    payload: DeviceBindRequest,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
@@ -214,15 +222,8 @@ def update_workshop_binding(
         and str(cfg.ai_role or "") not in ("digital_member", "assistant_admin")
     ):
         raise HTTPException(status_code=400, detail="图书馆只能绑定数字成员或辅助管理员")
-    occupied_by = bound_config_ids_for_agent(user.id, device_id) - {int(cfg.id)}
-    if bool(payload.bound) and occupied_by:
-        occupied_id = sorted(occupied_by)[0]
-        raise HTTPException(
-            status_code=409,
-            detail=f"该作坊已被 {_config_name(session, user.id, occupied_id)} 绑定，请先解绑",
-        )
     stored = set_workshop_binding(
-        user.id, device_id, cfg.id, bound=bool(payload.bound), single=True
+        user.id, device_id, cfg.id, bound=bool(payload.bound), single=False
     )
 
     # 解绑工具箱时，顺便把这个 AI 配置里残留的老 MCP 名字和 gated 工具清理干净
@@ -238,7 +239,7 @@ def update_workshop_binding(
         except Exception:
             pass
 
-    # 绑定/解绑后推送更新 device list，让作坊面板能立即看到 toolbox 的 boundAiConfigIds 变化
+    # 绑定/解绑后推送更新 device list，让设备面板能立即看到 toolbox 的 boundAiConfigIds 变化
     try:
         from api.devices.live import emit_agent_list_for_user
         import asyncio
@@ -253,3 +254,7 @@ def update_workshop_binding(
         "replaced_ai_config_id": None,
         "replaced_ai_name": "",
     }
+
+
+router.include_router(device_router)
+router.include_router(legacy_router)

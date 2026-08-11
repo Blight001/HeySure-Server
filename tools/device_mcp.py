@@ -61,7 +61,7 @@ def _device_capabilities(row: Dict[str, Any]) -> list[str]:
     return sorted(mcp_capabilities({str(item).strip() for item in raw if str(item).strip()}))
 
 
-def _device_rows(user_id: int) -> list[Dict[str, Any]]:
+def _device_rows(user_id: int, ai_config_id: Optional[int] = None) -> list[Dict[str, Any]]:
     rows: list[Dict[str, Any]] = []
     seen: set[str] = set()
     for raw in connected_agent_rows_for_user(user_id):
@@ -71,7 +71,7 @@ def _device_rows(user_id: int) -> list[Dict[str, Any]]:
             continue
         seen.add(device_id)
         capabilities = _device_capabilities(row)
-        saved_scope = get_scope(user_id, device_id)
+        saved_scope = get_scope(user_id, device_id, ai_config_id)
         allowed = capabilities if saved_scope is None else sorted(set(capabilities) & saved_scope)
         online = bool(row.get("online", row.get("lifecycle") != "offline"))
         bound_ids = row.get("boundAiConfigIds")
@@ -97,17 +97,21 @@ def _device_rows(user_id: int) -> list[Dict[str, Any]]:
     return rows
 
 
-def _owned_device(user_id: int, device_id: Any) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def _owned_device(
+    user_id: int,
+    device_id: Any,
+    ai_config_id: Optional[int] = None,
+) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     wanted = str(device_id or "").strip()
     if not wanted:
         return None, {"ok": False, "error": "device_id is required"}
-    for summary in _device_rows(user_id):
+    for summary in _device_rows(user_id, ai_config_id):
         if summary["deviceId"] == wanted:
             return summary, None
     return None, {"ok": False, "error": f"device not found or not owned by current user: {wanted}"}
 
 
-def _scope_payload(user_id: int, summary: Dict[str, Any]) -> Dict[str, Any]:
+def _scope_payload(user_id: int, summary: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     device_id = summary["deviceId"]
     source = next(
         (
@@ -117,7 +121,7 @@ def _scope_payload(user_id: int, summary: Dict[str, Any]) -> Dict[str, Any]:
         {},
     )
     capabilities = _device_capabilities(source if isinstance(source, dict) else {})
-    saved_scope = get_scope(user_id, device_id)
+    saved_scope = get_scope(user_id, device_id, ai_config_id)
     allowed = capabilities if saved_scope is None else sorted(set(capabilities) & saved_scope)
     defs = source.get("toolDefs") if isinstance(source, dict) else None
     if not isinstance(defs, dict):
@@ -149,7 +153,7 @@ async def _device_mcp_manage(user_id: int, args: Dict[str, Any], ai_config_id: O
     action = str(args.get("action") or "list").strip().lower()
 
     if action == "devices":
-        rows = _device_rows(user_id)
+        rows = _device_rows(user_id, ai_config_id)
         requested_id = str(args.get("device_id") or "").strip()
         if requested_id:
             rows = [row for row in rows if row["deviceId"] == requested_id]
@@ -163,12 +167,12 @@ async def _device_mcp_manage(user_id: int, args: Dict[str, Any], ai_config_id: O
         }
 
     if action in {"scope_get", "scope_set"}:
-        summary, error = _owned_device(user_id, args.get("device_id"))
+        summary, error = _owned_device(user_id, args.get("device_id"), ai_config_id)
         if error:
             return error
         assert summary is not None
         if action == "scope_get":
-            return _scope_payload(user_id, summary)
+            return _scope_payload(user_id, summary, ai_config_id)
 
         requested = args.get("tools")
         if not isinstance(requested, list):
@@ -176,7 +180,7 @@ async def _device_mcp_manage(user_id: int, args: Dict[str, Any], ai_config_id: O
         if any(not isinstance(item, str) or not item.strip() for item in requested):
             return {"ok": False, "error": "tools must contain non-empty MCP tool-name strings"}
         requested_names = {item.strip() for item in requested}
-        current = _scope_payload(user_id, summary)
+        current = _scope_payload(user_id, summary, ai_config_id)
         capabilities = set(current["capabilities"])
         unknown = sorted(requested_names - capabilities)
         if unknown:
@@ -190,13 +194,13 @@ async def _device_mcp_manage(user_id: int, args: Dict[str, Any], ai_config_id: O
             user_id,
             summary["deviceId"],
             requested_names,
-            ai_config_id=summary.get("aiConfigId"),
+            ai_config_id=ai_config_id,
             device_type=summary.get("deviceType") or "",
         )
         if stored is None:
             return {"ok": False, "error": "failed to save device MCP scope"}
         await emit_agent_list_for_user(user_id)
-        return _scope_payload(user_id, summary)
+        return _scope_payload(user_id, summary, ai_config_id)
 
     try:
         device_type = dyn.normalize_device_type(args.get("device_type"))

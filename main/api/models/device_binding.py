@@ -1,14 +1,14 @@
 """Persistent device → AI binding.
 
 Desktop / browser agents no longer pick an AI themselves; they just log in and
-connect. An operator assigns a server-side AI config to each connected device
-from the web "作坊" (Workshop) panel. That assignment is stored here, keyed by
+connect. An operator assigns one or more server-side AI configs to each device
+from the web "设备" panel. That assignment is stored here, keyed by
 the logical ``device_id`` (stable per device) so it survives socket reconnects
 and process restarts: on every ``device:register`` the server re-applies the
 binding for ``(user_id, device_id)``.
 
-``ai_config_id`` may be NULL — an explicit "unassigned" row is fine, but in
-practice unbinding deletes the row.
+Each non-null ``ai_config_id`` row is one member assignment; unbinding deletes
+only that pair.
 """
 
 import time

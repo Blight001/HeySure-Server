@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from api.devices.bindings import set_binding
-from api.devices.mcp_permissions import get_scope, set_scope
+from api.devices.bindings import get_bindings, set_binding, set_member_binding
+from api.devices.mcp_permissions import get_scope, reconcile_scope_with_capabilities, set_scope
 from api.devices.presence import online_agent_snapshot_for_user
 from api.database import get_session
 from api.models import AssistantAIConfig, DevicePresence
@@ -50,7 +50,74 @@ def _find_connected_agent(device_id: str, user_id: int) -> Optional[dict]:
     return online_agent_snapshot_for_user(user_id, aid)
 
 
-def _scope_view(agent: dict, user_id: int) -> dict:
+def _ensure_scope_member(
+    session: Session,
+    user_id: int,
+    device_id: str,
+    ai_config_id: int,
+) -> None:
+    cfg = session.exec(
+        select(AssistantAIConfig).where(
+            AssistantAIConfig.id == int(ai_config_id),
+            AssistantAIConfig.user_id == user_id,
+        )
+    ).first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="AI 配置不存在或不属于当前用户")
+    try:
+        from library import engine as workshop_engine
+        from tools import engine as toolbox_engine
+        from api.devices.workshop_bindings import bound_config_ids_for_agent
+
+        is_builtin = (
+            workshop_engine.is_builtin_workshop_device_id(device_id)
+            or device_id == toolbox_engine.toolbox_device_id_for_user(user_id)
+        )
+        bound_ids = (
+            bound_config_ids_for_agent(user_id, device_id)
+            if is_builtin
+            else set(get_bindings(user_id, device_id))
+        )
+    except Exception:
+        bound_ids = set(get_bindings(user_id, device_id))
+    if int(ai_config_id) not in bound_ids:
+        raise HTTPException(status_code=409, detail="该 AI 成员尚未绑定此设备")
+
+
+def _scope_ai_config_id(agent: dict, requested: Optional[int]) -> Optional[int]:
+    if requested is not None:
+        return requested
+    try:
+        value = agent.get("aiConfigId") or agent.get("ai_config_id")
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _scope_tool_defs(device_type: str, user_id: int, device_id: str) -> dict:
+    try:
+        from api.devices.presence import tool_defs_for_agent
+
+        definitions = tool_defs_for_agent(user_id, device_id)
+    except Exception:
+        definitions = {}
+    if definitions or device_type not in ("workshop", "toolbox"):
+        return definitions
+    try:
+        if device_type == "workshop":
+            from library import engine as builtin_engine
+        else:
+            from tools import engine as builtin_engine
+        return (
+            builtin_engine.tool_defs_map()
+            if device_type == "workshop"
+            else builtin_engine.toolbox_tool_defs_map()
+        )
+    except Exception:
+        return {}
+
+
+def _scope_view(agent: dict, user_id: int, ai_config_id: Optional[int] = None) -> dict:
     """Capabilities + effective allow-list for a connected agent. Scope is keyed
     per individual agent. Reconcile on (re)connect (for any device type) now
     ensures the persisted scope row always contains the *full* live capabilities,
@@ -60,38 +127,15 @@ def _scope_view(agent: dict, user_id: int) -> dict:
     device_type = device_type_of(agent)
     device_id = str(agent.get("id") or "")
     capabilities = sorted(agent_endpoint_tools(agent))
-    ai_config_id = agent.get("aiConfigId") or agent.get("ai_config_id")
-    try:
-        ai_config_id = int(ai_config_id) if ai_config_id else None
-    except (TypeError, ValueError):
-        ai_config_id = None
-    scope = get_scope(user_id, device_id) if device_id else None
+    ai_config_id = _scope_ai_config_id(agent, ai_config_id)
+    scope = get_scope(user_id, device_id, ai_config_id) if device_id else None
     # Reconcile ensures full for existing rows too (newly added MCPs appear).
     # hasRecord=true after reconcile; UI falls back to caps only for truly new.
     if scope is None:
         allowed = capabilities
     else:
         allowed = sorted(set(capabilities) & scope)
-    try:
-        from api.devices.presence import tool_defs_for_agent
-
-        tool_defs = tool_defs_for_agent(user_id, device_id)
-    except Exception:
-        tool_defs = {}
-    if device_type == "workshop" and not tool_defs:
-        try:
-            from library import engine as workshop_engine
-
-            tool_defs = workshop_engine.tool_defs_map()
-        except Exception:
-            tool_defs = {}
-    if device_type == "toolbox" and not tool_defs:
-        try:
-            from tools import engine as toolbox_engine
-
-            tool_defs = toolbox_engine.toolbox_tool_defs_map()
-        except Exception:
-            tool_defs = {}
+    tool_defs = _scope_tool_defs(device_type, user_id, device_id)
     return {
         "deviceId": device_id,
         "agentName": str(agent.get("name") or agent.get("id") or ""),
@@ -126,6 +170,10 @@ class DeviceBindRequest(BaseModel):
     aiConfigId: Optional[int] = None
 
 
+class DeviceMemberBindingRequest(BaseModel):
+    bound: bool = True
+
+
 class DeviceDisplayRequest(BaseModel):
     remark: str = ""
     icon: str = ""
@@ -151,7 +199,7 @@ async def bind_agent_ai(
         from library import engine as workshop_engine
 
         if workshop_engine.is_builtin_workshop_device_id(device_id):
-            raise HTTPException(status_code=400, detail="图书馆请通过 /api/workshop/bindings 绑定")
+            raise HTTPException(status_code=400, detail="图书馆请通过 /api/devices/builtin-bindings 绑定")
     except HTTPException:
         raise
     except Exception:
@@ -165,15 +213,16 @@ async def bind_agent_ai(
         if not cfg or cfg.user_id != user.id:
             raise HTTPException(status_code=404, detail="AI 配置不存在或不属于当前用户")
 
-    # 一个 AI 可同时绑定多台端侧设备（含同类型）：这里只写入本设备的绑定，
-    # 不再解绑该 AI 名下"上一台同类型设备"。每台设备仍只归属一个 AI。
+    # Legacy clients still replace the whole set with zero or one member.
     stored = set_binding(user.id, device_id, cfg_id)
+    bound_ids = get_bindings(user.id, device_id)
 
     # Reflect the assignment on any live socket(s) for this agent right away so
     # the next dispatch routes correctly without waiting for a reconnect.
     for agent in agents.values():
         if str(agent.get("id")) == device_id and agent.get("userId") == user.id:
             agent["aiConfigId"] = stored
+            agent["boundAiConfigIds"] = bound_ids
 
     # Keep the shared DB presence snapshot in sync so off-gateway processes
     # resolve endpoint tools against the new assignment immediately.
@@ -184,7 +233,75 @@ async def bind_agent_ai(
         pass
 
     await emit_agent_list_for_user(user.id)
-    return {"ok": True, "deviceId": device_id, "aiConfigId": stored}
+    return {
+        "ok": True,
+        "deviceId": device_id,
+        "aiConfigId": stored,
+        "boundAiConfigIds": bound_ids,
+    }
+
+
+@router.put("/{device_id}/member-bindings/{ai_config_id}")
+async def set_agent_member_binding(
+    device_id: str,
+    ai_config_id: int,
+    payload: DeviceMemberBindingRequest,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Add/remove one AI member while preserving every other assignment."""
+    user = get_current_user(authorization, session)
+    aid = str(device_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="deviceId required")
+    cfg = session.exec(
+        select(AssistantAIConfig).where(
+            AssistantAIConfig.id == int(ai_config_id),
+            AssistantAIConfig.user_id == user.id,
+        )
+    ).first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="AI 配置不存在或不属于当前用户")
+    try:
+        from library import engine as workshop_engine
+        from tools import engine as toolbox_engine
+
+        if workshop_engine.is_builtin_workshop_device_id(aid) or aid == toolbox_engine.toolbox_device_id_for_user(user.id):
+            raise HTTPException(status_code=400, detail="内置设备请通过 /api/devices/builtin-bindings 绑定")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    bound_ids = set_member_binding(user.id, aid, cfg.id, bound=payload.bound)
+    primary = bound_ids[0] if bound_ids else None
+    agent = _find_connected_agent(aid, user.id)
+    if agent and payload.bound:
+        capabilities = agent_endpoint_tools(agent)
+        reconcile_scope_with_capabilities(
+            user.id,
+            aid,
+            capabilities,
+            ai_config_id=cfg.id,
+            device_type=device_type_of(agent),
+        )
+    for live_agent in agents.values():
+        if str(live_agent.get("id")) == aid and live_agent.get("userId") == user.id:
+            live_agent["aiConfigId"] = primary
+            live_agent["boundAiConfigIds"] = bound_ids
+    try:
+        from api.devices.presence import update_binding
+
+        update_binding(aid, primary)
+    except Exception:
+        pass
+    await emit_agent_list_for_user(user.id)
+    return {
+        "ok": True,
+        "deviceId": aid,
+        "aiConfigId": primary,
+        "boundAiConfigIds": bound_ids,
+    }
 
 
 @router.put("/{device_id}/display")
@@ -208,7 +325,7 @@ async def update_device_display(
         from tools import engine as toolbox_engine
 
         if workshop_engine.is_builtin_workshop_device_id(aid) or aid == toolbox_engine.toolbox_device_id_for_user(user.id):
-            raise HTTPException(status_code=400, detail="系统内置作坊不支持自定义显示")
+            raise HTTPException(status_code=400, detail="系统内置设备不支持自定义显示")
     except HTTPException:
         raise
     except Exception:
@@ -236,7 +353,7 @@ async def update_device_display(
         session.add(row)
     device_type = str(row.device_type or device_type_of(agent) or "").strip()
     if device_type in ("workshop", "toolbox"):
-        raise HTTPException(status_code=400, detail="系统内置作坊不支持自定义显示")
+        raise HTTPException(status_code=400, detail="系统内置设备不支持自定义显示")
 
     from api.devices.presence import device_remark_value, effective_device_icon, normalize_device_icon
 
@@ -292,7 +409,7 @@ async def forget_device(
     return {"ok": True, "deviceId": aid, "deleted": deleted}
 
 
-# ── 设备开发手册（控制台"设备开发文档"弹窗） ────────────────────────────────
+# ── 设备开发手册（设备栏目"设备端开发文档"弹窗） ──────────────────────────
 # 默认内容随服务端打包（server/static/device_dev_manual.md，与 device/read.md
 # 同源）；房主在控制台编辑后存入 SystemSetting，清空保存即恢复默认。
 DEV_MANUAL_SETTING_KEY = "devices.dev_manual_md"
@@ -355,6 +472,7 @@ def save_device_dev_manual(
 @router.get("/{device_id}/mcp-scope")
 def get_agent_mcp_scope(
     device_id: str,
+    ai_config_id: Optional[int] = None,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
@@ -369,11 +487,14 @@ def get_agent_mcp_scope(
         raise HTTPException(status_code=404, detail="设备未连接")
     if not device_type_of(agent):
         raise HTTPException(status_code=400, detail="该设备不是可管理的端点 Agent（不支持 MCP 范围管理）")
-    return _scope_view(agent, user.id)
+    if ai_config_id is not None:
+        _ensure_scope_member(session, user.id, device_id, ai_config_id)
+    return _scope_view(agent, user.id, ai_config_id)
 
 
 class DeviceMcpScopeRequest(BaseModel):
     tools: List[str] = []
+    aiConfigId: Optional[int] = None
 
 
 @router.put("/{device_id}/mcp-scope")
@@ -383,9 +504,7 @@ async def set_agent_mcp_scope(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
-    """Persist the endpoint MCP permission scope for a connected agent, keyed per
-    individual agent (user, device_id). Unknown tool names are dropped; the scope
-    follows the physical device across reconnects and AI reassignment."""
+    """Persist one bound AI member's MCP scope for a connected device."""
     user = get_current_user(authorization, session)
     agent = _find_connected_agent(device_id, user.id)
     if not agent:
@@ -394,18 +513,15 @@ async def set_agent_mcp_scope(
     if not device_type:
         raise HTTPException(status_code=400, detail="该设备不是端点 Agent（不支持 MCP 范围管理）")
 
-    ai_config_id = agent.get("aiConfigId") or agent.get("ai_config_id")
+    ai_config_id = payload.aiConfigId
+    if ai_config_id is None:
+        ai_config_id = agent.get("aiConfigId") or agent.get("ai_config_id")
     try:
         ai_config_id = int(ai_config_id) if ai_config_id else None
     except (TypeError, ValueError):
         ai_config_id = None
-    # The bound AI is recorded for reference only; scope is keyed by the agent.
     if ai_config_id:
-        cfg = session.exec(
-            select(AssistantAIConfig).where(AssistantAIConfig.id == ai_config_id)
-        ).first()
-        if not cfg or cfg.user_id != user.id:
-            raise HTTPException(status_code=404, detail="AI 配置不存在或不属于当前用户")
+        _ensure_scope_member(session, user.id, device_id, ai_config_id)
 
     # Only persist tools the agent actually reports — never let stale UI state
     # widen the scope beyond the live capability set.
@@ -414,4 +530,4 @@ async def set_agent_mcp_scope(
     set_scope(user.id, device_id, requested & capabilities, ai_config_id=ai_config_id, device_type=device_type)
 
     await emit_agent_list_for_user(user.id)
-    return _scope_view(agent, user.id)
+    return _scope_view(agent, user.id, ai_config_id)

@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from ..database import engine
 from ..models import DevicePresence
+from .binding_routing import online_devices_for_config
 
 # Transport-layer capabilities a device advertises to unlock a *remote-connection*
 # data plane (see device/read.md「统一远程连接」). They are reserved words, NOT
@@ -282,33 +283,6 @@ def mark_all_offline() -> None:
             row.updated_at = time.time()
         if rows:
             session.commit()
-
-
-def online_devices_for_config(user_id, ai_config_id) -> List[Tuple[str, str, Set[str]]]:
-    """``(device_id, device_type, mcp_capabilities)`` for every online agent bound
-    to a config. ``device_id`` lets callers apply per-agent MCP scope."""
-    cfg = _int(ai_config_id)
-    if not cfg:
-        return []
-    uid = _int(user_id)
-    out: List[Tuple[str, str, Set[str]]] = []
-    with Session(engine) as session:
-        rows = session.exec(
-            select(DevicePresence).where(
-                DevicePresence.ai_config_id == cfg,
-                DevicePresence.online == True,  # noqa: E712
-            ).order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
-        ).all()
-        seen_agents: Set[str] = set()
-        for row in rows:
-            device_id = str(row.device_id or "").strip()
-            if not device_id or device_id in seen_agents:
-                continue
-            seen_agents.add(device_id)
-            if uid and row.user_id and row.user_id != uid:
-                continue
-            out.append((device_id, str(row.device_type or "").strip(), mcp_capabilities(_decode(row))))
-    return out
 
 
 def online_tool_names() -> Tuple[Set[str], Set[str]]:

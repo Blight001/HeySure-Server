@@ -77,7 +77,7 @@ def test_device_groups_are_built_from_db_presence(monkeypatch):
         "api.devices.presence.online_device_display_names", lambda user_id: {}
     )
     # Per-agent scope opens exactly these tools.
-    monkeypatch.setattr(g, "get_scope", lambda user_id, did: set(browser_caps) if did == device_id else None)
+    monkeypatch.setattr(g, "get_scope", lambda user_id, did, *_: set(browser_caps) if did == device_id else None)
     monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
     monkeypatch.setattr(g, "is_endpoint_agent_tool", lambda name: name.startswith("browser_"))
     # Keep the library-binding probe off the DB.
@@ -116,7 +116,7 @@ def test_custom_device_group_keeps_its_tools(monkeypatch):
         "api.devices.presence.online_device_display_names",
         lambda user_id: {device_id: "AI账号管理总台"},
     )
-    monkeypatch.setattr(g, "get_scope", lambda user_id, did: set(custom_caps) if did == device_id else None)
+    monkeypatch.setattr(g, "get_scope", lambda user_id, did, *_: set(custom_caps) if did == device_id else None)
     monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
     # In production these names classify as desktop-class endpoint tools via the
     # presence snapshot (custom devices land in the desktop bucket).

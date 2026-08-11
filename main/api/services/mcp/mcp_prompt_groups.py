@@ -202,12 +202,10 @@ def _tool_names_for_agent(
 ) -> Set[str]:
     device_id = str(agent.get("id") or "").strip()
     caps = agent_endpoint_tools(agent)
-    scope = get_scope(user_id, device_id) if device_id else None
+    scope = get_scope(user_id, device_id, ai_config_id) if device_id else None
     names: Set[str] = set()
     if scope is not None:
         names |= caps & scope
-    if ai_config_id is not None:
-        names |= _config_selected_tool_names(ai_config_id, user_id) & caps
     if allowed_tools is not None:
         names &= allowed_tools
     return {name for name in names if is_endpoint_agent_tool(name)}

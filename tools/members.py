@@ -172,7 +172,7 @@ def _replace_device_bindings(session: Session, user_id: int, config_id: int, raw
     from tools.engine import toolbox_device_id_for_user
 
     if any(is_builtin_workshop_device_id(item) or item == toolbox_device_id_for_user(user_id) for item in wanted):
-        raise HTTPException(status_code=400, detail="Library/toolbox bindings must be changed by a human in Workshop")
+        raise HTTPException(status_code=400, detail="Library/toolbox bindings must be changed by a human in Devices")
     known = session.exec(select(DevicePresence).where(DevicePresence.user_id == user_id)).all()
     known_ids = {str(row.device_id or "").strip() for row in known}
     existing = session.exec(select(DeviceAiBinding).where(DeviceAiBinding.user_id == user_id)).all()
@@ -182,26 +182,36 @@ def _replace_device_bindings(session: Session, user_id: int, config_id: int, raw
         raise HTTPException(status_code=404, detail=f"Unknown device ids: {', '.join(missing)}")
 
     now = time.time()
-    by_id = {str(row.device_id or "").strip(): row for row in existing}
+    by_pair = {
+        (str(row.device_id or "").strip(), int(row.ai_config_id or 0)): row
+        for row in existing
+    }
     for row in existing:
         if row.ai_config_id == config_id and str(row.device_id or "").strip() not in wanted:
             session.delete(row)
     for device_id in wanted:
-        row = by_id.get(device_id)
+        row = by_pair.get((device_id, config_id))
         if row:
-            row.ai_config_id = config_id
             row.updated_at = now
             session.add(row)
         else:
             session.add(DeviceAiBinding(user_id=user_id, device_id=device_id, ai_config_id=config_id))
     for row in known:
         device_id = str(row.device_id or "").strip()
-        if device_id in wanted:
-            row.ai_config_id = config_id
-            row.updated_at = now
-            session.add(row)
-        elif row.ai_config_id == config_id:
-            row.ai_config_id = None
+        bound_ids = sorted(
+            int(binding.ai_config_id)
+            for binding in existing
+            if str(binding.device_id or "").strip() == device_id
+            and binding.ai_config_id
+            and not (
+                binding.ai_config_id == config_id and device_id not in wanted
+            )
+        )
+        if device_id in wanted and config_id not in bound_ids:
+            bound_ids.append(config_id)
+        primary = min(bound_ids) if bound_ids else None
+        if row.ai_config_id != primary:
+            row.ai_config_id = primary
             row.updated_at = now
             session.add(row)
 

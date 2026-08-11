@@ -197,7 +197,7 @@ class MCPRegistry:
             raise
 
 def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Optional[int]) -> None:
-    """作坊绑定门禁：图书馆工具需绑定图书馆；工具箱工具需绑定工具箱。
+    """内置设备绑定门禁：图书馆工具需绑定图书馆；工具箱工具需绑定工具箱。
 
     没有 ``ai_config_id`` 视为核心 / 管理员直调，放行。仅服务端固定工具经
     ``MCPRegistry.call``，故两类门禁均按确切设备

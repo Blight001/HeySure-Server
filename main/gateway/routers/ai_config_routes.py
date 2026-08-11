@@ -209,7 +209,7 @@ def create_ai_config(
     session.refresh(cfg)
     _ensure_ai_workspace_dir(user.id, cfg.id)
     _write_persona_file(user.id, cfg, prompt=body.prompt or "")
-    # 工具箱默认自动绑定：新建 AI 即获得默认工具集（多绑；之后完全由用户在作坊/AI配置中管理绑定与解绑）。
+    # 工具箱默认自动绑定：新建 AI 即获得默认工具集（多绑；之后完全由用户在设备/AI配置中管理绑定与解绑）。
     try:
         from tools.engine import bind_config_to_toolbox
 

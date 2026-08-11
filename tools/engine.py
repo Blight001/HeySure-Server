@@ -4,9 +4,9 @@
 工具箱与图书馆（``library.engine``）是两个并列的服务端内置"虚拟端侧"，但二者
 形态不同：
 
-- **图书馆**：1:1 绑定、注册 ``DevicePresence``、自带 handler，工具经工坊分发。
-- **工具箱**：多绑（新建 AI 时默认绑定，之后完全由用户在作坊/AI配置中管理绑定与解绑），
-  **不注册 presence、不经工坊分发**——它只是一个绑定标记 + 展示条目。
+- **图书馆**：1:1 绑定、注册 ``DevicePresence``、自带 handler，工具经内置设备分发。
+- **工具箱**：多绑（新建 AI 时默认绑定，之后完全由用户在设备/AI配置中管理绑定与解绑），
+  **不注册 presence、不经内置设备分发**——它只是一个绑定标记 + 展示条目。
   注意：系统自带 MCP 工具（knowledge.search 等）现已改为直接调用，不再受工具箱绑定硬门禁；
   工具箱绑定/scope 主要用于 UI 分组与治理展示。调用时仍来自常规服务端注册表。
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _TOOLBOX_AGENT_ID_PREFIX = "toolbox_builtin_"
 TOOLBOX_DISPLAY_NAME = "工具箱（内置）"
-TOOLBOX_PLATFORM = "Workshop-Server"
+TOOLBOX_PLATFORM = "HeySure-Builtin-Device"
 
 # 工具箱门禁豁免：自省工具始终可用，避免未绑定时连工具说明都查不了。
 TOOLBOX_GATE_EXEMPT: Set[str] = {"mcp.describe+tool"}
@@ -78,7 +78,7 @@ def toolbox_tool_names(all_tool_names: Iterable[str]) -> Set[str]:
 
 def toolbox_capability_names() -> List[str]:
     """工具箱展示用的工具名：服务端固定工具中属于工具箱的部分（非图书馆绑定工具、
-    且排除自省工具）。仅供展示，工具箱工具仍由常规服务端注册表提供，不经工坊分发。"""
+    且排除自省工具）。仅供展示，工具箱工具仍由常规服务端注册表提供，不经内置设备分发。"""
     try:
         from mcp_runtime.mcp import registry
 
@@ -111,11 +111,11 @@ def bind_config_to_toolbox(user_id, ai_config_id) -> bool:
 # 展示条目
 # ---------------------------------------------------------------------------
 def toolbox_connected_entry_for_user(user_id) -> Dict[str, Any]:
-    """工具箱作坊的虚拟"已连接设备"条目（始终在线，多绑）。
+    """工具箱内置设备的虚拟"已连接设备"条目（始终在线，多绑）。
 
-    工具箱不注册 presence、不经工坊分发——它只是一个绑定标记 + 展示条目；工具箱
+    工具箱不注册 presence、不经内置设备分发——它只是一个绑定标记 + 展示条目；工具箱
     工具仍来自常规服务端注册表，由 mcp_runtime 按工具箱绑定逐次校验。
-    绑定关系完全由用户通过作坊面板或 AI 配置管理，新建 AI 时会默认调用 bind_config_to_toolbox。"""
+    绑定关系完全由用户通过设备面板或 AI 配置管理，新建 AI 时会默认调用 bind_config_to_toolbox。"""
     bound_ids: List[int] = []
     try:
         from api.devices.workshop_bindings import bound_config_ids_for_agent
@@ -150,7 +150,7 @@ def enforce_toolbox_binding(tool_name: str, user_id: int, ai_config_id: Optional
     """工具箱绑定门禁：工具箱工具需绑定工具箱。
 
     没有 ``ai_config_id`` 视为核心 / 管理员直调，放行；自省工具始终放行。非工具箱
-    工具（图书馆/端侧/工坊）不在本判定内。拒绝以 ``HTTPException`` 抛出。"""
+    工具（图书馆/端侧/内置设备）不在本判定内。拒绝以 ``HTTPException`` 抛出。"""
     if not ai_config_id:
         return
     if not is_toolbox_gated_tool(tool_name):
@@ -240,7 +240,7 @@ def toolbox_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int]
         return set()
 
     tbid = toolbox_device_id_for_user(uid)
-    scope = get_scope(uid, tbid)
+    scope = get_scope(uid, tbid, config_id)
 
     try:
         names = {str(t.get("name") or "").strip() for t in mcp_registry.list_tools() if t.get("name")}

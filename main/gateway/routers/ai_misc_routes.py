@@ -15,8 +15,6 @@ from api.core.config import CONNECTOR_RUNTIME_URL
 from api.database import get_session
 from api.runtime.internal_http import InternalClient
 from api.models import (
-    DeviceAiBinding,
-    DeviceTypeMcpPermission,
     AIMessage,
     AITaskJob,
     AIRuntimeStatus,
@@ -26,7 +24,6 @@ from api.models import (
     ChatMessage,
     ChatRun,
     ChatSession,
-    DevicePresence,
     ChatSessionCreate,
     TokenUsageSnapshot,
     WorkshopAiBinding,
@@ -137,36 +134,9 @@ async def delete_ai_config(
     for row in session_rows:
         session.delete(row)
 
-    binding_rows = session.exec(
-        select(DeviceAiBinding).where(
-            DeviceAiBinding.user_id == user.id,
-            DeviceAiBinding.ai_config_id == config_id,
-        )
-    ).all()
-    for row in binding_rows:
-        session.delete(row)
+    from api.devices.member_cleanup import delete_member_bindings_and_scopes
 
-    presence_rows = session.exec(
-        select(DevicePresence).where(
-            DevicePresence.user_id == user.id,
-            DevicePresence.ai_config_id == config_id,
-        )
-    ).all()
-    for row in presence_rows:
-        row.ai_config_id = None
-        row.updated_at = time.time()
-        session.add(row)
-
-    scope_rows = session.exec(
-        select(DeviceTypeMcpPermission).where(
-            DeviceTypeMcpPermission.user_id == user.id,
-            DeviceTypeMcpPermission.ai_config_id == config_id,
-        )
-    ).all()
-    for row in scope_rows:
-        row.ai_config_id = None
-        row.updated_at = time.time()
-        session.add(row)
+    affected_device_ids = delete_member_bindings_and_scopes(session, user.id, config_id)
 
     # Remaining tables with a NOT NULL FK to assistantaiconfig — leftover rows
     # would make the DELETE below fail with a ForeignKeyViolation.
@@ -217,21 +187,15 @@ async def delete_ai_config(
     # won't reliably order the DELETEs within a single flush and Postgres then
     # rejects the parent delete with a ForeignKeyViolation.
     session.flush()
+    from api.devices.member_cleanup import refresh_presence_primaries
+
+    refresh_presence_primaries(session, user.id, affected_device_ids)
     session.delete(cfg)
     session.commit()
 
-    changed_live = False
-    for agent in agents.values():
-        if agent.get("userId") != user.id:
-            continue
-        try:
-            bound_id = int(agent.get("aiConfigId") or agent.get("ai_config_id") or 0)
-        except (TypeError, ValueError):
-            bound_id = 0
-        if bound_id == config_id:
-            agent["aiConfigId"] = None
-            changed_live = True
-    if changed_live:
+    from api.devices.member_cleanup import sync_live_agent_bindings
+
+    if sync_live_agent_bindings(agents, user.id, config_id):
         await emit_agent_list_for_user(user.id)
     return {"success": True}
 

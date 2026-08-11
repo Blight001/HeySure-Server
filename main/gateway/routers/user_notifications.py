@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from api.database import get_session
@@ -12,6 +13,11 @@ from api.services.notifications.user_notifications import (
     mark_read,
     notification_payload,
 )
+from api.services.notifications.push_delivery import (
+    disable_endpoint,
+    endpoint_metadata,
+    upsert_endpoint,
+)
 from api.services.storage.workspace_files import resolve_file_ref
 
 from .auth import get_current_user
@@ -19,6 +25,12 @@ from .auth import get_current_user
 
 router = APIRouter()
 PREFIX = "/api"
+
+
+class PushEndpointRegistration(BaseModel):
+    provider: str = Field(default="huawei", max_length=32)
+    push_token: str = Field(min_length=1, max_length=4096)
+    app_version: str = Field(default="", max_length=40)
 
 
 def _current(authorization: str, session: Session):
@@ -43,6 +55,45 @@ def notification_read_all(
 ):
     user = _current(authorization, session)
     return {"updated": mark_all_read(session, user_id=user.id)}
+
+
+@router.put("/user-notifications/push-endpoints/{device_id}")
+def push_endpoint_register(
+    device_id: str,
+    body: PushEndpointRegistration,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = _current(authorization, session)
+    try:
+        item = upsert_endpoint(
+            session,
+            user_id=user.id,
+            provider=body.provider,
+            device_id=device_id,
+            push_token=body.push_token,
+            app_version=body.app_version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return endpoint_metadata(item)
+
+
+@router.delete("/user-notifications/push-endpoints/{device_id}")
+def push_endpoint_unregister(
+    device_id: str,
+    provider: str = Query(default="huawei", max_length=32),
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = _current(authorization, session)
+    item = disable_endpoint(
+        session,
+        user_id=user.id,
+        provider=provider,
+        device_id=device_id,
+    )
+    return {"disabled": bool(item)}
 
 
 @router.post("/user-notifications/{notification_id}/read")

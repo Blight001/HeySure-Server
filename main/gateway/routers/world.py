@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from api.database import get_session
-from api.models import AssistantAIConfig, DevicePresence, WorldActorMeta
+from api.models import AssistantAIConfig, WorldActorMeta
 from .auth import get_current_user
 
 
@@ -34,6 +34,10 @@ class ActorMetaUpdate(BaseModel):
     tint: Optional[str] = None
     scale: Optional[float] = None
     aura: Optional[str] = None
+
+
+class DeviceOrderUpdate(BaseModel):
+    device_ids: list[str]
 
 
 def _parse_meta(skin_json: str) -> dict:
@@ -79,7 +83,12 @@ async def world_snapshot(
     """
     user = get_current_user(authorization, session)
 
-    from api.services.knowledge import librarian_service
+    from api.devices.world_order import list_world_device_order
+    from api.services.world_snapshot import (
+        append_bound_offline_agents,
+        load_knowledge_snapshot,
+        load_pending_proposals,
+    )
     from .ai_misc_routes import list_ai_cards
     from .devices import list_connected_devices
 
@@ -92,81 +101,14 @@ async def world_snapshot(
         agents = connected.get("agents", [])
     except Exception:
         agents = []
-    # 世界需要保留已绑定但离线的作坊，才能把成员自动安置到出生地。
-    # 普通“已连接设备”列表仍只展示在线设备，不受这里的世界投影影响。
-    try:
-        online_ids = {str(row.get("id") or row.get("deviceId") or "") for row in agents}
-        offline_rows = session.exec(
-            select(DevicePresence).where(
-                DevicePresence.user_id == user.id,
-                DevicePresence.online == False,  # noqa: E712
-                DevicePresence.ai_config_id.is_not(None),
-            )
-        ).all()
-        for row in offline_rows:
-            device_id = str(row.device_id or "").strip()
-            if not device_id or device_id in online_ids:
-                continue
-            device_type = str(row.device_type or "").strip()
-            try:
-                from api.devices.presence import device_remark_value, effective_device_icon
-
-                icon = effective_device_icon(row)
-                remark = device_remark_value(getattr(row, "remark", ""))
-                icon_override = str(getattr(row, "icon_override", "") or "").strip()
-            except Exception:
-                icon = str(getattr(row, "icon", "") or "").strip()
-                remark = ""
-                icon_override = ""
-            agents.append({
-                "id": device_id,
-                "name": str(row.name or "").strip() or device_id,
-                "platform": str(row.platform or "").strip() or device_type,
-                "deviceType": device_type,
-                "icon": icon,
-                "iconOverride": icon_override,
-                "remark": remark,
-                "isWindowsDesktop": device_type == "desktop",
-                "isBrowserExtension": device_type == "browser",
-                "isAndroid": device_type == "android",
-                "aiConfigId": row.ai_config_id,
-                "capabilities": [],
-                "lifecycle": "offline",
-                "online": False,
-                "lastError": None,
-            })
-    except Exception:
-        pass
-    try:
-        knowledge_topics = librarian_service.list_topics(user_id=user.id, status="active")
-        knowledge_items = []
-        for item in knowledge_topics:
-            memory_id = str(item.get("memory_id") or "")
-            if not memory_id:
-                continue
-            # 内置类目（固有技能/固有人格/固有思路/传承技能/传承思想）的正文计算昂贵：
-            # 会枚举整个 MCP 注册表并落盘、读取全部人格与系统提示词文件。世界页只用
-            # 计数与摘要，完整详情在主控制台知识库按需读取；这里只放轻量元数据，避免
-            # 首屏与每次 8s 轮询都重算全部资源。
-            if memory_id.startswith("builtin."):
-                knowledge_items.append(item)
-                continue
-            try:
-                knowledge_items.append(librarian_service.read(user_id=user.id, memory_id=memory_id))
-            except Exception:
-                knowledge_items.append(item)
-        knowledge_active = len(knowledge_items)
-    except Exception:
-        knowledge_items = []
-        knowledge_active = 0
-    try:
-        proposals = librarian_service.list_pending_for_review(user_id=user.id)
-    except Exception:
-        proposals = []
+    append_bound_offline_agents(session, user.id, agents)
+    knowledge_items, knowledge_active = load_knowledge_snapshot(user.id)
+    proposals = load_pending_proposals(user.id)
     meta_rows = session.exec(
         select(WorldActorMeta).where(WorldActorMeta.user_id == user.id)
     ).all()
     actor_meta = [_meta_item(row) for row in meta_rows]
+    device_order = list_world_device_order(session, user.id)
 
     return {
         "cards": cards,
@@ -175,7 +117,35 @@ async def world_snapshot(
         "knowledge_items": knowledge_items,
         "proposals": proposals,
         "actor_meta": actor_meta,
+        "device_order": device_order,
     }
+
+
+@router.get("/devices/order")
+def get_device_order(
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    from api.devices.world_order import list_world_device_order
+
+    user = get_current_user(authorization, session)
+    return {"device_ids": list_world_device_order(session, user.id)}
+
+
+@router.put("/devices/order")
+def update_device_order(
+    body: DeviceOrderUpdate,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    from api.devices.world_order import save_world_device_order
+
+    user = get_current_user(authorization, session)
+    try:
+        device_ids = save_world_device_order(session, user.id, body.device_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "device_ids": device_ids}
 
 
 @router.get("/actors/meta")

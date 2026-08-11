@@ -1,4 +1,4 @@
-"""User-scoped snapshots for live endpoint agents and the builtin workshop."""
+"""User-scoped snapshots for live endpoint agents and built-in devices."""
 
 import logging
 
@@ -14,6 +14,19 @@ def _positive_int(value):
         return parsed if parsed > 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def _apply_endpoint_bindings(rows: list[dict], user_id: int) -> None:
+    from api.devices.bindings import bindings_by_device_for_user
+
+    endpoint_bindings = bindings_by_device_for_user(user_id)
+    for row in rows:
+        device_type = str(row.get("deviceType") or row.get("device_type") or "").lower()
+        if device_type in ("workshop", "toolbox"):
+            continue
+        bound_ids = endpoint_bindings.get(str(row.get("id") or "").strip(), [])
+        row["boundAiConfigIds"] = bound_ids
+        row["aiConfigId"] = bound_ids[0] if bound_ids else None
 
 
 def connected_agent_rows_for_user(user_id: int):
@@ -45,7 +58,7 @@ def connected_agent_rows_for_user(user_id: int):
         rows.append({**workshop_engine.connected_entry_for_user(uid), "online": True})
         rows.append({**toolbox_engine.toolbox_connected_entry_for_user(uid), "online": True})
     except Exception:
-        logger.exception("failed to add builtin workshop to agent snapshot user=%s", uid)
+        logger.exception("failed to add built-in device to agent snapshot user=%s", uid)
     try:
         from api.devices.presence import offline_devices_for_user
 
@@ -53,6 +66,10 @@ def connected_agent_rows_for_user(user_id: int):
         rows.extend(offline_devices_for_user(uid, live_ids))
     except Exception:
         logger.exception("failed to add offline devices to snapshot user=%s", uid)
+    try:
+        _apply_endpoint_bindings(rows, uid)
+    except Exception:
+        logger.exception("failed to apply endpoint bindings user=%s", uid)
     return rows
 
 

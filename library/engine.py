@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""内置图书馆（工坊）引擎：按用户自动上线并提供专用 MCP 能力。
+"""内置图书馆设备引擎：按用户自动上线并提供专用 MCP 能力。
 
-工坊不再是用户手动运行的独立 agent 进程，而是服务端内置的"虚拟端侧"：
+图书馆不再是用户手动运行的独立 agent 进程，而是服务端内置的"虚拟设备"：
 
 - **自动上线**：``ensure_presence_for_user(user_id)`` 给每个账号写一条
   ``DevicePresence``（device_type="workshop"，always online）并默认
   放开 per-agent scope。该函数挂在 ``ensure_default_ai_for_user`` 上，
-  用户登录/拉取 AI 列表时自动接入，作坊面板与社会显示随之出现工坊。
-- **专用绑定保留**：AI 仍通过 ``WorkshopAiBinding`` 与工坊 1:1 绑定。
-- **知识库 MCP**：经注册表工具 ``knowledge.manage``（action 分发）提供，不经工坊 scope。
+  用户登录/拉取 AI 列表时自动接入，设备面板与社会显示随之出现图书馆设备。
+- **专用绑定保留**：AI 仍通过兼容表 ``WorkshopAiBinding`` 与设备多对多绑定。
+- **知识库 MCP**：经注册表工具 ``knowledge.manage``（action 分发）提供，不经内置设备 scope。
 """
 
 import logging
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 _AGENT_ID_PREFIX = "workshop_builtin_"
 WORKSHOP_DISPLAY_NAME = "图书馆（内置）"
-WORKSHOP_PLATFORM = "Workshop-Server"
+WORKSHOP_PLATFORM = "HeySure-Builtin-Device"
 
 _TOOL_HANDLERS: Dict[str, tuple] = {}
 
@@ -41,7 +41,7 @@ def is_builtin_workshop_device_id(device_id) -> bool:
 
 
 def capability_names() -> List[str]:
-    """工坊上报的工具名（强制限制在工坊命名空间，且必须有 handler）。"""
+    """内置设备上报的工具名（强制限制在兼容命名空间，且必须有 handler）。"""
     return sorted(name for name in tools.TOOL_NAMES if name in _TOOL_HANDLERS)
 
 
@@ -75,7 +75,7 @@ def tool_defs_map() -> Dict[str, Dict[str, Any]]:
 
 
 def ensure_presence_for_user(user_id) -> None:
-    """确保该账号的内置图书馆（工坊）在线（presence + 默认放开的 scope）。
+    """确保该账号的内置图书馆设备在线（presence + 默认放开的 scope）。
 
     幂等且 best-effort：失败只记日志，绝不影响调用方主流程。
     """
@@ -108,7 +108,7 @@ def ensure_presence_for_user(user_id) -> None:
         # the operator's saved subset (including an explicit empty selection).
         reconcile_scope_with_capabilities(uid, device_id, caps, ai_config_id=None, device_type="workshop")
         # 工具箱：只在新建 AI 时默认绑定（见 ai_config_routes / ai_service），
-        # 之后完全尊重用户在作坊/AI配置面板的绑定/解绑操作，不再做全量自愈补绑。
+        # 之后完全尊重用户在设备/AI配置面板的绑定/解绑操作，不再做全量自愈补绑。
         # 仅确保其 MCP scope 有默认记录（用户可在前台缩小范围）。
         try:
             from tools.engine import ensure_toolbox_scope_for_user
@@ -118,21 +118,21 @@ def ensure_presence_for_user(user_id) -> None:
             logger.exception("ensure toolbox scope failed user=%s", user_id)
     except Exception:
         _last_ensure_at.pop(uid, None)
-        logger.exception("ensure builtin workshop presence failed user=%s", user_id)
+        logger.exception("ensure builtin device presence failed user=%s", user_id)
 
 
 def connected_entry_for_user(user_id) -> Dict[str, Any]:
-    """作坊面板/社会显示用的虚拟"已连接设备"条目（始终在线）。
+    """设备面板/社会显示用的虚拟"已连接设备"条目（始终在线）。
 
-    1:1 绑定语义下把当前绑定的成员透出为 ``aiConfigId``，世界场景的
-    悬浮提示与成员漫游区域据此联动。"""
-    bound_cfg_id = None
+    ``aiConfigId`` 保留首个成员作为旧客户端兼容投影。"""
+    bound_cfg_ids: List[int] = []
     try:
-        from api.devices.workshop_bindings import bound_config_id_for_agent
+        from api.devices.workshop_bindings import bound_config_ids_for_agent
 
-        bound_cfg_id = bound_config_id_for_agent(user_id, device_id_for_user(user_id))
+        bound_cfg_ids = sorted(bound_config_ids_for_agent(user_id, device_id_for_user(user_id)))
     except Exception:
-        bound_cfg_id = None
+        bound_cfg_ids = []
+    bound_cfg_id = bound_cfg_ids[0] if bound_cfg_ids else None
     library_catalog = None
     try:
         from api.services.knowledge.library_mcp_catalog import library_mcp_full_payload
@@ -146,6 +146,7 @@ def connected_entry_for_user(user_id) -> Dict[str, Any]:
         "platform": WORKSHOP_PLATFORM,
         "isWorkshop": True,
         "aiConfigId": bound_cfg_id,
+        "boundAiConfigIds": bound_cfg_ids,
         "userId": int(user_id),
         "capabilities": capability_names(),
         # 治理类图书馆 MCP（按 AI 配置 mcp_tools 开关）。
@@ -165,16 +166,16 @@ def connected_entry_for_user(user_id) -> Dict[str, Any]:
 
 
 def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Optional[Dict[str, Any]]) -> Any:
-    """执行一次工坊工具调用（policy 钩子 → 服务端 handler）。
+    """执行一次内置设备工具调用（policy 钩子 → 服务端 handler）。
 
     服务端复核（不信任调用上下文以外的任何声明）：
-    工具白名单 → AI 归属 → 工坊绑定。
+    工具白名单 → AI 归属 → 设备绑定。
     拒绝以 ``HTTPException`` 抛出，由调度层转为工具失败结果。
     """
     tool = str(tool or "").strip()
     spec = _TOOL_HANDLERS.get(tool)
     if spec is None or tool not in set(capability_names()):
-        raise HTTPException(status_code=400, detail=f"'{tool}' is not a workshop tool")
+        raise HTTPException(status_code=400, detail=f"'{tool}' is not a built-in device tool")
 
     from sqlmodel import Session, select
 
@@ -183,7 +184,7 @@ def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Opt
     from api.devices.workshop_bindings import workshop_device_ids_for_config
 
     if not ai_config_id:
-        raise HTTPException(status_code=400, detail="ai_config_id is required for workshop tools")
+        raise HTTPException(status_code=400, detail="ai_config_id is required for built-in device tools")
     with Session(db_engine) as session:
         cfg = session.exec(
             select(AssistantAIConfig).where(
@@ -194,7 +195,7 @@ def execute_tool(user_id: int, ai_config_id: Optional[int], tool: str, args: Opt
         if not cfg:
             raise HTTPException(status_code=404, detail="AI config not found")
 
-    # 绑定是工坊工具的唯一门槛。
+    # 绑定是内置设备工具的唯一门槛。
     if not workshop_device_ids_for_config(user_id, cfg.id):
         raise HTTPException(
             status_code=403,

@@ -5,17 +5,16 @@ the scope on every endpoint tool call) and the Workshop / AI-settings editors
 (which write it) share one source of truth. See
 ``api.models.device_mcp_permission``.
 
-Scope is keyed by ``(user_id, device_id)`` — each individual connected agent has
-its own allow-list.
+Scope is keyed by ``(user_id, device_id, ai_config_id)``.  The ``NULL`` member
+row is the device's default template; each bound AI member may then store an
+independent allow-list without overwriting another member.
 
-A missing row means the agent has never had a scope initialized (treated as
-closed / no tools at runtime dispatch). On first connect,
-``reconcile_scope_with_capabilities`` initializes the scope to the full live
-capability set. On later reconnects it preserves the user's saved allow-list,
-including tools that are temporarily absent while endpoint MCP is disabled.
-Runtime dispatch always intersects this saved intent with live capabilities.
+A missing member row inherits the device template. On first connect,
+``reconcile_scope_with_capabilities`` initializes that template to the full
+live capability set and materializes member rows for current bindings. Later
+reconnects preserve each saved allow-list, including temporarily absent tools.
 
-``get_scope`` returns ``None`` only for "no record ever"; a row with ``[]``
+``get_scope`` returns ``None`` only when neither member nor template exists; a row with ``[]``
 means explicitly none allowed. User saves therefore survive refreshes and
 reconnects, including an explicit "全不选" selection.
 """
@@ -137,39 +136,42 @@ def saved_scope_was_full(
     return previous.issubset(saved_on_previous_surface)
 
 
-def _load_scope_rows(session: Session, user_id: int, device_id: str):
+def _load_scope_rows(session: Session, user_id: int, device_id: str, ai_config_id: Optional[int]):
+    query = select(DeviceTypeMcpPermission).where(
+        DeviceTypeMcpPermission.user_id == user_id,
+        DeviceTypeMcpPermission.device_id == device_id,
+    )
+    if ai_config_id is None:
+        query = query.where(DeviceTypeMcpPermission.ai_config_id == None)  # noqa: E711
+    else:
+        query = query.where(DeviceTypeMcpPermission.ai_config_id == ai_config_id)
     return session.exec(
-        select(DeviceTypeMcpPermission)
-        .where(
-            DeviceTypeMcpPermission.user_id == user_id,
-            DeviceTypeMcpPermission.device_id == device_id,
-        )
-        .order_by(DeviceTypeMcpPermission.updated_at.desc(), DeviceTypeMcpPermission.id.desc())
+        query.order_by(DeviceTypeMcpPermission.updated_at.desc(), DeviceTypeMcpPermission.id.desc())
     ).all()
 
 
-def get_scope(user_id, device_id) -> Optional[Set[str]]:
-    """Return the saved allow-list for (user, agent), or ``None`` when no row
-    exists (never initialized for this agent). For newly connected devices the
-    row is auto-created with the full capability set on first register."""
+def get_scope(user_id, device_id, ai_config_id=None, *, fallback_to_default: bool = True) -> Optional[Set[str]]:
+    """Return one member's allow-list, optionally falling back to the template."""
     uid = _coerce_int(user_id)
     aid = _device_id(device_id)
+    cfg = _coerce_int(ai_config_id)
     if uid is None or not aid:
         return None
     with Session(engine) as session:
-        rows = _load_scope_rows(session, uid, aid)
+        rows = _load_scope_rows(session, uid, aid, cfg)
         row = rows[0] if rows else None
         for stale in rows[1:]:
             session.delete(stale)
         if rows[1:]:
             session.commit()
+        if row is None and cfg is not None and fallback_to_default:
+            defaults = _load_scope_rows(session, uid, aid, None)
+            row = defaults[0] if defaults else None
         return _decode_tools(row.tools_json) if row else None
 
 
 def set_scope(user_id, device_id, tools: Iterable[str], *, ai_config_id=None, device_type="") -> Optional[Set[str]]:
-    """Upsert the allow-list for one agent. ``ai_config_id`` / ``device_type`` are
-    stored as informational columns. Returns the stored set, or ``None`` on bad
-    input."""
+    """Upsert the allow-list for the default template or one AI member."""
     uid = _coerce_int(user_id)
     aid = _device_id(device_id)
     if uid is None or not aid:
@@ -179,7 +181,7 @@ def set_scope(user_id, device_id, tools: Iterable[str], *, ai_config_id=None, de
     cfg = _coerce_int(ai_config_id)
     atype = _normalize_type(device_type)
     with Session(engine) as session:
-        rows = _load_scope_rows(session, uid, aid)
+        rows = _load_scope_rows(session, uid, aid, cfg)
         row = rows[0] if rows else None
         for stale in rows[1:]:
             session.delete(stale)
@@ -197,7 +199,7 @@ def set_scope(user_id, device_id, tools: Iterable[str], *, ai_config_id=None, de
     return set(allowed)
 
 
-def delete_scope(user_id, device_id) -> None:
+def delete_scope(user_id, device_id, ai_config_id=None, *, all_for_device: bool = True) -> None:
     """Drop the saved allow-list for (user, agent), e.g. when forgetting an
     offline device's record entirely."""
     uid = _coerce_int(user_id)
@@ -205,7 +207,16 @@ def delete_scope(user_id, device_id) -> None:
     if uid is None or not aid:
         return
     with Session(engine) as session:
-        rows = _load_scope_rows(session, uid, aid)
+        rows = (
+            session.exec(
+                select(DeviceTypeMcpPermission).where(
+                    DeviceTypeMcpPermission.user_id == uid,
+                    DeviceTypeMcpPermission.device_id == aid,
+                )
+            ).all()
+            if all_for_device
+            else _load_scope_rows(session, uid, aid, _coerce_int(ai_config_id))
+        )
         for row in rows:
             session.delete(row)
         if rows:
@@ -236,7 +247,7 @@ def reconcile_scope_with_capabilities(
     cfg = _coerce_int(ai_config_id)
     atype = _normalize_type(device_type)
     with Session(engine) as session:
-        rows = _load_scope_rows(session, uid, aid)
+        rows = _load_scope_rows(session, uid, aid, cfg)
         row = rows[0] if rows else None
         dirty = bool(rows[1:])
         for stale in rows[1:]:
@@ -244,10 +255,13 @@ def reconcile_scope_with_capabilities(
         if not row:
             if dirty:
                 session.commit()
+            initial_scope = live_caps
+            if cfg is not None:
+                defaults = _load_scope_rows(session, uid, aid, None)
+                if defaults:
+                    initial_scope = _decode_tools(defaults[0].tools_json)
             if live_caps:
-                # (Re)connect / first time: default to full set so the
-                # Workshop MCP permission editor + runtime grants see everything.
-                return set_scope(uid, aid, live_caps, ai_config_id=cfg, device_type=atype)
+                return set_scope(uid, aid, initial_scope, ai_config_id=cfg, device_type=atype)
             return None
 
         # Preserve the operator's saved subset, including an explicit empty
@@ -260,9 +274,6 @@ def reconcile_scope_with_capabilities(
         if encoded != row.tools_json:
             row.tools_json = encoded
             row.updated_at = time.time()
-            dirty = True
-        if cfg is not None and row.ai_config_id != cfg:
-            row.ai_config_id = cfg
             dirty = True
         if atype and row.device_type != atype:
             row.device_type = atype

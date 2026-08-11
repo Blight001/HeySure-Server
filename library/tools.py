@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Built-in library (知识工坊) MCP tool catalog.
+"""Built-in library device MCP tool catalog.
 
 Knowledge-base operations are exposed exclusively via the registry tool
 ``knowledge.manage`` (action dispatch). This catalog is intentionally empty

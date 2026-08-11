@@ -515,7 +515,7 @@ def _migrate_rename_device_tables() -> None:
                 for old_i, new_i in idxs:
                     conn.exec_driver_sql(f'ALTER INDEX IF EXISTS "{old_i}" RENAME TO "{new_i}"')
 
-    # 表名不变、仅列 agent_id->device_id 的两张表（工坊绑定 / 端侧调度任务）。
+    # 表名不变、仅列 agent_id->device_id 的两张表（内置设备绑定 / 端侧调度任务）。
     # 按列存在性幂等：旧列在且新列不在才改。
     col_only = [
         ("workshopaibinding", "agent_id", "device_id",

@@ -20,3 +20,13 @@ class WorldActorMeta(SQLModel, table=True):
     # 字段留为 JSON 以便后续继续扩展配件等而无需迁移。
     skin_json: str = Field(default="{}")
     updated_at: float = Field(default_factory=time.time)
+
+
+class WorldDeviceMeta(SQLModel, table=True):
+    """用户在数字社会场景中独立保存的设备展示顺序。"""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    device_id: str = Field(index=True)
+    sort_order: int = Field(default=0, index=True)
+    updated_at: float = Field(default_factory=time.time)

@@ -59,7 +59,7 @@ _BUILTIN_ENTRIES = {
     },
     "builtin.inheritance_skills": {
         "title": "传承技能",
-        "triggers": ["传承技能", "固定MCP", "在线MCP", "工坊工具", "MCP工具"],
+        "triggers": ["传承技能", "固定MCP", "在线MCP", "设备工具", "MCP工具"],
         "summary": "系统服务端内置 MCP（工具箱 + 图书馆治理）与在线设备实时上报的工具能力。",
     },
     # 纯服务端固定 MCP 视图：与 inheritance_skills 共享同一权威源（注册表 + 文件
@@ -163,9 +163,9 @@ def _normalize_endpoint(value: Any) -> str:
 def _infer_endpoint_kind(user_id: int, ai_config_id: Optional[int]) -> str:
     """按安装成员当前在线绑定的端侧 agent 类型推断端归类。
 
-    读取共享 ``DevicePresence``（device_type desktop/browser，工坊为
+    读取共享 ``DevicePresence``（device_type desktop/browser，内置设备为
     workshop→归 any）。仅当成员唯一绑定到某一端时返回该端，否则（无绑定 /
-    同时绑定多端 / 仅工坊）回 ``any``。best-effort：异常一律回 ``any``。
+    同时绑定多端 / 仅内置设备）回 ``any``。best-effort：异常一律回 ``any``。
     """
     try:
         cfg = int(ai_config_id) if ai_config_id else None

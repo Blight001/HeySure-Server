@@ -132,7 +132,7 @@ BUILTIN_TOOLS = (
         description=(
             "AI 数字成员统一管理工具：查询、创建和编辑成员的名称、身份、平台、模型、"
             "人格 Prompt、Token 上限、实体设备绑定及成员后台任务。成员删除不对 AI 开放，"
-            "必须由人在控制台确认。图书馆/工具箱自身的绑定也只允许人在作坊界面修改。"
+            "必须由人在控制台确认。图书馆/工具箱自身的绑定也只允许人在设备界面修改。"
         ),
         input_schema=MEMBER_MANAGE_SCHEMA,
         handler=_member_manage,

@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from sqlmodel import Session, select
 from pydantic import ValidationError
 
 from api.database import engine
-from api.devices.bindings import get_binding
+from api.devices.bindings import get_bindings
 from api.devices.live import emit_agent_list_for_user
 from api.models import AssistantAIConfig
 from api.sio import agents, is_agent_shared_secret, resolve_agent_user, sio
@@ -29,6 +29,7 @@ class Registration:
     user_id: Optional[int]
     account: Optional[str]
     ai_config_id: Optional[int]
+    ai_config_ids: Tuple[int, ...]
 
 
 def _ai_belongs_to_user(ai_config_id: object, user_id: int) -> bool:
@@ -70,11 +71,11 @@ async def _registration(sid: str, info: Dict[str, Any]) -> Optional[Registration
     if not accepted:
         return None
     device_id = str(info.get("id") or sid)
-    bound_ai = get_binding(user_id, device_id) if user_id is not None else None
-    if user_id is not None and not _ai_belongs_to_user(bound_ai, user_id):
+    bound_ais = tuple(get_bindings(user_id, device_id)) if user_id is not None else ()
+    if user_id is not None and any(not _ai_belongs_to_user(value, user_id) for value in bound_ais):
         logger.warning(
             "Agent registration rejected (AI ownership mismatch): agent=%s user=%s ai=%s",
-            info.get("id"), user_id, bound_ai,
+            info.get("id"), user_id, bound_ais,
         )
         await sio.emit(
             "device:register_rejected",
@@ -82,7 +83,8 @@ async def _registration(sid: str, info: Dict[str, Any]) -> Optional[Registration
             to=sid,
         )
         return None
-    return Registration(sid, info, device_id, user_id, account, bound_ai)
+    primary = bound_ais[0] if bound_ais else None
+    return Registration(sid, info, device_id, user_id, account, primary, bound_ais)
 
 
 def _store_live_agent(ctx: Registration) -> None:
@@ -101,6 +103,7 @@ def _store_live_agent(ctx: Registration) -> None:
         "id": ctx.device_id,
         "icon": normalize_device_icon(info.get("icon")),
         "aiConfigId": ctx.ai_config_id,
+        "boundAiConfigIds": list(ctx.ai_config_ids),
         "socketId": ctx.sid,
         "userId": ctx.user_id,
         "userAccount": ctx.account,
@@ -118,7 +121,7 @@ def _store_live_agent(ctx: Registration) -> None:
     }
 
 
-def _record_presence(ctx: Registration) -> bool:
+def _record_presence(ctx: Registration) -> Dict[Optional[int], bool]:
     from api.devices.mcp_permissions import (
         get_scope,
         reconcile_saved_scope_for_capability_change,
@@ -136,35 +139,43 @@ def _record_presence(ctx: Registration) -> bool:
     agent = agents[ctx.sid]
     device_type = device_type_of(agent)
     if not device_type:
-        return False
+        return {}
     agent["deviceType"] = device_type
     capabilities = sorted(agent_endpoint_tools(agent))
-    previous_full = False
+    previous_full: Dict[Optional[int], bool] = {}
     if ctx.user_id is not None:
         previous = capabilities_for_device(ctx.user_id, ctx.device_id)
-        saved = get_scope(ctx.user_id, ctx.device_id)
-        previous_full = saved_scope_was_full(saved, previous)
-        if saved is not None:
-            expanded = reconcile_saved_scope_for_capability_change(saved, set(capabilities), previous)
-            if expanded != saved:
-                set_scope(
-                    ctx.user_id, ctx.device_id, expanded,
-                    ai_config_id=ctx.ai_config_id, device_type=device_type,
-                )
+        default_saved = get_scope(
+            ctx.user_id, ctx.device_id, None, fallback_to_default=False
+        )
+        for config_id in (None, *ctx.ai_config_ids):
+            saved = get_scope(
+                ctx.user_id, ctx.device_id, config_id, fallback_to_default=False
+            )
+            inherited = default_saved if config_id is not None and saved is None else saved
+            previous_full[config_id] = saved_scope_was_full(inherited, previous)
+            if saved is not None:
+                expanded = reconcile_saved_scope_for_capability_change(saved, set(capabilities), previous)
+                if expanded != saved:
+                    set_scope(
+                        ctx.user_id, ctx.device_id, expanded,
+                        ai_config_id=config_id, device_type=device_type,
+                    )
     upsert_presence(
         ctx.user_id, ctx.device_id, ctx.ai_config_id, device_type, capabilities,
         online=True, tool_defs=agent_endpoint_tool_defs(agent),
         name=agent.get("name"), platform=agent.get("platform"), icon=agent.get("icon") or "",
     )
     if ctx.user_id is not None:
-        reconcile_scope_with_capabilities(
-            ctx.user_id, ctx.device_id, capabilities,
-            ai_config_id=ctx.ai_config_id, device_type=device_type,
-        )
+        for config_id in (None, *ctx.ai_config_ids):
+            reconcile_scope_with_capabilities(
+                ctx.user_id, ctx.device_id, capabilities,
+                ai_config_id=config_id, device_type=device_type,
+            )
     return previous_full
 
 
-async def _push_dynamic_tools(ctx: Registration, previous_full: bool) -> None:
+async def _push_dynamic_tools(ctx: Registration, previous_full: Dict[Optional[int], bool]) -> None:
     from api.devices.live import device_tool_room, push_device_dynamic_tools_to_sid
     from api.devices.mcp_permissions import get_scope, reconcile_scope_with_capabilities, set_scope
     from api.services.device_tools import device_workspace_tools as workspace
@@ -189,15 +200,19 @@ async def _push_dynamic_tools(ctx: Registration, previous_full: bool) -> None:
     full_caps = set(agent_endpoint_tools(agents[ctx.sid]) or []) | pushed
     if not full_caps:
         return
-    if previous_full:
-        set_scope(
-            ctx.user_id, ctx.device_id, set(get_scope(ctx.user_id, ctx.device_id) or set()) | full_caps,
-            ai_config_id=ctx.ai_config_id, device_type=device_type,
+    for config_id in (None, *ctx.ai_config_ids):
+        if previous_full.get(config_id):
+            saved = get_scope(
+                ctx.user_id, ctx.device_id, config_id, fallback_to_default=False
+            )
+            set_scope(
+                ctx.user_id, ctx.device_id, set(saved or set()) | full_caps,
+                ai_config_id=config_id, device_type=device_type,
+            )
+        reconcile_scope_with_capabilities(
+            ctx.user_id, ctx.device_id, sorted(full_caps),
+            ai_config_id=config_id, device_type=device_type,
         )
-    reconcile_scope_with_capabilities(
-        ctx.user_id, ctx.device_id, sorted(full_caps),
-        ai_config_id=ctx.ai_config_id, device_type=device_type,
-    )
 
 
 async def _resume_owned_work(ctx: Registration) -> None:
@@ -267,9 +282,17 @@ async def handle_agent_register(sid: str, raw_info: object) -> None:
     try:
         previous_full = _record_presence(ctx)
     except Exception:
-        previous_full = False
+        previous_full = {}
         logger.exception("Failed to record endpoint agent presence: %s", ctx.device_id)
-    await sio.emit("device:registered", {"id": ctx.device_id, "aiConfigId": ctx.ai_config_id}, to=sid)
+    await sio.emit(
+        "device:registered",
+        {
+            "id": ctx.device_id,
+            "aiConfigId": ctx.ai_config_id,
+            "boundAiConfigIds": list(ctx.ai_config_ids),
+        },
+        to=sid,
+    )
     try:
         await _push_pending_confirmations(ctx)
     except Exception:

@@ -74,7 +74,7 @@ from .knowledge import KnowledgeEntry, Memory
 from .project import EvolutionProject, EvolutionProjectCreate, EvolutionProjectUpdate
 from .system import EmailVerificationCode, SystemSetting
 from .user import Token, User, UserCreate, UserLogin, UserRead, UserUpdate
-from .world_meta import WorldActorMeta
+from .world_meta import WorldActorMeta, WorldDeviceMeta
 from .workflow import (
     WorkflowCard,
     WorkflowCardVersion,
@@ -154,6 +154,7 @@ __all__ = [
     # "KnowledgeEntry",  # table removed from active use; definition kept for migration tools only
     "Memory",
     "WorldActorMeta",
+    "WorldDeviceMeta",
     # communication
     "AIMessage",
     # bots (unified session route, channel-keyed)

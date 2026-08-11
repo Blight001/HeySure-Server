@@ -74,8 +74,8 @@ ENDPOINT_TOOL_PREFIXES = (
     "display.",
     "ear.",
     "hands.",
-    # 知识与进化工坊（agent/workshop/）：这两个域已从内置 MCP 迁出，运行时
-    # 可用性只由"AI ↔ 工坊绑定 + per-agent scope"决定，持久化配置里的残留
+    # 图书馆内置设备（兼容 agent/workshop/）：这两个域已从内置 MCP 迁出，运行时
+    # 可用性只由"AI ↔ 设备绑定 + per-agent scope"决定，持久化配置里的残留
     # 条目一律剥离，避免绕过绑定门槛。
     "librarian.",
     "evolution.",
@@ -103,8 +103,8 @@ def strip_endpoint_tool_config_names(names: Set[str]) -> Set[str]:
     return {name for name in names if not is_endpoint_tool_config_name(name)}
 
 
-# 进化工坊（agent/workshop/）注册的工具走 evolution. 命名空间。知识库操作已
-# 统一为注册表工具 knowledge.manage，不再经工坊分发。
+# 兼容设备域（agent/workshop/）注册的工具走 evolution. 命名空间。知识库操作已
+# 统一为注册表工具 knowledge.manage，不再经内置设备分发。
 WORKSHOP_TOOL_PREFIXES = ("evolution.",)
 
 
@@ -122,7 +122,7 @@ KNOWN_DEVICE_TYPES = {"desktop", "browser", "android", "workshop", "toolbox", "c
 
 def device_type_of(agent: Optional[Dict[str, Any]]) -> Optional[str]:
     """Classify a connected-agent record as ``"desktop"`` / ``"browser"`` /
-    ``"android"`` (手机端) / ``"workshop"`` (知识与进化工坊) / ``"toolbox"`` (内置工具箱)
+    ``"android"`` (手机端) / ``"workshop"`` (兼容类型：图书馆设备) / ``"toolbox"`` (内置工具箱)
     / ``"custom"`` (开发者自建设备，见 device/read.md).
 
     Android phones are a distinct type (so they are never seeded the desktop
@@ -372,6 +372,26 @@ def _parse_int(value: Any) -> Optional[int]:
 # grants use the DB-presence helpers below (``endpoint_tools_for_config`` /
 # ``endpoint_bridge_tools_for_config``). See the INVARIANT note in
 # chat_runtime_helpers.build_runtime_system_prompt_and_tools.
+def _agent_bound_config_ids(agent: Dict[str, Any], agent_user_id: Optional[int]) -> Set[int]:
+    if agent_user_id:
+        try:
+            from api.devices.bindings import get_bindings
+
+            return set(get_bindings(agent_user_id, agent.get("id")))
+        except Exception:
+            pass
+    raw_ids = agent.get("boundAiConfigIds")
+    parsed = {
+        value
+        for raw in (raw_ids if isinstance(raw_ids, list) else [])
+        if (value := _parse_int(raw)) is not None
+    }
+    legacy_id = _parse_int(agent.get("aiConfigId") or agent.get("ai_config_id"))
+    if legacy_id:
+        parsed.add(legacy_id)
+    return parsed
+
+
 def _iter_agents_for_config(ai_config_id: Optional[int], user_id: Optional[int] = None):
     config_id = _parse_int(ai_config_id)
     if not config_id:
@@ -381,22 +401,8 @@ def _iter_agents_for_config(ai_config_id: Optional[int], user_id: Optional[int] 
     for agent in list(agents.values()):
         if not isinstance(agent, dict):
             continue
-        # A library MCP may update the persistent binding in another process.
-        # Resolve it from the shared DB at dispatch time so the live socket does
-        # not stay routed to the previous member until its next reconnect.
         agent_user_id = _parse_int(agent.get("userId") or agent.get("user_id"))
-        agent_config_id = None
-        binding_resolved = False
-        if agent_user_id:
-            try:
-                from api.devices.bindings import get_binding
-                agent_config_id = _parse_int(get_binding(agent_user_id, agent.get("id")))
-                binding_resolved = True
-            except Exception:
-                agent_config_id = None
-        if not binding_resolved:
-            agent_config_id = _parse_int(agent.get("aiConfigId") or agent.get("ai_config_id"))
-        if agent_config_id != config_id:
+        if config_id not in _agent_bound_config_ids(agent, agent_user_id):
             continue
         if expected_user_id and agent_user_id and agent_user_id != expected_user_id:
             continue
@@ -413,19 +419,19 @@ def get_connected_desktop_agent(
     # agent that actually advertises it wins over blind first-match; without a
     # tool (or when nobody advertises it) the first match keeps the old loose
     # behavior.
-    fallback: Optional[Dict[str, Any]] = None
     tool_name = str(tool or "").strip()
     for agent in _iter_agents_for_config(ai_config_id, user_id) or []:
         if device_type_of(agent) not in ("desktop", "android", "custom"):
             continue
         if not tool_name:
             return agent
-        caps = {str(c or "").strip() for c in (agent.get("capabilities") or [])}
-        if tool_name in caps:
+        caps = agent_endpoint_tools(agent)
+        from api.devices.mcp_permissions import get_scope
+
+        scope = get_scope(user_id, agent.get("id"), ai_config_id)
+        if tool_name in caps and scope is not None and tool_name in scope:
             return agent
-        if fallback is None:
-            fallback = agent
-    return fallback
+    return None
 
 
 def get_connected_browser_agent(
@@ -437,7 +443,6 @@ def get_connected_browser_agent(
     # to a tool that only exists on A is never dispatched to B (which would answer
     # "no such MCP"). Without a tool (or when nobody advertises it) the first
     # connected browser agent keeps the old loose behavior.
-    fallback: Optional[Dict[str, Any]] = None
     tool_name = str(tool or "").strip()
     for agent in _iter_agents_for_config(ai_config_id, user_id) or []:
         platform = str(agent.get("platform") or "").lower()
@@ -446,12 +451,13 @@ def get_connected_browser_agent(
             continue
         if not tool_name:
             return agent
-        caps = {str(c or "").strip() for c in (agent.get("capabilities") or [])}
-        if tool_name in caps:
+        caps = agent_endpoint_tools(agent)
+        from api.devices.mcp_permissions import get_scope
+
+        scope = get_scope(user_id, agent.get("id"), ai_config_id)
+        if tool_name in caps and scope is not None and tool_name in scope:
             return agent
-        if fallback is None:
-            fallback = agent
-    return fallback
+    return None
 
 
 def get_connected_endpoint_agent(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -519,7 +525,7 @@ def workshop_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
     for device_id, caps in online_workshop_agents_for_user(user_id):
         if device_id not in bound_ids:
             continue
-        scope = get_scope(user_id, device_id) if device_id else None
+        scope = get_scope(user_id, device_id, config_id) if device_id else None
         if scope is None:
             continue
         tools |= {name for name in (caps & scope) if is_workshop_tool(name)}
@@ -561,18 +567,9 @@ def _config_selected_tool_names(ai_config_id: Optional[int], user_id: Optional[i
 def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Set[str]:
     """Endpoint MCP tools available to an AI right now.
 
-    Two grant sources are unioned, each narrowed to what online endpoint agents
-    actually advertise — a disconnected agent contributes nothing:
-
-    1. Each agent's saved per-agent permission scope (``DeviceTypeMcpPermission``).
-       No saved scope row (agent never connected) → closed for it.
-       Reconcile on (re)connect now (re)sets full live capabilities for any type
-       (new MCPs auto-included by default on reconnect/register).
-    2. The AI config's own ``mcp_tools`` allow-list: an endpoint tool ticked in
-       the AI config is granted as soon as some online endpoint agent advertises
-       it. This keeps the AI-config checkbox and the per-agent scope consistent,
-       so a tool the model sees listed in its catalog is the same tool it may
-       describe and call.
+    Each bound online endpoint contributes only the intersection of its live
+    capabilities and this AI member's saved device scope. A disconnected agent
+    or a member without permission contributes nothing.
 
     Resolved from the shared DB presence snapshot (``api.devices.presence``) so
     every process — gateway, ai-runtime, mcp-runtime, connector — gets the same
@@ -584,23 +581,15 @@ def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
     from api.devices.mcp_permissions import get_scope
 
     tools: Set[str] = set()
-    live_caps: Set[str] = set()
     for device_id, device_type, caps in online_devices_for_config(user_id, config_id):
-        # Workshop tools keep their binding-only gate, so they never count toward
-        # the AI-config selection grant below.
-        if str(device_type or "").strip() != "workshop":
-            live_caps |= caps
         # Each individual agent has its own MCP scope.
         # No saved row (never registered) → closed for that agent.
         # Reconcile ensures full default (incl. new MCPs) on (re)connect for all types.
-        scope = get_scope(user_id, device_id) if device_id else None
+        scope = get_scope(user_id, device_id, config_id) if device_id else None
         if scope is None:
             continue
         tools |= caps & scope
-    # AI 配置勾选即生效：配置 mcp_tools 里选中的端侧工具，只要某个在线 agent
-    # 当前提供该能力即放行（与 per-agent scope 取并集），避免"能看到却不能用"。
-    tools |= _config_selected_tool_names(config_id, user_id) & live_caps
-    # 知识与进化工坊走 AI 侧绑定（WorkshopAiBinding），与设备 1:1 绑定并集。
+    # 图书馆内置设备走 AI 侧绑定（兼容表 WorkshopAiBinding），与设备 1:1 绑定并集。
     tools |= workshop_tools_for_config(config_id, user_id)
     return tools
 

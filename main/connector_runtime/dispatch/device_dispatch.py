@@ -70,6 +70,23 @@ _PENDING_DISPATCH_WAITERS: Dict[str, Dict[str, Any]] = {}
 _DISPATCH_TTL_SECONDS = 1800
 
 
+def _presence_allows_member_tool(
+    user_id: int,
+    ai_config_id: int,
+    binding: DeviceAiBinding,
+    presence: DevicePresence,
+    tool_name: str,
+) -> bool:
+    try:
+        capabilities = set(json.loads(presence.capabilities_json or "[]"))
+    except Exception:
+        capabilities = set()
+    from api.devices.mcp_permissions import get_scope
+
+    scope = get_scope(user_id, binding.device_id, ai_config_id)
+    return tool_name in capabilities and scope is not None and tool_name in scope
+
+
 def dispatch_has_recorded_outcome(task_id: str) -> bool:
     """Return whether a real agent outcome for ``task_id`` is already stored.
 
@@ -388,7 +405,7 @@ async def dispatch_endpoint_tool(
     caller can poll ``AgentDispatchTask`` by ``task_id`` and survive a
     connector-runtime restart. Returns ``None`` when no agent is bound.
 
-    工坊工具没有异步往返：内联执行后落一条已完成的 dispatch 行，
+    内置设备工具没有异步往返：内联执行后落一条已完成的 dispatch 行，
     轮询方拿到的直接是终态。
     """
     tool_name = str(tool or "").strip()
@@ -406,7 +423,7 @@ async def dispatch_endpoint_tool(
             "ai_config_id": ai_config_id,
             "device_id": workshop_engine.device_id_for_user(user_id),
             "tool": tool_name,
-            "instruction": f"Run workshop MCP tool {tool_name}",
+            "instruction": f"Run built-in device MCP tool {tool_name}",
         }
         _persist_dispatch(_dispatch_record(task_id, record_ctx))
         outcome = await _execute_workshop_inline(
@@ -442,11 +459,7 @@ async def dispatch_endpoint_tool(
                 )
             ).all()
         for binding, presence in rows:
-            try:
-                capabilities = set(json.loads(presence.capabilities_json or "[]"))
-            except Exception:
-                capabilities = set()
-            if tool_name in capabilities:
+            if _presence_allows_member_tool(user_id, ai_config_id, binding, presence, tool_name):
                 device_id = str(binding.device_id or "").strip()
                 break
     if not device_id:
@@ -485,7 +498,7 @@ async def dispatch_endpoint_tool_and_wait(
     if not ai_config_id:
         return {"success": False, "error": "ai_config_id is required for endpoint MCP tools"}
 
-    # 知识与进化工坊：服务端内置，进程内直接执行（无 socket 往返）。
+    # 图书馆设备：服务端内置，进程内直接执行（无 socket 往返）。
     if is_workshop_tool(tool_name):
         return await _execute_workshop_inline(
             user_id=user_id, ai_config_id=ai_config_id, tool=tool_name, args=args

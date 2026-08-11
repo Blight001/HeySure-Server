@@ -134,6 +134,11 @@ async def _lifespan(app: FastAPI):
         for bot in iter_bots()
     ]
     sweep_task = asyncio.create_task(_orphan_sweeper())
+    from connector_runtime.dispatch.user_push_scheduler import run_user_push_scheduler
+
+    push_task = asyncio.create_task(
+        run_user_push_scheduler(stop_event), name="user-push-scheduler"
+    )
     workflow_task = None
     if settings.workflow_scheduler_enabled:
         from connector_runtime.dispatch.workflow_scheduler import run_workflow_scheduler
@@ -149,7 +154,7 @@ async def _lifespan(app: FastAPI):
     finally:
         health.begin_draining()
         stop_event.set()
-        background_tasks = [*keepalive_tasks, sweep_task]
+        background_tasks = [*keepalive_tasks, sweep_task, push_task]
         if workflow_task is not None:
             background_tasks.append(workflow_task)
         for task in background_tasks:

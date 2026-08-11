@@ -69,7 +69,7 @@ MCP_TOOL_MIN_ROLE: Dict[str, str] = {
 }
 
 
-# 图书馆（绑定制）工具：调用 AI 必须已绑定知识工坊（图书馆），绑定是唯一权限门槛，
+# 图书馆（绑定制）工具：调用 AI 必须已绑定图书馆设备，绑定是唯一权限门槛，
 # 不再按数字成员、管理者或辅助管理员区分权限。这些是治理/管理类能力（任务管理、
 # prompt 管理、管理员操作、设备管理、知识库管理）。其余
 # 服务端固定工具属于「工具箱」，每个 AI 默认即可用、无需绑定。``knowledge.manage``
@@ -219,7 +219,7 @@ def clamp_tools_json(user, tier: str, mcp_tools_json: Optional[str]) -> str:
         # AgentMcpPermission, not by AssistantAIConfig.mcp_tools.
         if is_endpoint_tool_config_name(tool):
             continue
-        # 图书馆治理类工具在作坊 UI 按 AI 显式勾选；保留写入 mcp_tools，运行时仍由
+        # 图书馆治理类工具在设备 UI 按 AI 显式勾选；保留写入 mcp_tools，运行时仍由
         # 绑定门槛约束，避免角色策略白名单把 prompt 目录里的
         # manage 工具误剥掉。
         if tool in LIBRARY_BOUND_TOOLS:

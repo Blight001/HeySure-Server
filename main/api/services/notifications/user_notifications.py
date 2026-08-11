@@ -57,6 +57,8 @@ def create_notification(
         body=_clean_text(body, 4000),
         attachments_json=json.dumps(_safe_attachments(attachments), ensure_ascii=False),
         app_push_required=bool(app_push_required),
+        push_status="pending" if app_push_required else "not_required",
+        push_next_attempt_at=time.time() if app_push_required else 0.0,
         external_channel=_clean_text(external_channel, 32),
         external_delivered=bool(external_delivered),
         source="message.send+to",
@@ -165,6 +167,10 @@ def mark_read(session: Session, *, user_id: int, notification_id: str) -> Option
         item.status = "read"
         item.read_at = now
         item.updated_at = now
+        if item.push_status in {"pending", "retry", "sending"}:
+            item.push_status = "cancelled"
+            item.push_lease_owner = ""
+            item.push_lease_expires_at = 0.0
         session.add(item)
         session.commit()
         session.refresh(item)
@@ -181,6 +187,10 @@ def mark_all_read(session: Session, *, user_id: int) -> int:
         item.status = "read"
         item.read_at = now
         item.updated_at = now
+        if item.push_status in {"pending", "retry", "sending"}:
+            item.push_status = "cancelled"
+            item.push_lease_owner = ""
+            item.push_lease_expires_at = 0.0
         session.add(item)
     if rows:
         session.commit()

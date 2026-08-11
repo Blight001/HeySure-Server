@@ -1,4 +1,4 @@
-"""Inline execution for server-owned workshop endpoint tools."""
+"""Inline execution for server-owned built-in device tools."""
 
 import asyncio
 import logging
@@ -42,7 +42,7 @@ async def execute_workshop_inline(
             "error": str(exc.detail),
         }
     except Exception as exc:
-        logger.exception("workshop tool failed tool=%s user=%s", tool, user_id)
+        logger.exception("built-in device tool failed tool=%s user=%s", tool, user_id)
         return {
             "success": False,
             "deviceId": device_id,
