@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 
 TEMPLATE_RE = re.compile(r"\$\{([^{}]+)\}")
 SAFE_ROOTS = {"input", "steps", "run", "device"}
 COMPARE_OPS = {"eq", "ne", "gt", "gte", "lt", "lte"}
 STRING_OPS = {"contains", "startsWith", "endsWith"}
+MATCH_FIELDS = ("text", "name", "ariaLabel", "placeholder")
 
 
 class TemplateResolutionError(ValueError):
@@ -41,6 +42,52 @@ def render_template(value: Any, context: Dict[str, Any], depth: int = 0) -> Any:
     if full:
         return resolve_path(full.group(1).strip(), context)
     return TEMPLATE_RE.sub(lambda match: str(resolve_path(match.group(1).strip(), context)), value)
+
+
+def _normalized(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _target_matches(item: Dict[str, Any], resolver: Dict[str, Any]) -> bool:
+    if resolver.get("kind") and str(item.get("kind") or "") != str(resolver["kind"]):
+        return False
+    if resolver.get("tag") and str(item.get("tag") or "").casefold() != str(resolver["tag"]).casefold():
+        return False
+    if not bool(resolver.get("allowDisabled", False)) and bool(item.get("disabled")):
+        return False
+    expected = _normalized(resolver.get("text"))
+    fields: Iterable[str] = resolver.get("fields") or MATCH_FIELDS
+    values = [_normalized(item.get(field)) for field in fields]
+    return not expected or (expected in values if resolver.get("exact", True) else any(expected in value for value in values))
+
+
+def resolve_target_arguments(
+    step: Dict[str, Any], context: Dict[str, Any], arguments: Dict[str, Any],
+) -> Dict[str, Any]:
+    resolver = step.get("targetResolver")
+    if resolver is None:
+        return arguments
+    if not isinstance(resolver, dict):
+        raise ValueError("targetResolver must be an object")
+    rendered = render_template(resolver, context)
+    items = rendered.get("items")
+    if not isinstance(items, list):
+        raise ValueError("targetResolver.items must resolve to an observation items array")
+    matches = [item for item in items if isinstance(item, dict) and _target_matches(item, rendered)]
+    if len(matches) != 1:
+        raise ValueError(f"targetResolver expected exactly one element, found {len(matches)}")
+    target = matches[0]
+    resolved = dict(arguments)
+    target_id, selector = str(target.get("id") or "").strip(), str(target.get("selector") or "").strip()
+    if target_id:
+        resolved["ref"] = target_id
+        resolved.pop("selector", None)
+    elif selector:
+        resolved["selector"] = selector
+        resolved.pop("ref", None)
+    else:
+        raise ValueError("targetResolver matched an element without ref or selector")
+    return resolved
 
 
 def evaluate_expression(expression: Any, context: Dict[str, Any], depth: int = 0) -> bool:

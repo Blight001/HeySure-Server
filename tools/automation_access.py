@@ -59,7 +59,7 @@ def _updated_tags(card: WorkflowCard, tags: Any) -> list[str]:
 
 
 def _pending_confirmation_guidance(row: Any, ai_config_id: Optional[int]) -> dict[str, Any]:
-    interaction_types = {"ai_review", "user_via_ai"}
+    interaction_types = {"ai_review", "user_via_ai", "user_via_ai_dispatch"}
     confirmation_type = str(getattr(row, "confirmation_type", "explicit") or "explicit")
     assigned_ai_id = getattr(row, "ai_config_id", None)
     can_respond = bool(

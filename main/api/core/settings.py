@@ -234,6 +234,7 @@ class Settings(BaseSettings):
     )
     workflow_max_concurrent_per_user: int = Field(default=10)
     workflow_max_concurrent_per_device: int = Field(default=1)
+    workflow_confirmation_timeout_seconds: int = Field(default=30 * 60, ge=60, le=86400)
     workflow_max_argument_bytes: int = Field(default=256 * 1024)
     workflow_max_result_bytes: int = Field(default=10 * 1024 * 1024)
     workflow_result_retention_seconds: int = Field(default=60 * 60 * 24 * 30)

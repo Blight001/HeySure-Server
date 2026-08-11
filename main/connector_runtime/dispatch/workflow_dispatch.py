@@ -10,6 +10,7 @@ import uuid
 from sqlmodel import Session, select
 
 from api.database import engine
+from api.core.settings import settings
 from api.models import AgentDispatchTask, WorkflowRun, WorkflowStepRun
 from api.services.workflows.permissions import WorkflowDispatchError, validate_step_dispatch
 from api.services.workflows.run_service import (
@@ -18,6 +19,7 @@ from api.services.workflows.run_service import (
     fail_step_dispatch,
     render_step_arguments,
     request_confirmation,
+    RUN_CONFIRMATION_SCOPE,
 )
 from api.services.workflows.step_device_binding import step_run_device_id
 from connector_runtime.dispatch.device_dispatch import dispatch_task_to_agent, redeliver_dispatch
@@ -35,6 +37,26 @@ def _decode_result(raw: str):
         return raw or None
 
 
+def _request_step_confirmation(
+    session: Session,
+    run: WorkflowRun,
+    step: WorkflowStepRun,
+) -> None:
+    confirmation_type = "user_via_ai_dispatch" if run.actor_type == "ai" else "forced"
+    request_confirmation(
+        session,
+        run=run,
+        step_id=step.step_id,
+        confirmation_type=confirmation_type,
+        risk_summary=(
+            "本次高风险自动化获批后，将自动执行当前固定卡片版本的后续设备操作，"
+            "其中可能包含最终发布；授权仅限本次运行。"
+        ),
+        timeout_seconds=int(settings.workflow_confirmation_timeout_seconds),
+        next_step_id=RUN_CONFIRMATION_SCOPE,
+    )
+
+
 def reconcile_finished_dispatches(limit: int = 100) -> int:
     """Advance steps from terminal AgentDispatchTask rows (restart recovery)."""
     applied = 0
@@ -46,6 +68,9 @@ def reconcile_finished_dispatches(limit: int = 100) -> int:
         ).all()
     for step in steps:
         with Session(engine) as session:
+            run = session.get(WorkflowRun, step.run_id)
+            if run and run.status in {"waiting_confirmation", "waiting_ai", "paused"}:
+                continue
             dispatch = session.exec(
                 select(AgentDispatchTask).where(AgentDispatchTask.task_id == step.dispatch_task_id)
             ).first()
@@ -97,7 +122,7 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                 continue
             if run.status in {"cancelled", "failed", "succeeded", "timed_out"}:
                 continue
-            if run.status in {"waiting_confirmation", "paused"}:
+            if run.status in {"waiting_confirmation", "waiting_ai", "paused"}:
                 continue
             if run.status == "paused_offline" and (run.next_wakeup_at or 0) > now:
                 continue
@@ -153,14 +178,7 @@ async def dispatch_pending_steps(limit: int = 50) -> int:
                         step.claim_owner = ""
                         step.claimed_at = None
                         session.add(step)
-                        request_confirmation(
-                            session,
-                            run=run,
-                            step_id=step.step_id,
-                            confirmation_type="forced",
-                            risk_summary=f"高风险设备工具：{step.tool_name}",
-                            timeout_seconds=min(300, max(1, int(run.deadline_at - now))),
-                        )
+                        _request_step_confirmation(session, run, step)
                         session.commit()
                         continue
                     fail_step_dispatch(

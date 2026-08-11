@@ -28,11 +28,16 @@ from api.services.workflows.compiler import schema_digest
 from api.services.workflows.card_service import _snapshot_contracts
 from api.services.workflows.permissions import WorkflowDispatchError, validate_step_dispatch
 from api.services.workflows.run_service import (
+    RUN_CONFIRMATION_SCOPE,
     advance_run,
     apply_step_result,
     cancel_run,
+    confirmation_granted,
     create_run,
+    decide_confirmation,
+    request_confirmation,
 )
+from api.services.workflows.expression import resolve_target_arguments
 from api.services.workflows.step_device_binding import step_run_device_id
 from api.services.workflows.ai_interaction import (
     AI_INTERVENTION_TOOL,
@@ -123,6 +128,139 @@ def test_condition_delay_ai_mediated_confirmation_and_end_are_deterministic():
         session.refresh(run)
         assert run.status == "succeeded"
         assert json.loads(run.output_json) == {"ok": True}
+
+
+def test_run_scoped_confirmation_renews_dispatch_deadline_and_covers_later_steps():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "call",
+        "limits": {"timeoutSeconds": 3600, "maxTransitions": 4},
+        "steps": {
+            "call": {
+                "type": "mcp", "toolRef": {"namespace": "device", "name": "demo"},
+                "arguments": {}, "saveAs": "demo", "timeoutSeconds": 120, "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(session, user_id=user.id, card_id=card.id, device_id="device", input_value={})
+        advance_run(session, run.id)
+        step = session.exec(select(WorkflowStepRun).where(WorkflowStepRun.run_id == run.id)).one()
+        step.deadline_at = 1
+        session.add(step)
+        confirmation = request_confirmation(
+            session,
+            run=run,
+            step_id="call",
+            confirmation_type="forced",
+            risk_summary="approve this immutable run",
+            timeout_seconds=1800,
+            next_step_id=RUN_CONFIRMATION_SCOPE,
+        )
+        session.commit()
+
+        decide_confirmation(session, run=run, user_id=user.id, approved=True)
+        session.refresh(step)
+        assert run.status == "waiting_device"
+        assert step.status == "dispatch_pending"
+        assert step.deadline_at > confirmation.decided_at + 100
+        assert confirmation_granted(session, run.id, "call")
+        assert confirmation_granted(session, run.id, "a_later_destructive_step")
+
+
+def test_ai_mediated_dispatch_confirmation_can_resume_the_pending_step():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "call",
+        "limits": {"timeoutSeconds": 3600, "maxTransitions": 4},
+        "steps": {
+            "call": {
+                "type": "mcp", "toolRef": {"namespace": "device", "name": "demo"},
+                "arguments": {}, "saveAs": "demo", "timeoutSeconds": 120, "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(
+            session, user_id=user.id, card_id=card.id, device_id="device", input_value={},
+            actor_type="ai", actor_id="9",
+        )
+        advance_run(session, run.id)
+        request_confirmation(
+            session,
+            run=run,
+            step_id="call",
+            confirmation_type="user_via_ai_dispatch",
+            risk_summary="ask the user",
+            timeout_seconds=1800,
+            next_step_id=RUN_CONFIRMATION_SCOPE,
+        )
+        session.commit()
+        assert run.status == "waiting_ai"
+
+        respond_ai_interaction(session, run=run, user_id=user.id, ai_config_id=9, approved=True)
+        assert run.status == "waiting_device"
+        assert confirmation_granted(session, run.id, "call")
+
+
+def test_observed_target_resolver_requires_one_fresh_semantic_match():
+    step = {
+        "targetResolver": {
+            "items": "${steps.observe.result.items}",
+            "text": "发布",
+            "kind": "interactive",
+            "exact": True,
+        },
+    }
+    context = {
+        "input": {}, "run": {}, "device": {},
+        "steps": {"observe": {"result": {"items": [
+            {"id": "e43", "text": "发布说明", "kind": "text"},
+            {"id": "e44", "text": "发布", "kind": "interactive", "disabled": False},
+        ]}}},
+    }
+    assert resolve_target_arguments(step, context, {"action": "click", "ref": "stale"}) == {
+        "action": "click", "ref": "e44",
+    }
+
+
+def test_end_steps_can_report_published_or_manual_fallback_outcomes():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object", "properties": {"verified": {"type": "boolean"}}},
+        "startStepId": "check",
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 3},
+        "steps": {
+            "check": {
+                "type": "condition", "expression": {
+                    "op": "eq", "left": "${input.verified}", "right": True,
+                },
+                "onTrue": "published", "onFalse": "manual",
+            },
+            "published": {"type": "end", "output": {"status": "published"}},
+            "manual": {"type": "end", "output": {"status": "manual_required"}},
+        },
+        "output": {"status": "unknown"},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(
+            session, user_id=user.id, card_id=card.id, device_id="device", input_value={"verified": False},
+        )
+        advance_run(session, run.id)
+        advance_run(session, run.id)
+        assert json.loads(run.output_json) == {"status": "manual_required"}
 
 
 def test_ai_step_callback_parameters_continue_as_a_step_result():

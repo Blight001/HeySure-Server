@@ -21,11 +21,19 @@ from api.models import (
 
 from api.core.settings import settings
 from .audit import add_audit
-from .expression import evaluate_expression, render_template
+from .expression import evaluate_expression, render_template, resolve_target_arguments
 from .result_store import device_step_error, save_result
 from .secrets import decrypt_json, encrypt_json
 from .step_device_binding import step_contract, step_device_id
-from .workflow_cancellation import cancel_workflow_run
+from .workflow_cancellation import (
+    RUN_CONFIRMATION_SCOPE,
+    cancel_workflow_run,
+    confirmation_granted,
+    decide_confirmation,
+    expire_confirmations,
+    renew_dispatch_step_deadline,
+    request_confirmation,
+)
 
 
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
@@ -333,7 +341,7 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
     )
     if step_type == "end":
         try:
-            output = render_template(definition.get("output", {}), _context(run))
+            output = render_template(step.get("output", definition.get("output", {})), _context(run))
         except Exception as exc:
             fail_run(session, run, error_payload("EXPRESSION_EVALUATION_FAILED", str(exc), "output"))
         else:
@@ -490,191 +498,11 @@ def render_step_arguments(session: Session, step_run: WorkflowStepRun) -> Dict[s
     definition = _load(version.definition_json, {})
     step = definition["steps"][step_run.step_id]
     device = session.exec(select(DevicePresence).where(DevicePresence.user_id == run.user_id, DevicePresence.device_id == step_device_id(step, run))).first()
-    rendered = render_template(step.get("arguments", {}), _context(run, device))
+    context = _context(run, device)
+    rendered = render_template(step.get("arguments", {}), context)
     if not isinstance(rendered, dict):
         raise ValueError("rendered arguments must be an object")
-    return rendered
-
-
-def request_confirmation(
-    session: Session,
-    *,
-    run: WorkflowRun,
-    step_id: str,
-    confirmation_type: str,
-    risk_summary: str,
-    timeout_seconds: int,
-    next_step_id: str = "",
-    on_denied_step_id: str = "",
-) -> WorkflowConfirmation:
-    existing = session.exec(
-        select(WorkflowConfirmation)
-        .where(
-            WorkflowConfirmation.run_id == run.id,
-            WorkflowConfirmation.step_id == step_id,
-            WorkflowConfirmation.status.in_(["pending", "approved"]),
-        )
-        .order_by(WorkflowConfirmation.created_at.desc())
-    ).first()
-    if existing:
-        return existing
-    now = time.time()
-    row = WorkflowConfirmation(
-        id=f"wconf_{uuid.uuid4().hex}",
-        run_id=run.id,
-        step_id=step_id,
-        confirmation_type=confirmation_type,
-        risk_summary=risk_summary[:2000],
-        next_step_id=next_step_id,
-        on_denied_step_id=on_denied_step_id,
-        requested_user_id=run.user_id,
-        expires_at=min(run.deadline_at, now + max(1, int(timeout_seconds))),
-    )
-    previous = run.status
-    run.status = "waiting_confirmation"
-    run.next_wakeup_at = row.expires_at
-    run.updated_at = now
-    run.lock_version += 1
-    session.add(row)
-    session.add(run)
-    add_audit(
-        session,
-        event_type="confirmation_requested",
-        run=run,
-        step_id=step_id,
-        status_from=previous,
-        status_to="waiting_confirmation",
-        detail={"confirmation_id": row.id, "type": confirmation_type, "risk_summary": risk_summary[:500]},
-    )
-    return row
-
-
-def confirmation_granted(session: Session, run_id: str, step_id: str) -> bool:
-    row = session.exec(
-        select(WorkflowConfirmation)
-        .where(
-            WorkflowConfirmation.run_id == run_id,
-            WorkflowConfirmation.step_id == step_id,
-            WorkflowConfirmation.confirmation_type == "forced",
-            WorkflowConfirmation.status == "approved",
-        )
-        .order_by(WorkflowConfirmation.decided_at.desc())
-    ).first()
-    return bool(row)
-
-
-def decide_confirmation(
-    session: Session,
-    *,
-    run: WorkflowRun,
-    user_id: int,
-    approved: bool,
-) -> WorkflowRun:
-    confirmation = session.exec(
-        select(WorkflowConfirmation)
-        .where(
-            WorkflowConfirmation.run_id == run.id,
-            WorkflowConfirmation.status == "pending",
-        )
-        .order_by(WorkflowConfirmation.created_at.desc())
-        .with_for_update(skip_locked=True)
-    ).first()
-    if not confirmation:
-        raise ValueError("CONFIRMATION_NOT_PENDING")
-    if confirmation.requested_user_id != user_id:
-        raise ValueError("CONFIRMATION_ACCESS_DENIED")
-    now = time.time()
-    if now >= confirmation.expires_at:
-        approved = False
-    confirmation.status = "approved" if approved else "denied"
-    confirmation.decision = confirmation.status
-    confirmation.decided_by = user_id
-    confirmation.decided_at = now
-    session.add(confirmation)
-    if approved:
-        if confirmation.confirmation_type == "explicit":
-            run.current_step_id = confirmation.next_step_id
-            run.status = "running"
-        else:
-            run.status = "waiting_device"
-        run.next_wakeup_at = now
-        run.updated_at = now
-        run.lock_version += 1
-        session.add(run)
-    elif confirmation.on_denied_step_id:
-        run.current_step_id = confirmation.on_denied_step_id
-        run.status = "running"
-        run.next_wakeup_at = now
-        run.updated_at = now
-        run.lock_version += 1
-        session.add(run)
-    else:
-        fail_run(
-            session,
-            run,
-            error_payload("CONFIRMATION_DENIED", "workflow confirmation was denied or expired", "confirmation"),
-            status="cancelled",
-        )
-    add_audit(
-        session,
-        event_type="confirmation_decided",
-        run=run,
-        step_id=confirmation.step_id,
-        status_from="waiting_confirmation",
-        status_to=run.status,
-        detail={"confirmation_id": confirmation.id, "decision": confirmation.status},
-    )
-    session.commit()
-    session.refresh(run)
-    return run
-
-
-def expire_confirmations(session: Session, now: Optional[float] = None, limit: int = 100) -> int:
-    current = float(now or time.time())
-    rows = session.exec(
-        select(WorkflowConfirmation)
-        .where(WorkflowConfirmation.status == "pending", WorkflowConfirmation.expires_at <= current)
-        .limit(limit)
-    ).all()
-    expired = 0
-    for confirmation in rows:
-        run = session.get(WorkflowRun, confirmation.run_id)
-        if not run or run.status != "waiting_confirmation":
-            confirmation.status = "expired"
-            confirmation.decided_at = current
-            session.add(confirmation)
-            expired += 1
-            continue
-        confirmation.status = "expired"
-        confirmation.decision = "expired"
-        confirmation.decided_at = current
-        session.add(confirmation)
-        if confirmation.on_denied_step_id:
-            run.current_step_id = confirmation.on_denied_step_id
-            run.status = "running"
-            run.next_wakeup_at = current
-            run.updated_at = current
-            run.lock_version += 1
-            session.add(run)
-        else:
-            fail_run(
-                session,
-                run,
-                error_payload("CONFIRMATION_DENIED", "workflow confirmation expired", "confirmation"),
-                status="cancelled",
-            )
-        add_audit(
-            session,
-            event_type="confirmation_expired",
-            run=run,
-            step_id=confirmation.step_id,
-            status_from="waiting_confirmation",
-            status_to=run.status,
-        )
-        expired += 1
-    if rows:
-        session.commit()
-    return expired
+    return resolve_target_arguments(step, context, rendered)
 
 
 def _handle_step_error(

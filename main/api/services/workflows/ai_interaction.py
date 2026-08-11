@@ -23,11 +23,19 @@ from api.models import (
 from .audit import add_audit
 from .interaction_steps import AI_INTERVENTION_TOOL, is_ai_intervention_step
 from .permissions import WorkflowDispatchError, validate_run_device
-from .run_service import _redact, advance_run, confirmation_payload, create_run, error_payload, fail_run
+from .run_service import (
+    _redact,
+    advance_run,
+    confirmation_payload,
+    create_run,
+    error_payload,
+    fail_run,
+    renew_dispatch_step_deadline,
+)
 from .secrets import decrypt_json
 
 
-INTERACTION_TYPES = {"ai_review", "user_via_ai"}
+INTERACTION_TYPES = {"ai_review", "user_via_ai", "user_via_ai_dispatch"}
 ACTIVE_RUN_STATUSES = {
     "pending", "running", "waiting_device", "waiting_confirmation", "waiting_ai",
     "retry_wait", "paused_offline", "paused",
@@ -275,11 +283,20 @@ def retry_validated_run(
     )
 
 
-def _apply_approved_response(run: WorkflowRun, item: WorkflowConfirmation, response: Dict[str, Any]) -> None:
+def _apply_approved_response(
+    session: Session,
+    run: WorkflowRun,
+    item: WorkflowConfirmation,
+    response: Dict[str, Any],
+) -> None:
     if item.confirmation_type == "ai_review" and item.save_as:
         variables = _load(run.variables_json, {"steps": {}})
         variables.setdefault("steps", {})[item.save_as] = {"result": response["parameters"], "error": None}
         run.variables_json = _dump(variables)
+    if item.confirmation_type == "user_via_ai_dispatch":
+        run.status = "waiting_device"
+        renew_dispatch_step_deadline(session, run, item.step_id)
+        return
     run.current_step_id = item.next_step_id
     run.status = "running"
 
@@ -324,7 +341,7 @@ def respond_ai_interaction(
     item.response_json = _dump(response)
     item.decided_at = now
     session.add(item)
-    _apply_approved_response(run, item, response) if approved else _apply_denied_response(session, run, item)
+    _apply_approved_response(session, run, item, response) if approved else _apply_denied_response(session, run, item)
     if run.status not in {"failed", "cancelled", "timed_out"}:
         run.next_wakeup_at = now
         run.updated_at = now

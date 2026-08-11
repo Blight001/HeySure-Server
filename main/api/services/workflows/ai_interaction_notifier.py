@@ -41,7 +41,8 @@ def _notice_content(run: WorkflowRun, item: WorkflowConfirmation) -> str:
     else:
         lines.extend([
             "请主动向用户发送上述确认问题，不要代替用户作决定。",
-            "收到用户明确答复后调用 automation.respond，并按答复设置 approved。",
+            "先用 automation.manage action=status 核对门禁仍在等待；用户也可能已在网页处理。",
+            "收到用户明确答复后调用 automation.manage，action=respond，并按答复设置 approved。",
         ])
     lines.append("回调必须携带本消息中的 run_id。")
     return "\n".join(lines)
