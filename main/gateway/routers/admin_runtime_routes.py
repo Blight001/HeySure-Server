@@ -130,6 +130,30 @@ def stop_task(
     return {"ok": True, "run_id": run_id, "status": run.status}
 
 
+@router.post("/services/rebuild-all")
+def rebuild_all_services(
+    session: Session = Depends(get_session),
+    admin: User = Depends(require_admin_user),
+) -> dict:
+    from api.services import repo_rebuild
+
+    try:
+        payload = repo_rebuild.rebuild_all_containers()
+    except repo_rebuild.RepoUpdateError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    _record_audit(
+        session,
+        admin,
+        "rebuild_all_services",
+        target_type="service",
+        target_id="all",
+        target_label="全部容器",
+        detail="重构全部 Docker 容器",
+    )
+    logger.warning("admin %s triggered rebuild of all containers", admin.account)
+    return {"ok": True, "started": True, **payload}
+
+
 @router.post("/services/{key}/restart")
 def restart_service(
     key: str,

@@ -272,6 +272,25 @@ def _compose_rebuild() -> None:
         _append_log(f"更新失败：{exc}")
 
 
+def _rebuild_worker() -> None:
+    try:
+        _compose_rebuild()
+    finally:
+        _lock.release()
+
+
+def _queue_rebuild() -> dict[str, Any]:
+    if not _lock.acquire(blocking=False):
+        return {"ok": False, "busy": True, "error": "another update or rebuild is already running", "state": dict(_state)}
+    if _state.get("running"):
+        _lock.release()
+        return {"ok": False, "busy": True, "error": "another update or rebuild is already running", "state": dict(_state)}
+    _set_state(running=True, phase="queued_restart", message="manual compose rebuild queued", last_error="", logs=[])
+    _append_log("管理员已请求重构全部 Docker 容器")
+    threading.Thread(target=_rebuild_worker, name="heysure-compose-rebuild", daemon=True).start()
+    return {"ok": True, "started": True, "state": dict(_state)}
+
+
 def _check_and_update(apply: bool) -> dict[str, Any]:
     if not _lock.acquire(blocking=False):
         return {"ok": False, "busy": True, "state": dict(_state)}
@@ -380,10 +399,13 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode("utf-8") or "{}")
         except ValueError:
             payload = {}
-        if self.path != "/check":
+        if self.path == "/check":
+            self._json(200, _check_and_update(bool(payload.get("apply", True))))
+        elif self.path == "/rebuild":
+            result = _queue_rebuild()
+            self._json(409 if result.get("busy") else 200, result)
+        else:
             self._json(404, {"ok": False, "error": "not found"})
-            return
-        self._json(200, _check_and_update(bool(payload.get("apply", True))))
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {self.address_string()} {fmt % args}", flush=True)

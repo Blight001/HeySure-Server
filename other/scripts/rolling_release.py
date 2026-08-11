@@ -9,6 +9,7 @@ retagged and recreated before the command exits non-zero.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from typing import Optional
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+COMPOSE_ROOT = Path(os.environ.get("HEYSURE_COMPOSE_DIR", str(WORKSPACE_ROOT))).resolve()
 SERVICES = (
     ("api-gateway", 3000),
     ("mcp-runtime", 3001),
@@ -28,7 +30,7 @@ SERVICES = (
 def command(*args: str, capture: bool = False, check: bool = True) -> str:
     result = subprocess.run(
         args,
-        cwd=WORKSPACE_ROOT,
+        cwd=COMPOSE_ROOT,
         check=False,
         text=True,
         capture_output=capture,
@@ -68,7 +70,7 @@ def wait_ready(service: str, port: int, timeout: float) -> None:
     while time.monotonic() < deadline:
         result = subprocess.run(
             ["docker", "compose", "exec", "-T", service, "sh", "-c", probe],
-            cwd=WORKSPACE_ROOT,
+            cwd=COMPOSE_ROOT,
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

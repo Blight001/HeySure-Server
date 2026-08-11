@@ -7,6 +7,7 @@ def test_admin_runtime_router_exposes_expected_paths():
     paths = {route.path for route in admin_runtime_routes.router.routes}
     assert paths == {
         "/services",
+        "/services/rebuild-all",
         "/services/restart-all",
         "/services/{key}/logs",
         "/services/{key}/restart",
