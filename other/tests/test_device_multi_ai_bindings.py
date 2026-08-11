@@ -1,7 +1,7 @@
 from sqlalchemy.pool import StaticPool
 from sqlmodel import create_engine
 
-from api.devices import bindings, mcp_permissions
+from api.devices import bindings, live, mcp_permissions
 from api.models import DeviceAiBinding, DeviceTypeMcpPermission
 from connector_runtime.dispatch import desktop_device_tools
 
@@ -73,3 +73,25 @@ def test_dispatch_selects_only_a_device_that_allows_the_member_tool(monkeypatch)
     selected = desktop_device_tools.get_connected_desktop_agent(11, 1, tool="touch.tap")
 
     assert selected and selected["id"] == "phone-allowed"
+
+
+def test_endpoint_binding_overlay_preserves_builtin_toolbox_members(monkeypatch):
+    monkeypatch.setattr(
+        bindings,
+        "bindings_by_device_for_user",
+        lambda _user_id: {"phone-1": [12]},
+    )
+    rows = [
+        {
+            "id": "toolbox_builtin_1",
+            "deviceType": "toolbox",
+            "isToolbox": True,
+            "boundAiConfigIds": [11, 12],
+        },
+        {"id": "phone-1", "deviceType": "android", "boundAiConfigIds": []},
+    ]
+
+    live._apply_endpoint_bindings(rows, 1)
+
+    assert rows[0]["boundAiConfigIds"] == [11, 12]
+    assert rows[1]["boundAiConfigIds"] == [12]

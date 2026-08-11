@@ -22,7 +22,11 @@ def _apply_endpoint_bindings(rows: list[dict], user_id: int) -> None:
     endpoint_bindings = bindings_by_device_for_user(user_id)
     for row in rows:
         device_type = str(row.get("deviceType") or row.get("device_type") or "").lower()
-        if device_type in ("workshop", "toolbox"):
+        if (
+            device_type in ("workshop", "toolbox")
+            or bool(row.get("isWorkshop"))
+            or bool(row.get("isToolbox"))
+        ):
             continue
         bound_ids = endpoint_bindings.get(str(row.get("id") or "").strip(), [])
         row["boundAiConfigIds"] = bound_ids

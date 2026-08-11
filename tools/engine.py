@@ -127,6 +127,7 @@ def toolbox_connected_entry_for_user(user_id) -> Dict[str, Any]:
         "id": toolbox_device_id_for_user(user_id),
         "name": TOOLBOX_DISPLAY_NAME,
         "platform": TOOLBOX_PLATFORM,
+        "deviceType": "toolbox",
         "isWorkshop": True,
         "isToolbox": True,
         "aiConfigId": None,
