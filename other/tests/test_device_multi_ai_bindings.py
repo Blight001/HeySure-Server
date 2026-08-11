@@ -4,6 +4,7 @@ from sqlmodel import create_engine
 from api.devices import bindings, live, mcp_permissions
 from api.models import DeviceAiBinding, DeviceTypeMcpPermission
 from connector_runtime.dispatch import desktop_device_tools
+from library import engine as library_engine
 
 
 def _memory_engine():
@@ -75,7 +76,7 @@ def test_dispatch_selects_only_a_device_that_allows_the_member_tool(monkeypatch)
     assert selected and selected["id"] == "phone-allowed"
 
 
-def test_endpoint_binding_overlay_preserves_builtin_toolbox_members(monkeypatch):
+def test_endpoint_binding_overlay_preserves_builtin_device_members(monkeypatch):
     monkeypatch.setattr(
         bindings,
         "bindings_by_device_for_user",
@@ -88,10 +89,34 @@ def test_endpoint_binding_overlay_preserves_builtin_toolbox_members(monkeypatch)
             "isToolbox": True,
             "boundAiConfigIds": [11, 12],
         },
+        {
+            "id": "workshop_builtin_1",
+            "deviceType": "workshop",
+            "isWorkshop": True,
+            "boundAiConfigIds": [11],
+        },
         {"id": "phone-1", "deviceType": "android", "boundAiConfigIds": []},
     ]
 
     live._apply_endpoint_bindings(rows, 1)
 
     assert rows[0]["boundAiConfigIds"] == [11, 12]
-    assert rows[1]["boundAiConfigIds"] == [12]
+    assert rows[1]["boundAiConfigIds"] == [11]
+    assert rows[2]["boundAiConfigIds"] == [12]
+
+
+def test_builtin_library_snapshot_exposes_normalized_device_type(monkeypatch):
+    monkeypatch.setattr(
+        "api.devices.workshop_bindings.bound_config_ids_for_agent",
+        lambda _user_id, _device_id: [11],
+    )
+    monkeypatch.setattr(
+        "api.services.knowledge.library_mcp_catalog.library_mcp_full_payload",
+        lambda _user_id: {},
+    )
+
+    row = library_engine.connected_entry_for_user(1)
+
+    assert row["deviceType"] == "workshop"
+    assert row["isWorkshop"] is True
+    assert row["boundAiConfigIds"] == [11]

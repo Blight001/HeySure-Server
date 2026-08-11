@@ -144,6 +144,7 @@ def connected_entry_for_user(user_id) -> Dict[str, Any]:
         "id": device_id_for_user(user_id),
         "name": WORKSHOP_DISPLAY_NAME,
         "platform": WORKSHOP_PLATFORM,
+        "deviceType": "workshop",
         "isWorkshop": True,
         "aiConfigId": bound_cfg_id,
         "boundAiConfigIds": bound_cfg_ids,
