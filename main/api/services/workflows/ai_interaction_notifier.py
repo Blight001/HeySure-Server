@@ -22,6 +22,15 @@ from api.models import (
 from .ai_interaction import INTERACTION_TYPES
 
 
+def _origin_chat_run_id(run: WorkflowRun) -> str:
+    try:
+        variables = json.loads(run.variables_json or "{}")
+    except Exception:
+        return ""
+    origin = variables.get("_chat_origin") if isinstance(variables, dict) else None
+    return str(origin.get("run_id") or "").strip() if isinstance(origin, dict) else ""
+
+
 def _ai_kind(config: AssistantAIConfig) -> str:
     return "assistant" if config.ai_role == "assistant_admin" else "core"
 
@@ -87,6 +96,15 @@ def _enqueue_notice(session: Session, item: WorkflowConfirmation) -> bool:
     )).first()
     run = session.get(WorkflowRun, item.run_id)
     if not config or not run:
+        return False
+    # A workflow started from an active chat MCP call is already being waited
+    # on by that exact ChatRun.  Never create a workflow_interaction_* session:
+    # doing so loses the original model context and lets two turns race.
+    origin_run_id = _origin_chat_run_id(run)
+    if origin_run_id:
+        item.notified_at = item.notified_at or time.time()
+        item.notification_run_id = origin_run_id
+        session.add(item)
         return False
     chat = _ensure_session(session, item, config)
     content = _notice_content(run, item)

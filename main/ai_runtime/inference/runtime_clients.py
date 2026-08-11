@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+from api.core.settings import settings
 from api.runtime.internal_http import internal_headers, internal_post
 from api.runtime.run_context import get_run_session_context
 from connector_runtime.dispatch.device_dispatch import dispatch_endpoint_tool_and_wait
@@ -13,6 +14,14 @@ from connector_runtime.dispatch.device_dispatch import dispatch_endpoint_tool_an
 LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT = 900
 ENDPOINT_RESULT_DELIVERY_GRACE = 120
 ENDPOINT_DISPATCH_TIMEOUT_CAP = 1800
+WORKFLOW_CHAT_WAIT_GRACE_SECONDS = 300
+
+
+def mcp_call_timeout(tool: str, arguments: dict) -> float:
+    action = str((arguments or {}).get("action") or "").strip().lower()
+    if tool == "automation.manage" and action in {"start", "run"}:
+        return float(settings.workflow_confirmation_timeout_seconds + WORKFLOW_CHAT_WAIT_GRACE_SECONDS)
+    return 120.0
 
 
 async def call_mcp_via_runtime(
@@ -31,7 +40,12 @@ async def call_mcp_via_runtime(
     run_ctx = get_run_session_context()
     if run_ctx:
         body["session_context"] = run_ctx
-    return await internal_post(runtime_url, "/internal/mcp/call", json=body, timeout=120.0)
+    return await internal_post(
+        runtime_url,
+        "/internal/mcp/call",
+        json=body,
+        timeout=mcp_call_timeout(tool, arguments),
+    )
 
 
 async def dispatch_endpoint_in_process(

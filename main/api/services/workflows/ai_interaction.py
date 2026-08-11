@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from sqlmodel import Session, select
 
@@ -31,6 +31,7 @@ from .run_service import (
     error_payload,
     fail_run,
     renew_dispatch_step_deadline,
+    RunActorContext,
 )
 from .secrets import decrypt_json
 
@@ -228,7 +229,7 @@ def create_validated_run(
     input_value: Dict[str, Any],
     version_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
-    actor: Tuple[str, str] = ("user", ""),
+    actor: RunActorContext = RunActorContext(),
 ) -> WorkflowRun:
     if idempotency_key:
         existing = session.exec(select(WorkflowRun).where(
@@ -258,8 +259,7 @@ def create_validated_run(
         input_value=input_value,
         version_id=version_id,
         idempotency_key=idempotency_key,
-        actor_type=actor[0],
-        actor_id=actor[1],
+        actor=actor,
     )
 
 

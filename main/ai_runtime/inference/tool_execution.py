@@ -12,6 +12,7 @@ from api.core.settings import settings
 from api.runtime.async_bridge import run_async
 from ai_runtime.inference.runtime_clients import (
     call_mcp_via_runtime,
+    mcp_call_timeout,
     dispatch_endpoint_in_process,
     dispatch_endpoint_via_runtime,
     endpoint_dispatch_timeout,
@@ -156,6 +157,8 @@ def execute_tool_call(
             # Let the endpoint's inner result deadline win instead of the
             # async bridge's generic 120-second timeout.
             bridge_timeout = endpoint_dispatch_timeout(tool, arguments) + 30
+        elif tool == "automation.manage" and str(arguments.get("action") or "").lower() in {"start", "run"}:
+            bridge_timeout = mcp_call_timeout(tool, arguments) + 30
         result = run_async(
             call_mcp_or_endpoint_tool(tool, user_id, arguments, ai_config_id),
             timeout=bridge_timeout,

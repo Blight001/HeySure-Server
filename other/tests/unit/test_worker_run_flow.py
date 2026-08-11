@@ -125,6 +125,7 @@ def test_create_initializes_task_notice_and_runtime_context(monkeypatch):
         if isinstance(item, tuple) and item[0] == "context"
     )
     assert runtime_context["current_user_message_id"] == 11
+    assert runtime_context["run_id"] == "run-a"
 
 
 def test_create_recovers_and_reanchors_active_plan(monkeypatch):

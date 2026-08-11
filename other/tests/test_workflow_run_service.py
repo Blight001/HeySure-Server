@@ -36,6 +36,7 @@ from api.services.workflows.run_service import (
     create_run,
     decide_confirmation,
     request_confirmation,
+    RunActorContext,
 )
 from api.services.workflows.expression import resolve_target_arguments
 from api.services.workflows.step_device_binding import step_run_device_id
@@ -47,6 +48,7 @@ from api.services.workflows.ai_interaction import (
     respond_ai_interaction,
 )
 from api.services.workflows.ai_interaction_notifier import process_pending_ai_interactions
+from tools.automation import _wait_for_original_chat_run
 
 
 def _database():
@@ -193,7 +195,7 @@ def test_ai_mediated_dispatch_confirmation_can_resume_the_pending_step():
         user, card = _seed(session, definition)
         run = create_run(
             session, user_id=user.id, card_id=card.id, device_id="device", input_value={},
-            actor_type="ai", actor_id="9",
+            actor=RunActorContext(actor_type="ai", actor_id="9"),
         )
         advance_run(session, run.id)
         request_confirmation(
@@ -284,7 +286,7 @@ def test_ai_step_callback_parameters_continue_as_a_step_result():
         user, card = _seed(session, definition)
         run = create_validated_run(
             session, user_id=user.id, card_id=card.id, device_id="device", input_value={},
-            actor=("ai", "9"),
+            actor=RunActorContext(actor_type="ai", actor_id="9"),
         )
         advance_interactive_run(session, run.id)
         session.refresh(run)
@@ -355,6 +357,114 @@ def test_ai_interaction_enqueues_a_durable_ai_turn(monkeypatch):
         assert queued.status == "queued"
         assert confirmation.notified_at is not None
         assert confirmation.notification_run_id == queued.run_id
+
+
+def test_originating_chat_run_suppresses_takeover_conversation(monkeypatch):
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "confirm",
+        "steps": {
+            "confirm": {"type": "confirm", "message": "请确认继续", "next": "finish"},
+            "finish": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 3}, "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(
+            session,
+            user_id=user.id,
+            card_id=card.id,
+            device_id="device",
+            input_value={},
+            actor=RunActorContext(
+                actor_type="ai",
+                actor_id="9",
+                initial_variables={
+                    "_chat_origin": {"run_id": "chat-run-original", "session_id": "chat-session-original"}
+                },
+            ),
+        )
+        advance_interactive_run(session, run.id)
+        workflow_run_id = run.id
+    monkeypatch.setattr("api.services.workflows.ai_interaction_notifier.engine", engine)
+
+    assert process_pending_ai_interactions() == 0
+    with Session(engine) as session:
+        assert session.exec(select(ChatSession)).all() == []
+        assert session.exec(select(ChatRun)).all() == []
+        confirmation = session.exec(select(WorkflowConfirmation).where(
+            WorkflowConfirmation.run_id == workflow_run_id,
+        )).one()
+        assert confirmation.notification_run_id == "chat-run-original"
+        assert confirmation.notified_at is not None
+
+
+def test_original_chat_wait_returns_only_after_workflow_terminal(monkeypatch):
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "finish",
+        "steps": {"finish": {"type": "end"}},
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 2}, "output": {"ok": True},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(
+            session, user_id=user.id, card_id=card.id, device_id="device", input_value={}
+        )
+        workflow_run_id = run.id
+    monkeypatch.setattr("tools.automation.engine", engine)
+    sleeps = []
+
+    def finish_on_first_poll(_seconds):
+        sleeps.append(True)
+        with Session(engine) as session:
+            advance_interactive_run(session, workflow_run_id)
+
+    monkeypatch.setattr("tools.automation.time.sleep", finish_on_first_poll)
+
+    payload = _wait_for_original_chat_run(workflow_run_id, 9, poll_seconds=0.1)
+
+    assert sleeps == [True]
+    assert payload["status"] == "succeeded"
+    assert payload["resumed_in_original_chat"] is True
+
+
+def test_stopping_origin_chat_cancels_parked_workflow(monkeypatch):
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "finish",
+        "steps": {"finish": {"type": "end"}},
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 2}, "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        session.add(ChatRun(
+            run_id="chat-run-stopped", user_id=user.id, ai_config_id=9,
+            ai_kind="core", session_id="chat-session", status="running",
+            stop_requested=True,
+        ))
+        run = create_run(
+            session,
+            user_id=user.id,
+            card_id=card.id,
+            device_id="device",
+            input_value={},
+            actor=RunActorContext(
+                actor_type="ai",
+                actor_id="9",
+                initial_variables={
+                    "_chat_origin": {"run_id": "chat-run-stopped", "session_id": "chat-session"}
+                },
+            ),
+        )
+        workflow_run_id = run.id
+    monkeypatch.setattr("tools.automation.engine", engine)
+
+    payload = _wait_for_original_chat_run(workflow_run_id, 9, poll_seconds=0.1)
+
+    assert payload["status"] == "cancelled"
+    assert payload["resumed_in_original_chat"] is True
 
 
 def test_run_preflight_rejects_offline_unbound_or_missing_mcp_device():

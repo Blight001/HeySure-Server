@@ -12,7 +12,9 @@ from sqlmodel import Session, select
 
 from api.core.settings import settings
 from api.database import engine
+from api.runtime.run_context import get_run_session_context
 from api.models import (
+    ChatRun,
     DevicePresence,
     WorkflowCard,
     WorkflowCardVersion,
@@ -31,7 +33,7 @@ from api.services.workflows.card_service import (
     version_payload,
 )
 from api.services.workflows.compiler import WorkflowValidationError
-from api.services.workflows.run_service import cancel_run, run_payload
+from api.services.workflows.run_service import RunActorContext, cancel_run, run_payload
 from api.services.workflows.schemas import CardCreate, CardUpdate
 from api.services.workflows.secrets import decrypt_json
 from api.services.workflows.trace import definition_from_trace
@@ -303,7 +305,66 @@ def _run_for_ai(
     raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
 
 
+def _chat_origin() -> Dict[str, str]:
+    context = get_run_session_context() or {}
+    run_id = str(context.get("run_id") or "").strip()
+    session_id = str(context.get("session_id") or "").strip()
+    if not run_id or not session_id:
+        return {}
+    return {"run_id": run_id, "session_id": session_id}
+
+
+def _pending_interaction(session: Session, run_id: str) -> Optional[WorkflowConfirmation]:
+    return session.exec(select(WorkflowConfirmation).where(
+        WorkflowConfirmation.run_id == run_id,
+        WorkflowConfirmation.status == "pending",
+    ).order_by(WorkflowConfirmation.created_at.desc())).first()
+
+
+def _origin_chat_stopped(session: Session, row: WorkflowRun) -> bool:
+    variables = _load(row.variables_json, {})
+    origin = variables.get("_chat_origin") if isinstance(variables, dict) else None
+    origin_run_id = str(origin.get("run_id") or "").strip() if isinstance(origin, dict) else ""
+    chat_run = session.exec(select(ChatRun).where(ChatRun.run_id == origin_run_id)).first()
+    return bool(chat_run and chat_run.stop_requested)
+
+
+def _wait_for_original_chat_run(
+    run_id: str,
+    ai_config_id: Optional[int],
+    *,
+    poll_seconds: float = 0.5,
+) -> Dict[str, Any]:
+    """Keep the originating MCP call parked until the workflow is done.
+
+    AI-only review gates are returned to the same model immediately so it can
+    decide them with its intact context. Human gates remain inside this call;
+    the web decision and all remaining deterministic card steps happen while
+    the chat UI stays in ``waiting_mcp``.
+    """
+    while True:
+        with Session(engine) as session:
+            row = session.get(WorkflowRun, run_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
+            if _origin_chat_stopped(session, row):
+                row = cancel_run(session, row, "originating chat run was stopped")
+            payload = run_payload(row)
+            if row.status in TERMINAL_RUN_STATUSES:
+                payload["resumed_in_original_chat"] = True
+                return payload
+            pending = _pending_interaction(session, row.id)
+            if pending and pending.confirmation_type == "ai_review":
+                payload["pending_confirmation"] = _pending_confirmation_guidance(
+                    pending, ai_config_id
+                )
+                payload["resumed_in_original_chat"] = True
+                return payload
+        time.sleep(max(0.1, poll_seconds))
+
+
 def _start_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+    origin = _chat_origin()
     with Session(engine) as session:
         _accessible_card(
             session,
@@ -321,11 +382,18 @@ def _start_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) 
                 input_value=args.get("input") if isinstance(args.get("input"), dict) else {},
                 version_id=str(args.get("version_id") or "") or None,
                 idempotency_key=str(args.get("idempotency_key") or "") or None,
-                actor=("ai", str(ai_config_id)) if ai_config_id else ("user", str(user_id)),
+                actor=RunActorContext(
+                    actor_type="ai" if ai_config_id else "user",
+                    actor_id=str(ai_config_id or user_id),
+                    initial_variables={"_chat_origin": origin} if origin else {},
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        return run_payload(row)
+        payload = run_payload(row)
+    if origin:
+        return _wait_for_original_chat_run(row.id, ai_config_id)
+    return payload
 
 
 def _list_runs(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
@@ -457,7 +525,10 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
                     input_value=decrypt_json(run.input_json),
                     version_id=run.card_version_id,
                     idempotency_key=str(args.get("idempotency_key") or "") or f"retry:{run.id}:{uuid.uuid4().hex}",
-                    actor=("ai", str(ai_config_id)) if ai_config_id else ("user", str(user_id)),
+                    actor=RunActorContext(
+                        actor_type="ai" if ai_config_id else "user",
+                        actor_id=str(ai_config_id or user_id),
+                    ),
                 ))
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc))
@@ -522,7 +593,8 @@ AUTOMATION_MANAGE_SCHEMA = {
                 "list_runs", "status", "pause", "resume", "cancel", "retry", "respond",
             ],
             "description": (
-                "唯一动作选择器；start 启动，status 查看运行且会返回 pending_confirmation；"
+                "唯一动作选择器；聊天中的 start 会停留在当前 MCP 调用，等待真人网页确认并持续到卡片终态，"
+                "不要重复轮询 status；status 查看已有运行且会返回 pending_confirmation；"
                 "respond 仅处理分配给当前 AI 的 waiting_ai 交互，真人门禁会明确返回 user_confirmation；"
                 "pause/resume 暂停恢复，edit 编辑卡片。"
             ),

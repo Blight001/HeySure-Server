@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, NamedTuple, Optional
 
 from jsonschema import Draft202012Validator
 from sqlmodel import Session, select
@@ -39,6 +39,12 @@ from .workflow_cancellation import (
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
 SENSITIVE_KEYS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey"}
 MAX_PROJECTED_RESULT_BYTES = 64 * 1024
+
+
+class RunActorContext(NamedTuple):
+    actor_type: str = "user"
+    actor_id: str = ""
+    initial_variables: Optional[Dict[str, Any]] = None
 
 
 def _dump(value: Any) -> str:
@@ -166,8 +172,7 @@ def create_run(
     input_value: Dict[str, Any],
     version_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
-    actor_type: str = "user",
-    actor_id: str = "",
+    actor: RunActorContext = RunActorContext(),
 ) -> WorkflowRun:
     key = str(idempotency_key or f"auto:{uuid.uuid4().hex}").strip()
     existing = session.exec(
@@ -212,13 +217,13 @@ def create_run(
         card_id=card.id,
         card_version_id=version.id,
         user_id=user_id,
-        actor_type=actor_type,
-        actor_id=actor_id or str(user_id),
+        actor_type=actor.actor_type,
+        actor_id=actor.actor_id or str(user_id),
         device_id=device_id,
         status="pending",
         current_step_id=str(definition["startStepId"]),
         input_json=encrypt_json(input_value),
-        variables_json=_dump({"steps": {}}),
+        variables_json=_dump({"steps": {}, **(actor.initial_variables or {})}),
         deadline_at=now + timeout,
         next_wakeup_at=now,
         idempotency_key=key,
@@ -809,6 +814,5 @@ def retry_failed_run(
         input_value=decrypt_json(run.input_json),
         version_id=run.card_version_id,
         idempotency_key=idempotency_key or f"retry:{run.id}:{uuid.uuid4().hex}",
-        actor_type="user",
-        actor_id=str(user_id),
+        actor=RunActorContext(actor_type="user", actor_id=str(user_id)),
     )

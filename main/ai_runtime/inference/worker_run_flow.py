@@ -131,6 +131,7 @@ class WorkerRunMachine:
     def _set_runtime_context(self) -> None:
         request = self.request
         run_context.set_run_session_context({
+            "run_id": request.run_id,
             "user_id": request.user_id,
             "ai_config_id": request.ai_config_id,
             "ai_kind": request.ai_kind,
