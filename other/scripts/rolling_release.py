@@ -1,9 +1,9 @@
 """Readiness-gated Compose release with per-service image rollback.
 
-Run from any directory after CI passes. The script migrates once, builds the
-shared server image, replaces one runtime at a time, and never advances until
-the new container reports ready. On failure the service's previous image is
-retagged and recreated before the command exits non-zero.
+Run from any directory after CI passes. The script builds the migration and
+runtime images first, migrates once, replaces one runtime at a time, and never
+advances until the new container reports ready. An old image is restored only
+when the database revision did not change during this release.
 """
 
 from __future__ import annotations
@@ -90,10 +90,25 @@ def rollback(service: str, previous: Optional[PreviousImage], timeout: float, po
     wait_ready(service, port, timeout)
 
 
+def database_revision() -> str:
+    query = 'SELECT version_num FROM alembic_version ORDER BY version_num'
+    return compose(
+        "exec",
+        "-T",
+        "db",
+        "sh",
+        "-c",
+        f'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "{query}"',
+        capture=True,
+    )
+
+
 def release(timeout: float) -> None:
     compose("up", "-d", "db")
+    compose("build", "db-migrate", *(service for service, _port in SERVICES))
+    revision_before = database_revision()
     compose("run", "--rm", "db-migrate")
-    compose("build", *(service for service, _port in SERVICES))
+    revision_changed = database_revision() != revision_before
     for service, port in SERVICES:
         previous = previous_image(service)
         try:
@@ -101,8 +116,14 @@ def release(timeout: float) -> None:
             wait_ready(service, port, timeout)
             print(f"ready: {service}")
         except Exception:
-            print(f"release failed: {service}; restoring previous image")
-            rollback(service, previous, timeout, port)
+            if revision_changed:
+                print(
+                    f"release failed: {service}; database revision advanced, "
+                    "so the schema-incompatible previous image was not restored"
+                )
+            else:
+                print(f"release failed: {service}; restoring previous image")
+                rollback(service, previous, timeout, port)
             raise
 
 
