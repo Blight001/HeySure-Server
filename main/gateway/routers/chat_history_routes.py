@@ -380,6 +380,7 @@ def _forward_readiness_warning(session: Session, user_id: int, ai_config_id: Opt
 async def get_total_tokens(
     ai_config_id: Optional[int] = None,
     ai_kind: str = "assistant",
+    session_id: Optional[str] = None,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
 ):
@@ -396,6 +397,8 @@ async def get_total_tokens(
     )
     if ai_config_id is not None:
         agg_stmt = agg_stmt.where(ChatMessage.ai_config_id == ai_config_id)
+    if session_id is not None:
+        agg_stmt = agg_stmt.where(ChatMessage.session_id == session_id)
     total_prompt_tokens, total_completion_tokens, total_all_tokens, message_count = (
         session.exec(agg_stmt).one()
     )
@@ -404,6 +407,7 @@ async def get_total_tokens(
         user_id=user.id,
         ai_kind=ai_kind,
         ai_config_id=ai_config_id,
+        session_id=session_id,
     )
 
     return {
