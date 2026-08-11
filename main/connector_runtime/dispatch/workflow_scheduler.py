@@ -53,6 +53,26 @@ async def _emit_updated_runs(since: float) -> None:
         await sio.emit("workflow:run_update", run_payload(row), room=f"user_{row.user_id}")
 
 
+async def _emit_confirmation_updates(since: float) -> None:
+    from api.sio import sio
+    from api.services.workflows.confirmation_notifications import notification_events_since, notification_room
+
+    with Session(engine) as session:
+        requested, resolved = notification_events_since(session, since=since)
+    for payload in requested:
+        await sio.emit(
+            "workflow:confirmation_requested",
+            payload,
+            room=notification_room(payload["requested_user_id"]),
+        )
+    for payload in resolved:
+        await sio.emit(
+            "workflow:confirmation_resolved",
+            payload,
+            room=notification_room(payload["requested_user_id"]),
+        )
+
+
 def _advance_ready_runs(limit: int = 100) -> int:
     now = time.time()
     with Session(engine) as session:
@@ -111,6 +131,7 @@ async def run_workflow_scheduler(stop_event: asyncio.Event) -> None:
             _advance_ready_runs()
             process_pending_ai_interactions()
             await dispatch_pending_steps()
+            await _emit_confirmation_updates(last_emit)
             await _emit_updated_runs(last_emit)
             last_emit = tick_started
             if tick_started - last_cleanup >= 3600:

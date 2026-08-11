@@ -66,14 +66,14 @@ def request_confirmation(
         expires_at=min(run.deadline_at, now + max(1, int(timeout_seconds))),
     )
     previous = run.status
-    run.status = "waiting_ai" if ai_config_id else "waiting_confirmation"
+    run.status = "waiting_confirmation"
     run.next_wakeup_at = row.expires_at
     run.updated_at = now
     run.lock_version += 1
     session.add(row)
     session.add(run)
     add_audit(
-        session, event_type="ai_interaction_requested" if ai_config_id else "confirmation_requested",
+        session, event_type="confirmation_requested",
         run=run, step_id=step_id, status_from=previous, status_to=run.status,
         detail={"confirmation_id": row.id, "type": confirmation_type, "risk_summary": risk_summary[:500]},
     )
@@ -168,7 +168,7 @@ def decide_confirmation(
     _approve(run, item, session, now) if approved else _deny(session, run, item, now)
     add_audit(
         session, event_type="confirmation_decided", run=run, step_id=item.step_id,
-        status_from="waiting_ai" if item.ai_config_id else "waiting_confirmation", status_to=run.status,
+        status_from="waiting_confirmation", status_to=run.status,
         detail={"confirmation_id": item.id, "decision": item.status},
     )
     session.commit()
@@ -180,6 +180,7 @@ def expire_confirmations(session: Session, now: Optional[float] = None, limit: i
     current = float(now or time.time())
     rows = session.exec(select(WorkflowConfirmation).where(
         WorkflowConfirmation.status == "pending",
+        WorkflowConfirmation.confirmation_type != "ai_review",
         WorkflowConfirmation.expires_at <= current,
     ).limit(limit)).all()
     for item in rows:

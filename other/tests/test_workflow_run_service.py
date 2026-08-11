@@ -35,6 +35,7 @@ from api.services.workflows.run_service import (
     confirmation_granted,
     create_run,
     decide_confirmation,
+    expire_confirmations,
     request_confirmation,
     RunActorContext,
 )
@@ -48,6 +49,10 @@ from api.services.workflows.ai_interaction import (
     respond_ai_interaction,
 )
 from api.services.workflows.ai_interaction_notifier import process_pending_ai_interactions
+from api.services.workflows.confirmation_notifications import (
+    notification_events_since,
+    pending_notifications,
+)
 from tools.automation import _wait_for_original_chat_run
 
 
@@ -122,10 +127,8 @@ def test_condition_delay_ai_mediated_confirmation_and_end_are_deterministic():
         advance_interactive_run(session, run.id)
         advance_interactive_run(session, run.id)
         session.refresh(run)
-        assert run.status == "waiting_ai"
-        respond_ai_interaction(
-            session, run=run, user_id=user.id, ai_config_id=7, approved=True,
-        )
+        assert run.status == "waiting_confirmation"
+        decide_confirmation(session, run=run, user_id=user.id, approved=True)
         advance_run(session, run.id)
         session.refresh(run)
         assert run.status == "succeeded"
@@ -208,9 +211,9 @@ def test_ai_mediated_dispatch_confirmation_can_resume_the_pending_step():
             next_step_id=RUN_CONFIRMATION_SCOPE,
         )
         session.commit()
-        assert run.status == "waiting_ai"
+        assert run.status == "waiting_confirmation"
 
-        respond_ai_interaction(session, run=run, user_id=user.id, ai_config_id=9, approved=True)
+        decide_confirmation(session, run=run, user_id=user.id, approved=True)
         assert run.status == "waiting_device"
         assert confirmation_granted(session, run.id, "call")
 
@@ -301,7 +304,7 @@ def test_ai_step_callback_parameters_continue_as_a_step_result():
         assert json.loads(run.output_json) == {"value": 42}
 
 
-def test_ai_mediated_confirmation_timeout_uses_denied_branch():
+def test_user_confirmation_timeout_uses_denied_branch():
     definition = {
         "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "confirm",
         "steps": {
@@ -323,17 +326,60 @@ def test_ai_mediated_confirmation_timeout_uses_denied_branch():
             WorkflowConfirmation.run_id == run.id,
         )).one()
 
-        assert expire_ai_interactions(session, now=confirmation.expires_at + 1) == 1
+        assert expire_confirmations(session, now=confirmation.expires_at + 1) == 1
         session.refresh(run)
         assert run.status == "running"
         assert run.current_step_id == "denied"
 
 
-def test_ai_interaction_enqueues_a_durable_ai_turn(monkeypatch):
+def test_user_confirmation_notification_snapshot_and_resolution_are_durable():
     definition = {
         "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "confirm",
         "steps": {
-            "confirm": {"type": "confirm", "message": "请确认继续", "next": "finish"},
+            "confirm": {"type": "confirm", "message": "发布前请核对公开内容", "next": "finish"},
+            "finish": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 3}, "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(
+            session, user_id=user.id, card_id=card.id, device_id="device", input_value={"secret": "hidden"},
+            actor=RunActorContext(actor_type="ai", actor_id="9"),
+        )
+        advance_interactive_run(session, run.id)
+        item = session.exec(select(WorkflowConfirmation).where(
+            WorkflowConfirmation.run_id == run.id,
+        )).one()
+
+        snapshot = pending_notifications(session, user_id=user.id, now=item.created_at)
+        assert len(snapshot) == 1
+        assert snapshot[0]["actor_name"] == "Running AI"
+        assert snapshot[0]["card_name"] == "Test"
+        assert "input" not in snapshot[0]
+        assert "arguments" not in snapshot[0]
+        requested, resolved = notification_events_since(session, since=item.created_at - 1)
+        assert [row["confirmation_id"] for row in requested] == [item.id]
+        assert resolved == []
+
+        decide_confirmation(session, run=run, user_id=user.id, approved=False)
+        requested, resolved = notification_events_since(session, since=item.created_at - 1)
+        assert requested == []
+        assert resolved[0]["confirmation_id"] == item.id
+        assert resolved[0]["status"] == "denied"
+        assert pending_notifications(session, user_id=user.id) == []
+
+
+def test_ai_interaction_enqueues_a_durable_ai_turn(monkeypatch):
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "review",
+        "steps": {
+            "review": {
+                "type": "mcp", "toolRef": {"namespace": "device", "name": AI_INTERVENTION_TOOL},
+                "arguments": {"prompt": "核对发布结果"}, "saveAs": "review",
+                "timeoutSeconds": 30, "next": "finish", "onError": "fail",
+            },
             "finish": {"type": "end"},
         },
         "limits": {"timeoutSeconds": 60, "maxTransitions": 3}, "output": {},
@@ -353,13 +399,13 @@ def test_ai_interaction_enqueues_a_durable_ai_turn(monkeypatch):
         confirmation = session.exec(select(WorkflowConfirmation).where(
             WorkflowConfirmation.run_id == workflow_run_id,
         )).one()
-        assert "主动向用户发送" in notice.content
+        assert "请核对说明与当前上下文" in notice.content
         assert queued.status == "queued"
         assert confirmation.notified_at is not None
         assert confirmation.notification_run_id == queued.run_id
 
 
-def test_originating_chat_run_suppresses_takeover_conversation(monkeypatch):
+def test_user_confirmation_never_creates_takeover_conversation(monkeypatch):
     definition = {
         "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "confirm",
         "steps": {
@@ -377,13 +423,7 @@ def test_originating_chat_run_suppresses_takeover_conversation(monkeypatch):
             card_id=card.id,
             device_id="device",
             input_value={},
-            actor=RunActorContext(
-                actor_type="ai",
-                actor_id="9",
-                initial_variables={
-                    "_chat_origin": {"run_id": "chat-run-original", "session_id": "chat-session-original"}
-                },
-            ),
+            actor=RunActorContext(actor_type="ai", actor_id="9"),
         )
         advance_interactive_run(session, run.id)
         workflow_run_id = run.id
@@ -396,8 +436,8 @@ def test_originating_chat_run_suppresses_takeover_conversation(monkeypatch):
         confirmation = session.exec(select(WorkflowConfirmation).where(
             WorkflowConfirmation.run_id == workflow_run_id,
         )).one()
-        assert confirmation.notification_run_id == "chat-run-original"
-        assert confirmation.notified_at is not None
+        assert confirmation.notification_run_id == ""
+        assert confirmation.notified_at is None
 
 
 def test_original_chat_wait_returns_only_after_workflow_terminal(monkeypatch):

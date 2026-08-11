@@ -1,4 +1,4 @@
-"""Durably enqueue an AI turn for each pending workflow interaction."""
+"""Durably enqueue an AI turn for each pending AI-review workflow step."""
 
 from __future__ import annotations
 
@@ -19,16 +19,7 @@ from api.models import (
     WorkflowRun,
 )
 
-from .ai_interaction import INTERACTION_TYPES
-
-
-def _origin_chat_run_id(run: WorkflowRun) -> str:
-    try:
-        variables = json.loads(run.variables_json or "{}")
-    except Exception:
-        return ""
-    origin = variables.get("_chat_origin") if isinstance(variables, dict) else None
-    return str(origin.get("run_id") or "").strip() if isinstance(origin, dict) else ""
+from .ai_interaction import AI_REVIEW_TYPES
 
 
 def _ai_kind(config: AssistantAIConfig) -> str:
@@ -42,17 +33,10 @@ def _notice_content(run: WorkflowRun, item: WorkflowConfirmation) -> str:
         f"- 步骤ID: {item.step_id}",
         f"- 请求说明: {item.risk_summary}",
     ]
-    if item.confirmation_type == "ai_review":
-        lines.extend([
-            "请核对说明与当前上下文；确认后调用 automation.manage，action=respond、approved=true。",
-            "如流程需要补充参数，请将参数对象放入 parameters；拒绝时 approved=false 并说明原因。",
-        ])
-    else:
-        lines.extend([
-            "请主动向用户发送上述确认问题，不要代替用户作决定。",
-            "先用 automation.manage action=status 核对门禁仍在等待；用户也可能已在网页处理。",
-            "收到用户明确答复后调用 automation.manage，action=respond，并按答复设置 approved。",
-        ])
+    lines.extend([
+        "请核对说明与当前上下文；确认后调用 automation.manage，action=respond、approved=true。",
+        "如流程需要补充参数，请将参数对象放入 parameters；拒绝时 approved=false 并说明原因。",
+    ])
     lines.append("回调必须携带本消息中的 run_id。")
     return "\n".join(lines)
 
@@ -97,15 +81,6 @@ def _enqueue_notice(session: Session, item: WorkflowConfirmation) -> bool:
     run = session.get(WorkflowRun, item.run_id)
     if not config or not run:
         return False
-    # A workflow started from an active chat MCP call is already being waited
-    # on by that exact ChatRun.  Never create a workflow_interaction_* session:
-    # doing so loses the original model context and lets two turns race.
-    origin_run_id = _origin_chat_run_id(run)
-    if origin_run_id:
-        item.notified_at = item.notified_at or time.time()
-        item.notification_run_id = origin_run_id
-        session.add(item)
-        return False
     chat = _ensure_session(session, item, config)
     content = _notice_content(run, item)
     if item.notified_at is None:
@@ -143,12 +118,12 @@ def _enqueue_notice(session: Session, item: WorkflowConfirmation) -> bool:
 
 
 def process_pending_ai_interactions(limit: int = 50) -> int:
-    """Create one durable AI turn per pending interaction, retrying while its session is busy."""
+    """Create one durable AI turn per pending AI review, retrying while its session is busy."""
     now = time.time()
     with Session(engine) as session:
         ids = session.exec(select(WorkflowConfirmation.id).where(
             WorkflowConfirmation.status == "pending",
-            WorkflowConfirmation.confirmation_type.in_(INTERACTION_TYPES),
+            WorkflowConfirmation.confirmation_type.in_(AI_REVIEW_TYPES),
             WorkflowConfirmation.ai_config_id.is_not(None),
             WorkflowConfirmation.notification_run_id == "",
             WorkflowConfirmation.expires_at > now,

@@ -221,6 +221,18 @@ async def _resume_owned_work(ctx: Registration) -> None:
     await emit_agent_list_for_user(ctx.user_id)
 
 
+async def _push_pending_confirmations(ctx: Registration) -> None:
+    """Backfill durable approvals that may have been created while this phone was offline."""
+    if ctx.user_id is None:
+        return
+    from api.services.workflows.confirmation_notifications import notification_room, pending_notifications
+
+    await sio.enter_room(ctx.sid, notification_room(ctx.user_id))
+    with Session(engine) as session:
+        items = pending_notifications(session, user_id=ctx.user_id)
+    await sio.emit("workflow:confirmation_snapshot", {"items": items}, to=ctx.sid)
+
+
 async def handle_agent_register(sid: str, raw_info: object) -> None:
     try:
         info = validated_payload(AgentRegistrationPayload, raw_info)
@@ -243,6 +255,10 @@ async def handle_agent_register(sid: str, raw_info: object) -> None:
         previous_full = False
         logger.exception("Failed to record endpoint agent presence: %s", ctx.device_id)
     await sio.emit("device:registered", {"id": ctx.device_id, "aiConfigId": ctx.ai_config_id}, to=sid)
+    try:
+        await _push_pending_confirmations(ctx)
+    except Exception:
+        logger.exception("Failed to backfill workflow confirmations: %s", ctx.device_id)
     try:
         await _push_dynamic_tools(ctx, previous_full)
     except Exception:

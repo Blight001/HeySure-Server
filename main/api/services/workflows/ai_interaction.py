@@ -36,7 +36,7 @@ from .run_service import (
 from .secrets import decrypt_json
 
 
-INTERACTION_TYPES = {"ai_review", "user_via_ai", "user_via_ai_dispatch"}
+AI_REVIEW_TYPES = {"ai_review"}
 ACTIVE_RUN_STATUSES = {
     "pending", "running", "waiting_device", "waiting_confirmation", "waiting_ai",
     "retry_wait", "paused_offline", "paused",
@@ -138,10 +138,10 @@ def _request_interaction(
         save_as=spec.save_as,
         expires_at=min(run.deadline_at, now + max(1, spec.timeout_seconds)),
     )
-    if not row.ai_config_id:
+    if spec.kind == "ai_review" and not row.ai_config_id:
         raise ValueError("AI_INTERACTION_UNAVAILABLE")
     previous = run.status
-    run.status = "waiting_ai"
+    run.status = "waiting_ai" if spec.kind == "ai_review" else "waiting_confirmation"
     run.next_wakeup_at = row.expires_at
     run.updated_at = now
     run.lock_version += 1
@@ -149,11 +149,11 @@ def _request_interaction(
     session.add(run)
     add_audit(
         session,
-        event_type="ai_interaction_requested",
+        event_type="ai_interaction_requested" if spec.kind == "ai_review" else "confirmation_requested",
         run=run,
         step_id=spec.step_id,
         status_from=previous,
-        status_to="waiting_ai",
+        status_to=run.status,
         detail={"confirmation_id": row.id, "type": spec.kind, "prompt": spec.prompt[:500]},
     )
     return row
@@ -352,7 +352,7 @@ def respond_ai_interaction(
         event_type="ai_interaction_decided",
         run=run,
         step_id=item.step_id,
-        status_from="waiting_ai",
+        status_from="waiting_ai" if item.confirmation_type == "ai_review" else "waiting_confirmation",
         status_to=run.status,
         detail={"confirmation_id": item.id, "decision": item.status},
     )
@@ -372,7 +372,7 @@ def expire_ai_interactions(session: Session, now: Optional[float] = None, limit:
     current = float(now or time.time())
     items = session.exec(select(WorkflowConfirmation).where(
         WorkflowConfirmation.status == "pending",
-        WorkflowConfirmation.confirmation_type.in_(INTERACTION_TYPES),
+        WorkflowConfirmation.confirmation_type.in_(AI_REVIEW_TYPES),
         WorkflowConfirmation.expires_at <= current,
     ).limit(limit)).all()
     for item in items:
