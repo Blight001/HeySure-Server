@@ -40,6 +40,12 @@ _RING_BUFFER_CAPACITY = 600
 # Order matters: more specific (key=value) patterns run before the broad
 # "looks like an API key" sweep.
 _REDACT_PATTERNS = (
+    # Temporary file capability URL. Keep the grant id for correlation, never
+    # print the bearer-like URL token in stdout or the admin log tail.
+    (
+        re.compile(r"(/api/tmp-files/fgrant_[a-f0-9]{32}/)[A-Za-z0-9_-]{40,80}"),
+        r"\1***",
+    ),
     # Authorization: Bearer <token>
     (re.compile(r"(?i)(bearer\s+)([A-Za-z0-9._\-]{6,})"), r"\1***"),
     # key/secret/token/password = "value"  (json or kv form)
@@ -56,6 +62,22 @@ _REDACT_PATTERNS = (
     # Tavily keys
     (re.compile(r"\btvly-[A-Za-z0-9]{6,}\b"), "tvly-***"),
 )
+
+
+class CapabilityUrlRedactionFilter(logging.Filter):
+    """Redact capability URL tokens before any handler formats the record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = redact_secrets(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(redact_secrets(item) if isinstance(item, str) else item for item in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: redact_secrets(value) if isinstance(value, str) else value
+                for key, value in record.args.items()
+            }
+        return True
 
 
 def redact_secrets(text: str) -> str:
@@ -263,6 +285,7 @@ def configure_logging() -> None:
     context_filter = RuntimeContextFilter(
         settings.service_role, state_for(settings.service_role).instance_id
     )
+    handler.addFilter(CapabilityUrlRedactionFilter())
     handler.addFilter(context_filter)
     _ring_buffer_handler.addFilter(context_filter)
 

@@ -136,6 +136,45 @@ def test_mcp_register_returns_small_model_send_example(tmp_path, monkeypatch):
     assert result["send_example"]["arguments"]["attachments"][0]["file_ref"] == result["file_ref"]
 
 
+def test_mcp_creates_and_revokes_default_five_minute_link(monkeypatch):
+    created_calls = []
+    monkeypatch.setattr(
+        workspace_file_tool,
+        "configured_public_base_url",
+        lambda: "https://files.example",
+    )
+    monkeypatch.setattr(
+        workspace_file_tool,
+        "create_temporary_file_link",
+        lambda **kwargs: created_calls.append(kwargs) or {
+            "grant_id": "fgrant_" + "a" * 32,
+            "url": "https://files.example/api/tmp-files/grant/token",
+        },
+    )
+    created = _workspace_file_manage(
+        1,
+        {"action": "create_temporary_link", "file_ref": "file_" + "b" * 32},
+        2,
+    )
+    assert created["grant_id"].startswith("fgrant_")
+    assert created_calls[0]["ttl_seconds"] == 300
+
+    revoked_calls = []
+    monkeypatch.setattr(
+        workspace_file_tool,
+        "revoke_temporary_file_link",
+        lambda **kwargs: revoked_calls.append(kwargs) or {"revoked": True},
+    )
+    revoked = _workspace_file_manage(
+        1,
+        {"action": "revoke_temporary_link", "grant_id": created["grant_id"]},
+        2,
+    )
+    assert revoked["revoked"] is True
+    assert revoked_calls[0]["user_id"] == 1
+    assert revoked_calls[0]["ai_config_id"] == 2
+
+
 def test_import_chat_media_saves_bytes_without_exposing_database_blob(monkeypatch):
     row = SimpleNamespace(
         user_id=1,

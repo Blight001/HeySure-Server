@@ -14,6 +14,11 @@ from api.services.storage.workspace_files import (
     save_workspace_bytes,
     unregister_file_ref,
 )
+from api.services.storage.temporary_file_links import (
+    configured_public_base_url,
+    create_temporary_file_link,
+    revoke_temporary_file_link,
+)
 
 
 WORKSPACE_FILE_MANAGE_SCHEMA = {
@@ -21,14 +26,16 @@ WORKSPACE_FILE_MANAGE_SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["register", "import_chat_media", "info", "list", "unregister"],
-            "description": "register 注册工作区文件；import_chat_media 把对话图片保存到工作区；info/list 查看引用；unregister 仅删除引用、不删除原文件。",
+            "enum": ["register", "import_chat_media", "info", "list", "unregister", "create_temporary_link", "revoke_temporary_link"],
+            "description": "register 注册工作区文件；create_temporary_link 创建默认 5 分钟的公网临时下载链接；revoke_temporary_link 提前撤销；info/list 查看引用；unregister 仅删除引用、不删除原文件。",
         },
         "workspace_path": {
             "type": "string",
             "description": "register 必填。相对当前 AI 工作区的文件路径；拒绝绝对路径和越界路径。",
         },
         "file_ref": {"type": "string", "description": "info/unregister 必填，格式 file_...。"},
+        "grant_id": {"type": "string", "description": "revoke_temporary_link 必填，格式 fgrant_...。"},
+        "ttl_seconds": {"type": "integer", "minimum": 60, "maximum": 900, "description": "临时链接有效期，默认 300 秒，最长 900 秒。"},
         "file_name": {"type": "string", "description": "register 可选，对外发送时显示的文件名。"},
         "media_id": {"type": "integer", "description": "import_chat_media 必填，取自 /api/chat/media/{media_id}/{token}。"},
         "media_token": {"type": "string", "description": "import_chat_media 必填，取自同一对话媒体 URL。"},
@@ -109,4 +116,22 @@ def _workspace_file_manage(
             ai_config_id=ai_config_id,
             file_ref=str(args.get("file_ref") or ""),
         )
-    raise HTTPException(status_code=400, detail="action must be register, import_chat_media, info, list, or unregister")
+    if action == "create_temporary_link":
+        if not ai_config_id:
+            raise HTTPException(status_code=400, detail="ai_config_id is required for temporary links")
+        return create_temporary_file_link(
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            file_ref=str(args.get("file_ref") or ""),
+            ttl_seconds=args.get("ttl_seconds") or 300,
+            public_base_url=configured_public_base_url(),
+        )
+    if action == "revoke_temporary_link":
+        if not ai_config_id:
+            raise HTTPException(status_code=400, detail="ai_config_id is required for temporary links")
+        return revoke_temporary_file_link(
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            grant_id=str(args.get("grant_id") or ""),
+        )
+    raise HTTPException(status_code=400, detail="unsupported workspace file action")
