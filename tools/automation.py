@@ -43,6 +43,7 @@ from tools.automation_access import (
     _creation_tags,
     _is_admin_role,
     _pending_confirmation_guidance,
+    _public_card_creator,
     _updated_tags,
 )
 
@@ -136,10 +137,9 @@ def _list_cards(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
         if wanted_status:
             statement = statement.where(WorkflowCard.status == wanted_status)
         rows = session.exec(statement.order_by(WorkflowCard.updated_at.desc())).all()
-        admin_allowed = _admin_actor(session, user_id, ai_config_id)
         items = []
         for card in rows:
-            if not admin_allowed and not _card_visible(card, ai_config_id):
+            if not _card_visible(card, ai_config_id):
                 continue
             tags = [str(item) for item in _load(card.tags_json, [])]
             lowered = {item.lower() for item in tags}
@@ -168,11 +168,12 @@ def _create_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             description=str(args.get("description") or ""),
         )
     with Session(engine) as session:
-        owner_id = None if _admin_actor(session, user_id, ai_config_id) else ai_config_id
+        owner_id = None if _public_card_creator(session, user_id, ai_config_id) else ai_config_id
         body = CardCreate(
             name=str(args.get("name") or ("MCP 轨迹卡片" if action == "from_trace" else "")),
             description=str(args.get("description") or ""),
             tags=_creation_tags(args.get("tags"), owner_id),
+            access_scope="all" if owner_id is None else "owner",
             risk_level=str(args.get("risk_level") or ("normal" if action == "from_trace" else "read_only")),
             definition=definition,
             device_id=str(args.get("device_id") or "") or None,
@@ -195,8 +196,9 @@ def _clone_card(
         description=card.description,
         tags=_creation_tags(
             source.get("tags"),
-            None if _admin_actor(session, user_id, ai_config_id) else ai_config_id,
+            None if _public_card_creator(session, user_id, ai_config_id) else ai_config_id,
         ),
+        access_scope="all" if _public_card_creator(session, user_id, ai_config_id) else "owner",
         risk_level=card.risk_level,
         definition=definition,
     )
@@ -211,7 +213,10 @@ def _edit_card(
 ) -> Dict[str, Any]:
     values = {
         key: args[key]
-        for key in ("name", "description", "risk_level", "definition", "device_id", "device_ids")
+        for key in (
+            "name", "description", "risk_level", "definition", "device_id", "device_ids",
+            "access_scope", "allowed_ai_config_ids",
+        )
         if key in args
     }
     if "tags" in args:
@@ -226,6 +231,8 @@ def _export_card(card: WorkflowCard) -> Dict[str, Any]:
         "name": payload["name"],
         "description": payload["description"],
         "tags": payload["tags"],
+        "access_scope": payload["access_scope"],
+        "allowed_ai_config_ids": payload["allowed_ai_config_ids"],
         "risk_level": payload["risk_level"],
         "definition": payload["definition"],
     }
@@ -371,7 +378,6 @@ def _start_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) 
             user_id,
             str(args.get("card_id") or ""),
             ai_config_id,
-            admin_read=True,
         )
         try:
             row = create_validated_run(
@@ -605,6 +611,11 @@ AUTOMATION_MANAGE_SCHEMA = {
         "name": {"type": "string"},
         "description": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
+        "access_scope": {"type": "string", "enum": ["all", "owner", "selected"]},
+        "allowed_ai_config_ids": {
+            "type": "array", "items": {"type": "integer"}, "maxItems": 200,
+            "description": "access_scope=selected 时允许调用卡片的 AI 成员配置 ID。",
+        },
         "risk_level": {"type": "string"},
         "definition": {"type": "object"},
         "calls": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"}},

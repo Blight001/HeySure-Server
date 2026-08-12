@@ -11,6 +11,7 @@ class WorkflowCard(SQLModel, table=True):
     __table_args__ = (Index("ix_workflowcard_user_status", "user_id", "status"),)
     RUNNABLE_STATUSES: ClassVar[frozenset[str]] = frozenset({"active", "published", "deprecated"})
     AI_OWNER_TAG_PREFIX: ClassVar[str] = "ai_owner:"
+    ACCESS_SCOPES: ClassVar[frozenset[str]] = frozenset({"all", "owner", "selected"})
 
     id: str = Field(primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -19,6 +20,8 @@ class WorkflowCard(SQLModel, table=True):
     status: str = Field(default="draft", index=True)
     risk_level: str = Field(default="read_only")
     tags_json: str = Field(default="[]")
+    access_scope: str = Field(default="all", index=True)
+    allowed_ai_config_ids_json: str = Field(default="[]")
     draft_definition_json: str = Field(default="{}")
     latest_version_id: Optional[str] = Field(default=None, foreign_key="workflowcardversion.id", index=True)
     created_by: int = Field(foreign_key="user.id")
@@ -45,6 +48,29 @@ class WorkflowCard(SQLModel, table=True):
             return True
         owners = cls.ai_owner_ids(tags)
         return not owners or str(ai_config_id) in owners
+
+    @staticmethod
+    def allowed_ai_config_ids(value: object) -> set[str]:
+        values = value if isinstance(value, list) else []
+        return {str(item).strip() for item in values if str(item).strip()}
+
+    @classmethod
+    def accessible_to_ai(
+        cls,
+        *,
+        access_scope: object,
+        allowed_ai_config_ids: object,
+        tags: object,
+        ai_config_id: Optional[int],
+    ) -> bool:
+        if not ai_config_id:
+            return True
+        scope = str(access_scope or "all").strip().lower()
+        if scope == "owner":
+            return str(ai_config_id) in cls.ai_owner_ids(tags)
+        if scope == "selected":
+            return str(ai_config_id) in cls.allowed_ai_config_ids(allowed_ai_config_ids)
+        return True
 
 
 class WorkflowCardVersion(SQLModel, table=True):

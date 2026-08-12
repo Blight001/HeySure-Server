@@ -34,8 +34,30 @@ def _admin_actor(session: Session, user_id: int, ai_config_id: Optional[int]) ->
     return bool(config and _is_admin_role(config.ai_role))
 
 
+def _public_card_creator(session: Session, user_id: int, ai_config_id: Optional[int]) -> bool:
+    if not ai_config_id:
+        return True
+    config = session.exec(select(AssistantAIConfig).where(
+        AssistantAIConfig.id == int(ai_config_id),
+        AssistantAIConfig.user_id == user_id,
+    )).first()
+    return bool(config and (
+        _is_admin_role(config.ai_role)
+        or str(config.digital_member_role or "").strip().lower() == "manager"
+    ))
+
+
 def _card_visible(card: WorkflowCard, ai_config_id: Optional[int]) -> bool:
-    return WorkflowCard.tags_visible_to_ai(_load(card.tags_json, []), ai_config_id)
+    tags = _load(card.tags_json, [])
+    scope = getattr(card, "access_scope", None)
+    if not scope:
+        scope = "owner" if WorkflowCard.ai_owner_ids(tags) else "all"
+    return WorkflowCard.accessible_to_ai(
+        access_scope=scope,
+        allowed_ai_config_ids=_load(getattr(card, "allowed_ai_config_ids_json", "[]"), []),
+        tags=tags,
+        ai_config_id=ai_config_id,
+    )
 
 
 def _creation_tags(tags: Any, ai_config_id: Optional[int]) -> list[str]:

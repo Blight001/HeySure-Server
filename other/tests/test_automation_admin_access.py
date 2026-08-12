@@ -20,6 +20,28 @@ MINIMAL_DEFINITION = {
 }
 
 
+def _select_manager_card_for_admin(memory, cards, ids):
+    admin_card, member_card, manager_card = cards
+    admin_id, member_id, user_id = ids
+    assert admin_card["tags"] == []
+    assert admin_card["access_scope"] == "all"
+    assert f"ai_owner:{member_id}" in member_card["tags"]
+    assert member_card["access_scope"] == "owner"
+    assert manager_card["tags"] == []
+    assert manager_card["access_scope"] == "all"
+    with Session(memory) as session:
+        selected = session.get(WorkflowCard, manager_card["id"])
+        selected.access_scope = "selected"
+        selected.allowed_ai_config_ids_json = f"[{admin_id}]"
+        session.add(selected)
+        session.commit()
+    admin_items = automation._list_cards(user_id, {"limit": 100}, admin_id)["items"]
+    admin_item_ids = {item["id"] for item in admin_items}
+    assert {admin_card["id"], manager_card["id"]} <= admin_item_ids
+    assert member_card["id"] not in admin_item_ids
+    return manager_card
+
+
 def test_admin_and_assistant_admin_card_access_policy():
     memory = create_engine("sqlite://")
     SQLModel.metadata.create_all(
@@ -85,14 +107,11 @@ def test_admin_and_assistant_admin_card_access_policy():
             {"action": "create", "name": "manager-private", "definition": MINIMAL_DEFINITION},
             manager_id,
         )
-        assert not any(str(tag).startswith("ai_owner:") for tag in admin_card["tags"])
-        assert f"ai_owner:{member_id}" in member_card["tags"]
-        assert f"ai_owner:{manager_id}" in manager_card["tags"]
-
-        admin_items = automation._list_cards(user_id, {"limit": 100}, admin_id)["items"]
-        assert {admin_card["id"], member_card["id"], manager_card["id"]} <= {
-            item["id"] for item in admin_items
-        }
+        manager_card = _select_manager_card_for_admin(
+            memory,
+            (admin_card, member_card, manager_card),
+            (admin_id, member_id, user_id),
+        )
         member_items = automation._list_cards(user_id, {"limit": 100}, member_id)["items"]
         assert manager_card["id"] not in {item["id"] for item in member_items}
 
@@ -106,12 +125,7 @@ def test_admin_and_assistant_admin_card_access_policy():
                 admin_id,
                 admin_read=True,
             )
-            try:
-                automation._accessible_card(session, user_id, manager_card["id"], admin_id)
-            except HTTPException as exc:
-                assert exc.status_code == 404
-            else:
-                raise AssertionError("assistant admin must not edit another AI card")
+            assert automation._accessible_card(session, user_id, manager_card["id"], admin_id)
 
         automation.create_validated_run = lambda session, **kwargs: SimpleNamespace(id="run-ok")
         automation.run_payload = lambda row: {"id": row.id}
@@ -166,11 +180,12 @@ def test_private_card_catalog_survives_a_new_chat_without_leaking(monkeypatch):
         cards = [
             WorkflowCard(
                 id="owner-card", user_id=user.id, created_by=user.id, name="Owner",
-                status="active", tags_json=f'["ai_owner:{owner.id}"]',
+                status="active", tags_json=f'["ai_owner:{owner.id}"]', access_scope="owner",
             ),
             WorkflowCard(
                 id="other-card", user_id=user.id, created_by=user.id, name="Other",
-                status="active", tags_json=f'["ai_owner:{other.id}"]',
+                status="active", tags_json=f'["ai_owner:{other.id}"]', access_scope="selected",
+                allowed_ai_config_ids_json=f"[{admin.id}]",
             ),
             WorkflowCard(
                 id="public-card", user_id=user.id, created_by=user.id, name="Public",

@@ -17,6 +17,15 @@ def _card(tags):
     return SimpleNamespace(tags_json=json.dumps(tags))
 
 
+def _scoped_card(scope, allowed_ids, tags=None):
+    import json
+    return SimpleNamespace(
+        tags_json=json.dumps(tags or []),
+        access_scope=scope,
+        allowed_ai_config_ids_json=json.dumps(allowed_ids),
+    )
+
+
 def test_only_admin_and_assistant_admin_roles_have_global_card_access():
     assert _is_admin_role("admin")
     assert _is_admin_role("assistant_admin")
@@ -35,6 +44,14 @@ def test_ai_can_only_see_own_or_public_card():
     assert _card_visible(_card(["ai_owner:12"]), 12)
     assert not _card_visible(_card(["ai_owner:99"]), 12)
     assert _card_visible(_card(["ai_owner:99"]), None)
+
+
+def test_explicit_card_scope_can_allow_all_owner_or_selected_members():
+    assert _card_visible(_scoped_card("all", []), 12)
+    assert _card_visible(_scoped_card("owner", [], ["ai_owner:12"]), 12)
+    assert not _card_visible(_scoped_card("owner", [], ["ai_owner:12"]), 13)
+    assert _card_visible(_scoped_card("selected", [12, 14]), 14)
+    assert not _card_visible(_scoped_card("selected", [12, 14]), 13)
 
 
 def test_edit_preserves_owner_and_cannot_relabel_card():

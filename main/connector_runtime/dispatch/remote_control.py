@@ -18,7 +18,7 @@ server**: they ride a peer-to-peer WebRTC connection (video track + a
 Signaling protocol (event names shared by both ends; payloads carry sessionId):
 
     controller (web)  → server → agent (android)
-        rc:start      {deviceId, token}            open a session
+        rc:start      {deviceId, token, qualityPreset?} open a session
         rc:answer     {sessionId, sdp}             SDP answer to the offer
         rc:ice        {sessionId, candidate}       trickle ICE
         rc:stop       {sessionId}                  tear down
@@ -58,6 +58,7 @@ RC_CAPABILITY = "remote_control"
 # Sessions with no activity past this are reaped so a dropped peer never leaks a
 # half-open mirror (the device keeps capturing/draining battery otherwise).
 _SESSION_TTL_SECONDS = 60 * 30
+_QUALITY_PRESETS = {"smooth", "balanced", "clear"}
 
 
 @dataclass
@@ -170,7 +171,15 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
     )
     logger.info("remote-control start session=%s device=%s user=%s", session_id, device_id, user_id)
     # Tell the device to bring up capture + the peer connection (it offers).
-    await sio.emit("rc:start", {"sessionId": session_id}, to=device_sid)
+    # Older agents ignore the optional preset and retain their legacy defaults.
+    quality_preset = str(data.get("qualityPreset") or "balanced").strip().lower()
+    if quality_preset not in _QUALITY_PRESETS:
+        quality_preset = "balanced"
+    await sio.emit(
+        "rc:start",
+        {"sessionId": session_id, "qualityPreset": quality_preset},
+        to=device_sid,
+    )
     # Ack the controller so it can wire up its RTCPeerConnection and wait for
     # the offer.
     await sio.emit("rc:started", {"sessionId": session_id, "deviceId": device_id}, to=controller_sid)

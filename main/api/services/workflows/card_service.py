@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from sqlmodel import Session, select
 
 from api.devices.presence import tool_defs_for_agent
-from api.models import DevicePresence, WorkflowCard, WorkflowCardVersion
+from api.models import AssistantAIConfig, DevicePresence, WorkflowCard, WorkflowCardVersion
 
 from .compiler import WorkflowValidationError, compile_definition, definition_digest, schema_digest
 from .interaction_steps import is_ai_intervention_step
@@ -37,6 +37,8 @@ def card_payload(row: WorkflowCard) -> Dict[str, Any]:
         "status": row.status,
         "risk_level": row.risk_level,
         "tags": _load(row.tags_json, []),
+        "access_scope": row.access_scope,
+        "allowed_ai_config_ids": _load(row.allowed_ai_config_ids_json, []),
         "definition": _load(row.draft_definition_json, {}),
         "latest_version_id": row.latest_version_id,
         "created_at": row.created_at,
@@ -66,6 +68,7 @@ def create_card(session: Session, user_id: int, body) -> WorkflowCard:
     definition = dict(body.definition or {})
     definition.setdefault("schemaVersion", 1)
     definition.setdefault("name", body.name.strip())
+    access_scope, allowed_ids = _card_access(session, user_id, body.access_scope, body.allowed_ai_config_ids)
     row = WorkflowCard(
         id=f"wcard_{uuid.uuid4().hex}",
         user_id=user_id,
@@ -75,6 +78,8 @@ def create_card(session: Session, user_id: int, body) -> WorkflowCard:
         status="active",
         risk_level=body.risk_level,
         tags_json=_json(sorted({tag.strip() for tag in body.tags if tag.strip()})),
+        access_scope=access_scope,
+        allowed_ai_config_ids_json=_json(allowed_ids),
         draft_definition_json=_json(definition),
         created_at=now,
         updated_at=now,
@@ -124,6 +129,15 @@ def update_card(
             setattr(row, key, str(payload[key]).strip())
     if "tags" in payload and payload["tags"] is not None:
         row.tags_json = _json(sorted({str(tag).strip() for tag in payload["tags"] if str(tag).strip()}))
+    if "access_scope" in payload or "allowed_ai_config_ids" in payload:
+        scope, allowed_ids = _card_access(
+            session,
+            row.user_id,
+            payload.get("access_scope", row.access_scope),
+            payload.get("allowed_ai_config_ids", _load(row.allowed_ai_config_ids_json, [])),
+        )
+        row.access_scope = scope
+        row.allowed_ai_config_ids_json = _json(allowed_ids)
     if "definition" in payload and payload["definition"] is not None:
         definition = dict(payload["definition"])
         definition.setdefault("schemaVersion", 1)
@@ -140,6 +154,24 @@ def update_card(
     )
     session.refresh(row)
     return row
+
+
+def _card_access(session: Session, user_id: int, scope: object, allowed_ids: object) -> Tuple[str, List[int]]:
+    normalized_scope = str(scope or "all").strip().lower()
+    if normalized_scope not in WorkflowCard.ACCESS_SCOPES:
+        raise WorkflowValidationError(["card access scope must be all, owner, or selected"])
+    requested = list(dict.fromkeys(
+        int(item) for item in (allowed_ids if isinstance(allowed_ids, list) else [])
+        if str(item).strip().isdigit() and int(item) > 0
+    ))
+    if requested:
+        existing = session.exec(select(AssistantAIConfig.id).where(
+            AssistantAIConfig.user_id == user_id,
+            AssistantAIConfig.id.in_(requested),
+        )).all()
+        if {int(item) for item in existing} != set(requested):
+            raise WorkflowValidationError(["one or more allowed AI members do not exist"])
+    return normalized_scope, requested if normalized_scope == "selected" else []
 
 
 def validate_card(row: WorkflowCard, session: Optional[Session] = None) -> Dict[str, Any]:

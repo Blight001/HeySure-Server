@@ -2,7 +2,7 @@ import json
 
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from api.models import DevicePresence, User, WorkflowCard, WorkflowCardVersion
+from api.models import AssistantAIConfig, DevicePresence, User, WorkflowCard, WorkflowCardVersion
 from api.services.workflows.card_service import create_card, delete_card, owned_card, update_card
 from api.services.workflows.schemas import CardCreate, CardUpdate
 
@@ -11,7 +11,10 @@ def _database():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(
         engine,
-        tables=[User.__table__, DevicePresence.__table__, WorkflowCard.__table__, WorkflowCardVersion.__table__],
+        tables=[
+            User.__table__, AssistantAIConfig.__table__, DevicePresence.__table__,
+            WorkflowCard.__table__, WorkflowCardVersion.__table__,
+        ],
     )
     return engine
 
@@ -52,6 +55,33 @@ def test_legacy_archived_card_is_treated_as_deleted():
         session.commit()
 
         assert owned_card(session, user.id, card.id) is None
+
+
+def test_card_selected_access_scope_persists_valid_ai_members():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "finish",
+        "steps": {"finish": {"type": "end"}},
+        "limits": {"timeoutSeconds": 30, "maxTransitions": 3},
+        "output": {},
+    }
+    with Session(_database()) as session:
+        user = _user(session)
+        member = AssistantAIConfig(user_id=user.id, name="Allowed")
+        session.add(member)
+        session.commit()
+        session.refresh(member)
+
+        card = create_card(session, user.id, CardCreate(
+            name="Selected",
+            definition=definition,
+            access_scope="selected",
+            allowed_ai_config_ids=[member.id],
+        ))
+
+        assert card.access_scope == "selected"
+        assert json.loads(card.allowed_ai_config_ids_json) == [member.id]
 
 
 def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch):

@@ -234,6 +234,8 @@ def clone_card(
         name=f"{row.name}（副本）",
         description=row.description,
         tags=source["tags"],
+        access_scope=source["access_scope"],
+        allowed_ai_config_ids=source["allowed_ai_config_ids"],
         risk_level=row.risk_level,
         definition=definition,
     )
@@ -256,6 +258,8 @@ def export_card(
         "name": payload["name"],
         "description": payload["description"],
         "tags": payload["tags"],
+        "access_scope": payload["access_scope"],
+        "allowed_ai_config_ids": payload["allowed_ai_config_ids"],
         "risk_level": payload["risk_level"],
         "definition": payload["definition"],
     }

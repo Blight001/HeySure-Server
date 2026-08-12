@@ -44,7 +44,6 @@ def automation_card_catalog_text(user_id: int, ai_config_id: Optional[int]) -> s
         )).first()
         if not config:
             return ""
-        global_access = str(config.ai_role or "").strip() in {"admin", "assistant_admin"}
         rows = session.exec(select(WorkflowCard).where(
             WorkflowCard.user_id == int(user_id),
             WorkflowCard.deleted_at.is_(None),
@@ -57,7 +56,16 @@ def automation_card_catalog_text(user_id: int, ai_config_id: Optional[int]) -> s
                 tags = []
             if not WorkflowCard.is_runnable_status(card.status):
                 continue
-            if not global_access and not WorkflowCard.tags_visible_to_ai(tags, ai_config_id):
+            try:
+                allowed_ids = json.loads(card.allowed_ai_config_ids_json or "[]")
+            except Exception:
+                allowed_ids = []
+            if not WorkflowCard.accessible_to_ai(
+                access_scope=card.access_scope,
+                allowed_ai_config_ids=allowed_ids,
+                tags=tags,
+                ai_config_id=ai_config_id,
+            ):
                 continue
             items.append({
                 "card_id": card.id,

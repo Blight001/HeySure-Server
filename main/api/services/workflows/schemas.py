@@ -9,6 +9,8 @@ class CardCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)
     tags: List[str] = Field(default_factory=list)
+    access_scope: str = "all"
+    allowed_ai_config_ids: List[int] = Field(default_factory=list, max_length=200)
     risk_level: str = "read_only"
     definition: Dict[str, Any] = Field(default_factory=dict)
     device_id: Optional[str] = None
@@ -19,6 +21,8 @@ class CardUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=160)
     description: Optional[str] = Field(default=None, max_length=4000)
     tags: Optional[List[str]] = None
+    access_scope: Optional[str] = None
+    allowed_ai_config_ids: Optional[List[int]] = Field(default=None, max_length=200)
     risk_level: Optional[str] = None
     definition: Optional[Dict[str, Any]] = None
     device_id: Optional[str] = None
