@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse  # 用于 /stream 端点的 SSE 
 from sqlmodel import Session, select
 
 from api.database import get_session
+from api.sio import sio
 from api.runtime.http_client import ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
 from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMessageUpdate, ChatRun
@@ -341,7 +342,7 @@ def delete_chat_message(
     return {"success": True}
 
 @router.post("/recall/{msg_id}")
-def recall_chat_messages(
+async def recall_chat_messages(
     msg_id: int,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
@@ -372,6 +373,18 @@ def recall_chat_messages(
         session.delete(msg)
     session.commit()
     _rebuild_usage_snapshots(session, user.id, ai_kind, ai_config_id)
+    await sio.emit(
+        "chat:history_changed",
+        {
+            "action": "recall",
+            "user_id": int(user.id),
+            "session_id": session_id,
+            "ai_config_id": ai_config_id,
+            "ai_kind": ai_kind,
+            "from_message_id": int(msg_id),
+        },
+        room=f"user_{int(user.id)}",
+    )
     
     return {"success": True, "deleted_count": deleted_count, "recall_content": start_msg.content}
 
