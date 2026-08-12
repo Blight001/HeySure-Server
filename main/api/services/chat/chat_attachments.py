@@ -54,6 +54,7 @@ def resolve_attachment_refs(
             user_id=user_id,
             ai_config_id=ai_config_id,
             file_ref=file_ref,
+            require_sendable=False,
         )
         for file_ref in normalize_file_refs(raw)
     ]
@@ -213,5 +214,6 @@ def get_message_attachment(
         user_id=row.user_id,
         ai_config_id=row.ai_config_id,
         file_ref=row.file_ref,
+        require_sendable=False,
     )
     return row, record

@@ -7,6 +7,26 @@ from fastapi import HTTPException
 from api.services.storage import temporary_file_links as links
 
 
+def test_configured_public_base_url_prefers_gateway_base(monkeypatch):
+    monkeypatch.setattr(links.settings, "public_base_url", "https://console.example/")
+    monkeypatch.setattr(links.settings, "agent_socket_url", "https://socket.example/")
+
+    assert links.configured_public_base_url() == "https://console.example"
+
+
+def test_configured_public_base_url_reports_mcp_runtime_configuration(monkeypatch):
+    monkeypatch.setattr(links.settings, "public_base_url", "")
+    monkeypatch.setattr(links.settings, "agent_socket_url", "")
+
+    with pytest.raises(HTTPException) as raised:
+        links.configured_public_base_url()
+
+    assert raised.value.detail == {
+        "code": "PUBLIC_BASE_URL_REQUIRED",
+        "message": "HEYSURE_PUBLIC_BASE_URL must be configured in MCP Runtime before creating temporary links",
+    }
+
+
 def _patch_grants(tmp_path, monkeypatch, source):
     monkeypatch.setattr(links, "GRANT_DIR", tmp_path / "grants")
     monkeypatch.setattr(

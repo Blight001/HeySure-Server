@@ -7,20 +7,17 @@ from typing import Optional
 
 from fastapi import Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.concurrency import run_in_threadpool
 from sqlmodel import Session, select
 
 from api.database import get_session
 from api.models import AssistantAIConfig
 from api.services.chat.chat_attachments import get_message_attachment
 from api.services.storage.workspace_files import (
-    MAX_SENDABLE_FILE_BYTES,
-    save_workspace_bytes,
+    save_workspace_stream,
 )
 from .auth import get_current_user
 from .chat_base import router
-
-
-UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def _validate_attachment_target(
@@ -40,22 +37,6 @@ def _validate_attachment_target(
         raise HTTPException(status_code=404, detail="AI member not found")
 
 
-async def _read_bounded_upload(file: UploadFile) -> bytes:
-    chunks: list[bytes] = []
-    size = 0
-    while True:
-        chunk = await file.read(UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        size += len(chunk)
-        if size > MAX_SENDABLE_FILE_BYTES:
-            raise HTTPException(status_code=413, detail="文件不能超过 30 MB")
-        chunks.append(chunk)
-    if size <= 0:
-        raise HTTPException(status_code=400, detail="文件不能为空")
-    return b"".join(chunks)
-
-
 @router.post("/attachments/upload")
 async def upload_chat_attachment(
     file: UploadFile = File(...),
@@ -69,12 +50,12 @@ async def upload_chat_attachment(
     if ai_kind not in {"assistant", "core"}:
         raise HTTPException(status_code=400, detail="ai_kind is invalid")
     _validate_attachment_target(session, user.id, ai_config_id)
-    raw = await _read_bounded_upload(file)
     filename = Path(str(file.filename or "file.bin")).name or "file.bin"
-    record = save_workspace_bytes(
+    record = await run_in_threadpool(
+        save_workspace_stream,
         user_id=user.id,
         ai_config_id=ai_config_id,
-        data=raw,
+        source=file.file,
         file_name=filename,
         folder="Uploads",
     )

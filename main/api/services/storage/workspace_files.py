@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import mimetypes
 import os
@@ -17,6 +18,8 @@ from .workspace_scope import member_workspace_dir
 
 
 MAX_SENDABLE_FILE_BYTES = 30 * 1024 * 1024
+MAX_WORKSPACE_FILE_BYTES = 250 * 1024 * 1024
+FILE_COPY_CHUNK_BYTES = 1024 * 1024
 MAX_LIST_RESULTS = 100
 FILE_REF_RE = re.compile(r"^file_[a-f0-9]{32}$")
 _METADATA_DIR = os.path.join(".heysure", "file_refs")
@@ -98,8 +101,8 @@ def register_workspace_file(
     stat = os.stat(absolute_path)
     if stat.st_size <= 0:
         raise _error(400, "FILE_EMPTY", "file is empty")
-    if stat.st_size > MAX_SENDABLE_FILE_BYTES:
-        raise _error(400, "FILE_TOO_LARGE", "file exceeds the 30 MB send limit")
+    if stat.st_size > MAX_WORKSPACE_FILE_BYTES:
+        raise _error(400, "FILE_TOO_LARGE", "file exceeds the 250 MB workspace transfer limit")
     relative = os.path.relpath(absolute_path, root).replace(os.sep, "/")
     safe_name = Path(str(file_name or "").strip()).name or Path(absolute_path).name
     mime_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
@@ -134,8 +137,23 @@ def save_workspace_bytes(
     raw = bytes(data or b"")
     if not raw:
         raise _error(400, "FILE_EMPTY", "file is empty")
-    if len(raw) > MAX_SENDABLE_FILE_BYTES:
-        raise _error(400, "FILE_TOO_LARGE", "file exceeds the 30 MB send limit")
+    return save_workspace_stream(
+        user_id=user_id,
+        ai_config_id=ai_config_id,
+        source=io.BytesIO(raw),
+        file_name=file_name,
+        folder=folder,
+    )
+
+
+def save_workspace_stream(
+    *,
+    user_id: int,
+    ai_config_id: Optional[int],
+    source: Any,
+    file_name: str,
+    folder: str = "Imported",
+) -> Dict[str, Any]:
     safe_folder = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(folder or "Imported")).strip("._") or "Imported"
     safe_name = Path(str(file_name or "file.bin")).name
     stem = re.sub(r"[^a-zA-Z0-9_.-]+", "_", Path(safe_name).stem).strip("._") or "file"
@@ -145,9 +163,20 @@ def save_workspace_bytes(
     absolute_path = _inside(root, os.path.join(root, relative), must_exist=False)
     os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
     temp_path = f"{absolute_path}.{uuid.uuid4().hex}.tmp"
-    with open(temp_path, "wb") as handle:
-        handle.write(raw)
-    os.replace(temp_path, absolute_path)
+    size = 0
+    try:
+        with open(temp_path, "xb") as handle:
+            while chunk := source.read(FILE_COPY_CHUNK_BYTES):
+                size += len(chunk)
+                if size > MAX_WORKSPACE_FILE_BYTES:
+                    raise _error(400, "FILE_TOO_LARGE", "file exceeds the 250 MB workspace transfer limit")
+                handle.write(chunk)
+        if size <= 0:
+            raise _error(400, "FILE_EMPTY", "file is empty")
+        os.replace(temp_path, absolute_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
     return register_workspace_file(
         user_id=user_id,
         ai_config_id=ai_config_id,
@@ -161,6 +190,7 @@ def resolve_file_ref(
     user_id: int,
     ai_config_id: Optional[int],
     file_ref: str,
+    require_sendable: bool = True,
 ) -> Dict[str, Any]:
     root = _root(user_id, ai_config_id)
     metadata_path = _metadata_path(root, str(file_ref or "").strip())
@@ -179,7 +209,7 @@ def resolve_file_ref(
         raise _error(403, "FILE_SCOPE_VIOLATION", "file_ref contains an unsafe path")
     absolute_path = _inside(root, os.path.join(root, relative))
     record = _public_record(root, metadata, absolute_path)
-    if not record["can_send_to_user"]:
+    if require_sendable and not record["can_send_to_user"]:
         raise _error(400, "FILE_TOO_LARGE", "file exceeds the 30 MB send limit")
     record["server_path"] = absolute_path
     return record
@@ -201,6 +231,7 @@ def list_file_refs(
                 user_id=user_id,
                 ai_config_id=ai_config_id,
                 file_ref=path.stem,
+                require_sendable=False,
             )
             record.pop("server_path", None)
             records.append(record)
@@ -219,6 +250,11 @@ def unregister_file_ref(
 ) -> Dict[str, Any]:
     root = _root(user_id, ai_config_id)
     metadata_path = _metadata_path(root, str(file_ref or "").strip())
-    resolve_file_ref(user_id=user_id, ai_config_id=ai_config_id, file_ref=file_ref)
+    resolve_file_ref(
+        user_id=user_id,
+        ai_config_id=ai_config_id,
+        file_ref=file_ref,
+        require_sendable=False,
+    )
     os.remove(metadata_path)
     return {"removed": True, "file_ref": file_ref, "file_deleted": False}

@@ -136,6 +136,39 @@ def test_mcp_register_returns_small_model_send_example(tmp_path, monkeypatch):
     assert result["send_example"]["arguments"]["attachments"][0]["file_ref"] == result["file_ref"]
 
 
+def test_large_video_is_device_transferable_but_not_sendable(tmp_path, monkeypatch):
+    root = tmp_path / "ai2"
+    root.mkdir()
+    video = root / "clip.mp4"
+    with video.open("wb") as handle:
+        handle.seek(workspace_files.MAX_SENDABLE_FILE_BYTES)
+        handle.write(b"x")
+    _patch_scope(monkeypatch, {2: root})
+
+    registered = workspace_files.register_workspace_file(
+        user_id=1,
+        ai_config_id=2,
+        workspace_path="clip.mp4",
+    )
+
+    assert registered["mime_type"] == "video/mp4"
+    assert registered["can_send_to_user"] is False
+    transferred = workspace_files.resolve_file_ref(
+        user_id=1,
+        ai_config_id=2,
+        file_ref=registered["file_ref"],
+        require_sendable=False,
+    )
+    assert transferred["bytes"] > workspace_files.MAX_SENDABLE_FILE_BYTES
+    with pytest.raises(HTTPException) as raised:
+        workspace_files.resolve_file_ref(
+            user_id=1,
+            ai_config_id=2,
+            file_ref=registered["file_ref"],
+        )
+    assert raised.value.detail["code"] == "FILE_TOO_LARGE"
+
+
 def test_mcp_view_image_registers_path_and_returns_private_model_marker(tmp_path, monkeypatch):
     root = tmp_path / "ai2"
     root.mkdir()

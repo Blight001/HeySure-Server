@@ -76,7 +76,7 @@ def _normalize_base_url(value: str) -> str:
         raise _error(
             503,
             "PUBLIC_BASE_URL_REQUIRED",
-            "PUBLIC_BASE_URL or AGENT_SOCKET_URL must be configured before creating temporary links",
+            "HEYSURE_PUBLIC_BASE_URL must be configured in MCP Runtime before creating temporary links",
         )
     return base
 
@@ -127,6 +127,7 @@ def create_temporary_file_link(
         user_id=int(user_id),
         ai_config_id=int(ai_config_id),
         file_ref=str(file_ref or "").strip(),
+        require_sendable=False,
     )
     grant_id = f"fgrant_{uuid.uuid4().hex}"
     token = secrets.token_urlsafe(32)
@@ -182,6 +183,7 @@ def resolve_temporary_file_link(
         user_id=int(record["user_id"]),
         ai_config_id=int(record["ai_config_id"]),
         file_ref=str(record["file_ref"]),
+        require_sendable=False,
     )
     if int(resolved["bytes"]) != int(record["bytes"]) or _sha256_file(resolved["server_path"]) != record["sha256"]:
         raise _error(409, "TEMP_LINK_SOURCE_CHANGED", "the source file changed after this link was created")

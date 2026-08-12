@@ -10,6 +10,7 @@ from api.services.chat.chat_attachments import (
     message_attachment_map,
     model_attachment_section,
     normalize_file_refs,
+    resolve_attachment_refs,
 )
 from ai_runtime.inference.input_attachments import apply_current_message_images
 
@@ -30,6 +31,23 @@ def test_normalize_file_refs_deduplicates_and_enforces_limit():
     with pytest.raises(HTTPException) as exc:
         normalize_file_refs([f"file_{idx}" for idx in range(6)])
     assert exc.value.status_code == 400
+
+
+def test_chat_attachments_allow_device_transfer_files_over_send_limit(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "api.services.chat.chat_attachments.resolve_file_ref",
+        lambda **kwargs: calls.append(kwargs) or {"file_ref": kwargs["file_ref"]},
+    )
+
+    records = resolve_attachment_refs(
+        user_id=7,
+        ai_config_id=9,
+        raw=["file_large_video"],
+    )
+
+    assert records == [{"file_ref": "file_large_video"}]
+    assert calls[0]["require_sendable"] is False
 
 
 def test_bind_and_history_payload_keep_only_workspace_reference():
