@@ -1,7 +1,8 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from api.services.chat.conversation_compress import _extract_summary_response
+from api.services.chat.conversation_compress import _extract_summary_response, compress_session
 
 
 class _Response:
@@ -15,6 +16,65 @@ class _Response:
 
     def json(self):
         raise ValueError("no json")
+
+
+class _RowsResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _Session:
+    def __init__(self, rows, events):
+        self.rows = rows
+        self.events = events
+
+    def exec(self, _statement):
+        return _RowsResult(self.rows)
+
+    def add(self, _row):
+        self.events.append("add")
+
+    def commit(self):
+        self.events.append("commit")
+
+    def rollback(self):
+        self.events.append("rollback")
+
+
+def _history_rows(count=6):
+    return [
+        SimpleNamespace(
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"message-{index}",
+            tags="",
+            think=None,
+            total_tokens=10,
+        )
+        for index in range(count)
+    ]
+
+
+def _compress(session):
+    return compress_session(
+        session,
+        convo=[],
+        user_id=7,
+        ai_config_id=3,
+        ai_kind="assistant",
+        session_id="session-a",
+        session_name="任务",
+        model="model-a",
+        api_key="key",
+        base_url="http://model",
+        system_prompt="system",
+        compression_prompt="压缩：{history}",
+        session_tokens=100,
+        threshold=80,
+        keep_recent=2,
+    )
 
 
 class ConversationCompressTests(unittest.TestCase):
@@ -61,6 +121,59 @@ class ConversationCompressTests(unittest.TestCase):
         )
 
         self.assertEqual(_extract_summary_response(resp), "")
+
+    def test_started_notice_is_saved_before_summary_request(self):
+        events = []
+        session = _Session(_history_rows(), events)
+
+        def save_message(_session, _user_id, payload):
+            events.append(("save", payload.tags))
+
+        def post_summary(*_args, **_kwargs):
+            events.append("request")
+            return SimpleNamespace(
+                headers={"content-type": "application/json"},
+                raise_for_status=lambda: None,
+                json=lambda: {"choices": [{"message": {"content": "摘要"}}]},
+            )
+
+        with (
+            patch("api.services.chat.conversation_compress._save_message", save_message),
+            patch("api.services.chat.conversation_compress.ai_http_post", post_summary),
+        ):
+            rebuilt = _compress(session)
+
+        self.assertIsNotNone(rebuilt)
+        self.assertLess(
+            events.index(("save", "system_notice_compress_started")),
+            events.index("request"),
+        )
+        self.assertIn(("save", "conversation_summary,system_notice_compress_result"), events)
+
+    def test_failed_summary_adds_terminal_notice(self):
+        events = []
+        session = _Session(_history_rows(), events)
+
+        def save_message(_session, _user_id, payload):
+            events.append(("save", payload.tags))
+
+        with (
+            patch("api.services.chat.conversation_compress._save_message", save_message),
+            patch(
+                "api.services.chat.conversation_compress.ai_http_post",
+                side_effect=RuntimeError("model unavailable"),
+            ),
+        ):
+            rebuilt = _compress(session)
+
+        self.assertIsNone(rebuilt)
+        self.assertEqual(
+            [event for event in events if isinstance(event, tuple)],
+            [
+                ("save", "system_notice_compress_started"),
+                ("save", "system_notice_compress_failed"),
+            ],
+        )
 
 
 if __name__ == "__main__":

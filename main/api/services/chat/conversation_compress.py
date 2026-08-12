@@ -12,6 +12,7 @@ subsequent turns, while the most recent few messages are kept verbatim.
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -29,6 +30,25 @@ logger = logging.getLogger(__name__)
 _MAX_MSG_CHARS = 4000
 
 _ROLE_LABELS = {"user": "用户", "assistant": "助手", "system": "系统"}
+
+_COMPRESSION_STARTED_NOTICE = (
+    "[系统提示]\n正在自动压缩较早的对话历史；系统会保留最近消息，"
+    "并用详细摘要承接目标、约束、进度、关键数据、待办与风险。"
+)
+_COMPRESSION_FAILED_NOTICE = (
+    "[系统提示]\n对话历史自动压缩未完成；系统已保留原始消息，"
+    "并会继续当前对话。"
+)
+
+
+@dataclass(frozen=True)
+class _CompressionMessageContext:
+    user_id: int
+    ai_config_id: Optional[int]
+    ai_kind: str
+    session_id: str
+    session_name: Optional[str]
+    model: Optional[str]
 
 
 def _response_debug(resp: requests.Response, *, max_body: int = 1200) -> str:
@@ -98,6 +118,170 @@ def _extract_summary_response(resp: requests.Response) -> str:
     return str(message.get("content") or "").strip()
 
 
+def _persist_compression_notice(
+    session: Session,
+    *,
+    message_context: _CompressionMessageContext,
+    content: str,
+    tags: str,
+) -> bool:
+    """Persist a compression status bubble immediately for history polling."""
+    try:
+        # _save_message commits before it returns, so the active-run history
+        # poller can see this bubble while the summary model call is in flight.
+        _save_message(
+            session,
+            message_context.user_id,
+            ChatMessageCreate(
+                role="system",
+                content=content,
+                tags=tags,
+                ai_config_id=message_context.ai_config_id,
+                ai_kind=message_context.ai_kind,
+                session_id=message_context.session_id,
+                session_name=message_context.session_name,
+                model=message_context.model,
+                total_tokens=0,
+            ),
+        )
+        return True
+    except Exception:
+        logger.exception("conversation_compress: status notice persistence failed tags=%s", tags)
+        session.rollback()
+        return False
+
+
+def _load_compression_rows(
+    session: Session,
+    *,
+    message_context: _CompressionMessageContext,
+) -> List[ChatMessage]:
+    stmt = select(ChatMessage).where(
+        ChatMessage.user_id == message_context.user_id,
+        ChatMessage.session_id == message_context.session_id,
+        ChatMessage.ai_kind == message_context.ai_kind,
+        ChatMessage.role.in_(("user", "assistant", "system")),
+    ).order_by(ChatMessage.created_at.asc())
+    if message_context.ai_config_id is not None:
+        stmt = stmt.where(ChatMessage.ai_config_id == message_context.ai_config_id)
+
+    def included(message: ChatMessage) -> bool:
+        tags = str(getattr(message, "tags", "") or "")
+        if "compressed_away" in tags:
+            return False
+        if message.role == "system":
+            return "phase_summary" in tags
+        return True
+
+    return [message for message in session.exec(stmt).all() if included(message)]
+
+
+def _build_compression_prompt(rows: List[ChatMessage], compression_prompt: str) -> str:
+    history_lines: List[str] = []
+    for message in rows:
+        label = _ROLE_LABELS.get(str(message.role or ""), str(message.role or ""))
+        body = str(message.content or "")
+        if len(body) > _MAX_MSG_CHARS:
+            body = body[:_MAX_MSG_CHARS] + " …(已截断)"
+        history_lines.append(f"{label}: {body}")
+    history_text = "\n".join(history_lines)
+    template = str(compression_prompt or "").strip() or DEFAULT_COMPRESSION_PROMPT
+    if "{history}" in template:
+        return template.replace("{history}", history_text)
+    return f"{template}\n\n[待压缩的对话历史]\n{history_text}"
+
+
+def _request_summary(
+    *,
+    base_url: str,
+    api_key: str,
+    model: Optional[str],
+    prompt: str,
+) -> Optional[str]:
+    try:
+        resp = ai_http_post(
+            base_url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+            },
+            timeout=120,
+        )
+        summary = _extract_summary_response(resp)
+    except RuntimeError as exc:
+        logger.warning("conversation_compress: summary request failed: %s", exc)
+        return None
+    except Exception as exc:
+        logger.exception("conversation_compress: summary request failed unexpectedly: %s", exc)
+        return None
+    if not summary:
+        logger.warning("conversation_compress: summary request returned empty content")
+        return None
+    return summary
+
+
+def _persist_compression_result(
+    session: Session,
+    *,
+    message_context: _CompressionMessageContext,
+    to_summarize: List[ChatMessage],
+    summary: str,
+) -> Optional[str]:
+    summary_content = "[系统提示]\n对话压缩摘要\n\n" + summary
+    try:
+        for message in to_summarize:
+            tags = [tag for tag in str(getattr(message, "tags", "") or "").split(",") if tag.strip()]
+            if "compressed_away" not in tags:
+                tags.append("compressed_away")
+            message.tags = ",".join(tags)
+            message.total_tokens = 0
+            session.add(message)
+        _save_message(
+            session,
+            message_context.user_id,
+            ChatMessageCreate(
+                role="system",
+                content=summary_content,
+                tags="conversation_summary,system_notice_compress_result",
+                ai_config_id=message_context.ai_config_id,
+                ai_kind=message_context.ai_kind,
+                session_id=message_context.session_id,
+                session_name=message_context.session_name,
+                model=message_context.model,
+                total_tokens=max(1, len(summary) // 3),
+            ),
+        )
+        session.commit()
+        return summary_content
+    except Exception:
+        logger.exception("conversation_compress: persistence failed")
+        session.rollback()
+        return None
+
+
+def _rebuild_conversation(
+    *,
+    system_prompt: str,
+    summary_content: str,
+    kept: List[ChatMessage],
+) -> List[Dict[str, Any]]:
+    new_convo: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": summary_content},
+    ]
+    for message in kept:
+        item: Dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.role == "assistant" and getattr(message, "think", None):
+            item["reasoning_content"] = message.think
+        new_convo.append(item)
+    return new_convo
+
+
 def compress_session(
     session: Session,
     *,
@@ -121,143 +305,48 @@ def compress_session(
     Returns a new ``convo`` list on success, or ``None`` when compression is not
     worth doing or fails (so the caller can avoid retry-looping forever).
     """
-    # Load persisted user/assistant messages for this session, excluding ones
-    # already folded into a previous summary. Mirrors the runtime history filter.
-    # ``phase_summary`` system rows are included too: they are the per-phase
-    # progress anchors, so the summary must carry which phases already finished
-    # (otherwise a compressed run loses the plan thread and re-plans from phase 1).
-    stmt = select(ChatMessage).where(
-        ChatMessage.user_id == user_id,
-        ChatMessage.session_id == session_id,
-        ChatMessage.ai_kind == ai_kind,
-        ChatMessage.role.in_(("user", "assistant", "system")),
-    ).order_by(ChatMessage.created_at.asc())
-    if ai_config_id is not None:
-        stmt = stmt.where(ChatMessage.ai_config_id == ai_config_id)
-
-    def _included(m: ChatMessage) -> bool:
-        tags = str(getattr(m, "tags", "") or "")
-        if "compressed_away" in tags:
-            return False
-        if m.role == "system":
-            # Only the compact phase-progress anchors; other system bubbles
-            # (e.g. mcp_tool_call) stay out of the summarization input.
-            return "phase_summary" in tags
-        return True
-
-    rows: List[ChatMessage] = [m for m in session.exec(stmt).all() if _included(m)]
-
+    message_context = _CompressionMessageContext(
+        user_id=user_id,
+        ai_config_id=ai_config_id,
+        ai_kind=ai_kind,
+        session_id=session_id,
+        session_name=session_name,
+        model=model,
+    )
+    rows = _load_compression_rows(session, message_context=message_context)
     if len(rows) < keep_recent + 2:
-        # Not enough history to be worth compressing.
         return None
-
     to_summarize = rows[:-keep_recent] if keep_recent > 0 else rows
     kept = rows[-keep_recent:] if keep_recent > 0 else []
     if not to_summarize:
         return None
-
-    # Build the history text from the to-summarize set.
-    history_lines: List[str] = []
-    for m in to_summarize:
-        label = _ROLE_LABELS.get(str(m.role or ""), str(m.role or ""))
-        body = str(m.content or "")
-        if len(body) > _MAX_MSG_CHARS:
-            body = body[:_MAX_MSG_CHARS] + " …(已截断)"
-        history_lines.append(f"{label}: {body}")
-    history_text = "\n".join(history_lines)
-
-    template = str(compression_prompt or "").strip() or DEFAULT_COMPRESSION_PROMPT
-    if "{history}" in template:
-        prompt = template.replace("{history}", history_text)
-    else:
-        prompt = f"{template}\n\n[待压缩的对话历史]\n{history_text}"
-
-    # Single non-streaming chat completion.
-    try:
-        resp = ai_http_post(
-            base_url,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False,
-            },
-            timeout=120,
+    prompt = _build_compression_prompt(to_summarize, compression_prompt)
+    if not _persist_compression_notice(
+        session,
+        message_context=message_context,
+        content=_COMPRESSION_STARTED_NOTICE,
+        tags="system_notice_compress_started",
+    ):
+        return None
+    summary = _request_summary(base_url=base_url, api_key=api_key, model=model, prompt=prompt)
+    if summary is None:
+        _persist_compression_notice(
+            session,
+            message_context=message_context,
+            content=_COMPRESSION_FAILED_NOTICE,
+            tags="system_notice_compress_failed",
         )
-        summary = _extract_summary_response(resp)
-    except RuntimeError as exc:
-        logger.warning("conversation_compress: summary request failed: %s", exc)
         return None
-    except Exception as exc:
-        logger.exception("conversation_compress: summary request failed unexpectedly: %s", exc)
-        return None
-
-    if not summary:
-        logger.warning("conversation_compress: summary request returned empty content")
-        return None
-
-    summary_content = "[系统提示]\n对话压缩摘要\n\n" + summary
-    compression_notice = (
-        "[系统提示]\n正在自动压缩较早的对话历史；系统会保留最近消息，"
-        "并用详细摘要承接目标、约束、进度、关键数据、待办与风险。"
+    summary_content = _persist_compression_result(
+        session,
+        message_context=message_context,
+        to_summarize=to_summarize,
+        summary=summary,
     )
-
-    # Persist: fold the to-summarize rows into the summary.
-    try:
-        for m in to_summarize:
-            existing_tags = [t for t in str(getattr(m, "tags", "") or "").split(",") if t.strip()]
-            if "compressed_away" not in existing_tags:
-                existing_tags.append("compressed_away")
-            m.tags = ",".join(existing_tags)
-            m.total_tokens = 0
-            session.add(m)
-        _save_message(
-            session,
-            user_id,
-            ChatMessageCreate(
-                role="system",
-                content=compression_notice,
-                tags="system_notice_compress_started",
-                ai_config_id=ai_config_id,
-                ai_kind=ai_kind,
-                session_id=session_id,
-                session_name=session_name,
-                model=model,
-                total_tokens=0,
-            ),
-        )
-        _save_message(
-            session,
-            user_id,
-            ChatMessageCreate(
-                role="system",
-                content=summary_content,
-                tags="conversation_summary,system_notice_compress_result",
-                ai_config_id=ai_config_id,
-                ai_kind=ai_kind,
-                session_id=session_id,
-                session_name=session_name,
-                model=model,
-                total_tokens=max(1, len(summary) // 3),
-            ),
-        )
-        session.commit()
-    except Exception:
-        logger.exception("conversation_compress: persistence failed")
-        session.rollback()
+    if summary_content is None:
         return None
-
-    # Rebuild the live convo: system + summary + kept-verbatim recent messages.
-    new_convo: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": summary_content},
-    ]
-    for m in kept:
-        item: Dict[str, Any] = {"role": m.role, "content": m.content}
-        if m.role == "assistant" and getattr(m, "think", None):
-            item["reasoning_content"] = m.think
-        new_convo.append(item)
-    return new_convo
+    return _rebuild_conversation(
+        system_prompt=system_prompt,
+        summary_content=summary_content,
+        kept=kept,
+    )
