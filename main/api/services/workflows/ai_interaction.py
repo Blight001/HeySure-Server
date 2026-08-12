@@ -209,6 +209,14 @@ def _version_for_run_creation(
     )).first()
 
 
+def _run_device_id(version: Optional[WorkflowCardVersion], requested: str) -> str:
+    selected = str(requested or "").strip()
+    if selected or not version:
+        return selected
+    contract_ids = _load(version.contract_device_ids_json, [])
+    return str(contract_ids[0]).strip() if isinstance(contract_ids, list) and contract_ids else ""
+
+
 def _validate_concurrency(session: Session, user_id: int, device_id: str) -> None:
     active = session.exec(select(WorkflowRun).where(
         WorkflowRun.user_id == user_id,
@@ -239,6 +247,7 @@ def create_validated_run(
         if existing:
             return existing
     version = _version_for_run_creation(session, user_id, card_id, version_id)
+    device_id = _run_device_id(version, device_id)
     if version:
         try:
             validate_run_device(

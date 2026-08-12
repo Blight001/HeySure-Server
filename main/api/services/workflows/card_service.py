@@ -270,6 +270,14 @@ def _snapshot_contracts(
     device_ids: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], List[str]]:
     bound_ids = _contract_device_ids(device_id, device_ids)
+    device_steps = [
+        step_id for step_id, step in definition["steps"].items()
+        if step.get("type") == "mcp" and not is_ai_intervention_step(step)
+    ]
+    if device_steps and not bound_ids:
+        raise WorkflowValidationError([
+            "select at least one contract device before saving a card with device MCP steps"
+        ])
     snapshots = {item: _device_snapshot(session, user_id, item) for item in bound_ids}
     contracts: Dict[str, Any] = {}
     errors: List[str] = []

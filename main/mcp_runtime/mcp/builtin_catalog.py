@@ -330,6 +330,8 @@ BUILTIN_TOOLS = (
         description=(
             "自动化卡片唯一聚合工具：action=list/get/create/import/from_trace/clone/edit/delete/"
             "validate/versions/get_version/export/start/list_runs/status/pause/resume/cancel/retry/respond。"
+            "创建或编辑含设备 MCP 节点的卡片时，必须传 device_ids，并为每个节点设置 toolRef.deviceId；"
+            "启动已绑定契约设备的卡片时可省略 device_id，系统会采用卡片保存的主契约设备。"
             "AI 创建的卡片会自动添加 ai_owner:<成员ID> 标签；普通成员只能访问自己的标签卡片或无所有者标签的公共卡片，"
             "管理员与辅助管理员创建的卡片默认全员可调用；显式调用范围优先，辅助管理员仍可治理同一用户下的卡片。"
         ),

@@ -94,7 +94,12 @@ def automation_card_prompt_sections(
     if "automation.manage" not in allowed_tools:
         return []
     catalog = automation_card_catalog_text(user_id, ai_config_id)
-    return [f"当前 AI 可用自动化卡片\n{catalog}"] if catalog else []
+    policy = (
+        "自动化卡片设备约束：创建或编辑含设备 MCP 节点的卡片前，先确认实际设备 ID 和工具；"
+        "请求必须用 device_ids 声明引用的全部契约设备，并为每个设备 MCP 节点设置 toolRef.deviceId。"
+        "不得创建未绑定设备的设备 MCP 卡片。启动已保存契约设备的卡片时可省略 device_id。"
+    )
+    return [f"{policy}\n当前 AI 可用自动化卡片\n{catalog}" if catalog else policy]
 
 
 def _is_workspace_tool(tool: Dict[str, Any]) -> bool:

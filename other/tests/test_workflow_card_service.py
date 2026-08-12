@@ -5,6 +5,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from api.models import AssistantAIConfig, DevicePresence, User, WorkflowCard, WorkflowCardVersion
 from api.services.workflows.card_service import create_card, delete_card, owned_card, update_card
 from api.services.workflows.schemas import CardCreate, CardUpdate
+from api.services.workflows.ai_interaction import _run_device_id
 
 
 def _database():
@@ -136,3 +137,41 @@ def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch)
         assert len(session.exec(
             select(WorkflowCardVersion).where(WorkflowCardVersion.card_id == card.id)
         ).all()) == 2
+
+
+def test_device_mcp_card_requires_explicit_contract_devices():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "call",
+        "steps": {
+            "call": {
+                "type": "mcp",
+                "toolRef": {"namespace": "device", "name": "demo", "schemaDigest": "known"},
+                "arguments": {},
+                "saveAs": "demo_result",
+                "next": "finish",
+            },
+            "finish": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 30, "maxTransitions": 3},
+        "output": {},
+    }
+    with Session(_database()) as session:
+        user = _user(session)
+        try:
+            create_card(session, user.id, CardCreate(name="Missing device", definition=definition))
+        except Exception as exc:
+            assert "select at least one contract device" in str(exc)
+        else:
+            raise AssertionError("device MCP cards must declare contract devices")
+
+
+def test_run_uses_first_saved_contract_device_when_start_omits_device():
+    version = WorkflowCardVersion(
+        id="version", card_id="card", version_number=1,
+        definition_json="{}", definition_digest="digest",
+        contract_device_ids_json='["desktop-one","browser-two"]', published_by=1,
+    )
+    assert _run_device_id(version, "") == "desktop-one"
+    assert _run_device_id(version, "explicit") == "explicit"

@@ -619,8 +619,14 @@ AUTOMATION_MANAGE_SCHEMA = {
         "risk_level": {"type": "string"},
         "definition": {"type": "object"},
         "calls": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"}},
-        "device_id": {"type": "string"},
-        "device_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "device_id": {
+            "type": "string",
+            "description": "运行旧版未绑定设备的卡片时指定目标设备；新版卡片已保存契约设备，action=start 可省略。",
+        },
+        "device_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 20,
+            "description": "创建或编辑卡片时必填：列出定义中设备 MCP 节点引用的全部契约设备 ID。每个 MCP 节点的 toolRef.deviceId 必须属于此列表。",
+        },
         "input": {"type": "object"},
         "idempotency_key": {"type": "string"},
         "query": {"type": "string"},
