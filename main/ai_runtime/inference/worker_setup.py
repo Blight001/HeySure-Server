@@ -183,6 +183,8 @@ def prepare_capabilities(
             request.ai_kind,
             request.session_id,
         ),
+        "X-HeySure-History-Mode": "full",
+        "X-HeySure-Context-Revision": _provider_context_revision(setup.history),
     }
     mcp_active = bool(
         setup.config
@@ -219,6 +221,18 @@ def prepare_capabilities(
         provider=provider,
         tool_protocol=str(preset.get("tool_protocol") or "auto"),
     )
+
+
+def _provider_context_revision(history: List[ChatMessage]) -> str:
+    """Return a stable revision that changes whenever a new summary replaces history."""
+    for message in reversed(history):
+        tags = str(getattr(message, "tags", "") or "")
+        if "conversation_summary" not in tags:
+            continue
+        message_id = str(getattr(message, "id", "") or "").strip()
+        if message_id:
+            return f"summary-{message_id}"
+    return "0"
 
 
 def _restored_described_tools(session, request, setup):

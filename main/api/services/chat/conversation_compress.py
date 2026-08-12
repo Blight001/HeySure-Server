@@ -204,6 +204,7 @@ def _request_summary(
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {api_key}",
+                "X-HeySure-History-Mode": "stateless",
             },
             json={
                 "model": model,

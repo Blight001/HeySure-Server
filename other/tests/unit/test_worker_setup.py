@@ -85,7 +85,7 @@ def test_prepare_worker_rejects_missing_user():
         worker_setup.prepare_worker(FakeSession(None), _request("session-a"))
 
 
-def _setup(*, task_runtime=False, allowed=None):
+def _setup(*, task_runtime=False, allowed=None, history=None):
     return worker_setup.WorkerSetup(
         user=SimpleNamespace(),
         max_steps=40,
@@ -101,7 +101,7 @@ def _setup(*, task_runtime=False, allowed=None):
         effective_tool_allowlist=frozenset(
             allowed or {"mcp.describe+tool", "todo.manage", "knowledge.search"}
         ),
-        history=[],
+        history=list(history or []),
         conversation=[],
     )
 
@@ -133,12 +133,36 @@ def test_prepare_capabilities_restores_current_tools_and_applies_preset(monkeypa
 
     assert result.headers["Authorization"] == "Bearer secret"
     assert result.headers["X-HeySure-Session-ID"] == "provider-session"
+    assert result.headers["X-HeySure-History-Mode"] == "full"
+    assert result.headers["X-HeySure-Context-Revision"] == "0"
     assert result.mcp_active is True
     assert result.exposed_tool_allowlist == frozenset(
         {"mcp.describe+tool", "knowledge.search"}
     )
     assert result.provider == "openai_compat"
     assert result.tool_protocol == "markup"
+
+
+def test_prepare_capabilities_changes_revision_after_conversation_summary(monkeypatch):
+    request = _request("session-a")
+    summary = SimpleNamespace(
+        id=91,
+        created_at="2026-08-12T20:00:00Z",
+        content="compressed context",
+        tags="conversation_summary,system_notice_compress_result",
+    )
+    setup = _setup(history=[summary])
+    monkeypatch.setattr(
+        worker_setup.mcp_session_context,
+        "described_tool_versions",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(worker_setup, "resolve_session_preset_entry", lambda *args: None)
+
+    result = worker_setup.prepare_capabilities(FakeSession(setup.user), request, setup)
+
+    assert result.headers["X-HeySure-Context-Revision"] != "0"
+    assert result.headers["X-HeySure-Context-Revision"] == "summary-91"
 
 
 def test_prepare_capabilities_preexposes_required_task_tools(monkeypatch):

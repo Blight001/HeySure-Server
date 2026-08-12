@@ -131,6 +131,10 @@ class ConversationCompressTests(unittest.TestCase):
 
         def post_summary(*_args, **_kwargs):
             events.append("request")
+            self.assertEqual(
+                _kwargs["headers"]["X-HeySure-History-Mode"],
+                "stateless",
+            )
             return SimpleNamespace(
                 headers={"content-type": "application/json"},
                 raise_for_status=lambda: None,
