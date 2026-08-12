@@ -1,5 +1,6 @@
 """MCP facade for member-scoped sendable file references."""
 
+import os
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
@@ -11,6 +12,7 @@ from api.services.storage.workspace_files import (
     list_file_refs,
     register_workspace_file,
     resolve_file_ref,
+    resolve_workspace_path,
     save_workspace_bytes,
     unregister_file_ref,
 )
@@ -26,14 +28,14 @@ WORKSPACE_FILE_MANAGE_SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["register", "import_chat_media", "info", "list", "unregister", "create_temporary_link", "revoke_temporary_link"],
-            "description": "register 注册工作区文件；create_temporary_link 创建默认 5 分钟的公网临时下载链接；revoke_temporary_link 提前撤销；info/list 查看引用；unregister 仅删除引用、不删除原文件。",
+            "enum": ["register", "import_chat_media", "view_image", "info", "list", "unregister", "create_temporary_link", "revoke_temporary_link"],
+            "description": "register 注册工作区文件；view_image 将工作区图片安全附加到下一轮模型输入；create_temporary_link 创建默认 5 分钟的公网临时下载链接；revoke_temporary_link 提前撤销；info/list 查看引用；unregister 仅删除引用、不删除原文件。",
         },
         "workspace_path": {
             "type": "string",
             "description": "register 必填。相对当前 AI 工作区的文件路径；拒绝绝对路径和越界路径。",
         },
-        "file_ref": {"type": "string", "description": "info/unregister 必填，格式 file_...。"},
+        "file_ref": {"type": "string", "description": "view_image/info/unregister 可用，格式 file_...。"},
         "grant_id": {"type": "string", "description": "revoke_temporary_link 必填，格式 fgrant_...。"},
         "ttl_seconds": {"type": "integer", "minimum": 60, "maximum": 900, "description": "临时链接有效期，默认 300 秒，最长 900 秒。"},
         "file_name": {"type": "string", "description": "register 可选，对外发送时显示的文件名。"},
@@ -43,6 +45,14 @@ WORKSPACE_FILE_MANAGE_SCHEMA = {
     },
     "required": ["action"],
 }
+
+MAX_MODEL_IMAGE_BYTES = 10 * 1024 * 1024
+_IMAGE_SIGNATURES = (
+    ("image/png", lambda head: head.startswith(b"\x89PNG\r\n\x1a\n")),
+    ("image/jpeg", lambda head: head.startswith(b"\xff\xd8\xff")),
+    ("image/gif", lambda head: head.startswith((b"GIF87a", b"GIF89a"))),
+    ("image/webp", lambda head: head.startswith(b"RIFF") and head[8:12] == b"WEBP"),
+)
 
 
 def _with_send_example(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -84,6 +94,57 @@ def _import_chat_media(
     return _with_send_example(result)
 
 
+def _detected_image_mime(server_path: str) -> str:
+    with open(server_path, "rb") as handle:
+        head = handle.read(16)
+    return next((mime for mime, matches in _IMAGE_SIGNATURES if matches(head)), "")
+
+
+def _view_workspace_image(
+    user_id: int,
+    ai_config_id: Optional[int],
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    file_ref = str(args.get("file_ref") or "").strip()
+    if file_ref:
+        record = resolve_file_ref(
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            file_ref=file_ref,
+        )
+    else:
+        workspace_path = str(args.get("workspace_path") or "").strip()
+        if not workspace_path:
+            raise HTTPException(status_code=400, detail="view_image requires file_ref or workspace_path")
+        server_path = resolve_workspace_path(user_id, ai_config_id, workspace_path)
+        size = os.stat(server_path).st_size
+        if size > MAX_MODEL_IMAGE_BYTES:
+            raise HTTPException(status_code=400, detail={"code": "IMAGE_TOO_LARGE", "message": "model image input cannot exceed 10 MB"})
+        if not _detected_image_mime(server_path):
+            raise HTTPException(status_code=400, detail={"code": "UNSUPPORTED_IMAGE", "message": "only PNG, JPEG, WebP, and GIF images can be viewed"})
+        registered = register_workspace_file(
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            workspace_path=workspace_path,
+        )
+        record = resolve_file_ref(
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            file_ref=registered["file_ref"],
+        )
+    if int(record.get("bytes") or 0) > MAX_MODEL_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail={"code": "IMAGE_TOO_LARGE", "message": "model image input cannot exceed 10 MB"})
+    detected_mime = _detected_image_mime(record["server_path"])
+    if not detected_mime:
+        raise HTTPException(status_code=400, detail={"code": "UNSUPPORTED_IMAGE", "message": "only PNG, JPEG, WebP, and GIF images can be viewed"})
+    return {
+        **record,
+        "mime_type": detected_mime,
+        "success": True,
+        "_heysure_model_image": True,
+    }
+
+
 def _workspace_file_manage(
     user_id: int,
     args: Dict[str, Any],
@@ -100,6 +161,8 @@ def _workspace_file_manage(
         return _with_send_example(result)
     if action == "import_chat_media":
         return _import_chat_media(user_id, ai_config_id, args)
+    if action == "view_image":
+        return _view_workspace_image(user_id, ai_config_id, args)
     if action == "info":
         result = resolve_file_ref(
             user_id=user_id,

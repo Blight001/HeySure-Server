@@ -56,6 +56,48 @@ def test_server_path_screenshot_is_encoded_for_model(tmp_path):
     )
 
 
+def test_workspace_view_image_is_attached_without_exposing_server_path(tmp_path):
+    image = tmp_path / "cat.png"
+    image.write_bytes(b"PNG")
+    tool_result = {
+        "result": {
+            "success": True,
+            "_heysure_model_image": True,
+            "file_ref": "file_" + "a" * 32,
+            "file_name": "cat.png",
+            "workspace_path": "Uploads/cat.png",
+            "server_path": str(image),
+        },
+    }
+
+    message = tool_image_message("workspace.file+manage", tool_result)
+    visible = model_visible_tool_result(
+        "workspace.file+manage", tool_result, image_attached=True,
+    )
+
+    assert message is not None
+    assert message["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert "server_path" not in visible
+    assert visible["workspace_path"] == "Uploads/cat.png"
+    assert visible["image_attached_to_model"] is True
+    assert "_heysure_model_image" not in visible
+
+
+def test_workspace_view_image_uses_validated_mime_instead_of_file_extension(tmp_path):
+    image = tmp_path / "download.bin"
+    image.write_bytes(b"JPEG")
+    message = tool_image_message(
+        "workspace.file+manage",
+        {"result": {
+            "_heysure_model_image": True,
+            "mime_type": "image/jpeg",
+            "server_path": str(image),
+        }},
+    )
+
+    assert message["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
 def test_namespaced_ai_free_screenshot_honors_send_to_user_delivery():
     result = {"success": True, "dataUrl": DATA_URL}
 

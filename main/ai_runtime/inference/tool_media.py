@@ -18,6 +18,7 @@ _IMAGE_DATA_URL_KEYS = (
 _IMAGE_URL_KEYS = ("image_url", "public_url")
 _IMAGE_PATH_KEYS = ("server_path", "path")
 _NESTED_PAYLOAD_KEYS = ("result", "payload", "data", "screenshot_result")
+_WORKSPACE_IMAGE_TOOL = "workspace.file+manage"
 
 
 def is_image_input_unsupported_error(error_text: str) -> bool:
@@ -86,7 +87,7 @@ def prune_prior_runtime_screenshot_images(conversation: List[Dict]) -> int:
 
     removed = 0
     replacement = "[系统已省略 {count} 张较早截图：模型上下文只保留最新截图。]"
-    markers = ("工具截图已捕获", "鼠标点击前确认图已捕获")
+    markers = ("工具截图已捕获", "鼠标点击前确认图已捕获", "工作区图片已读取")
     for message in conversation:
         content = message.get("content")
         if not isinstance(content, list):
@@ -165,18 +166,23 @@ def find_image_payload(value: object, depth: int = 0) -> Dict[str, str]:
     return {}
 
 
-def image_path_to_data_url(path: str) -> str:
+def image_path_to_data_url(path: str, declared_media_type: str = "") -> str:
     server_path = str(path or "").strip()
     if not server_path or not os.path.isfile(server_path):
         return ""
     extension = os.path.splitext(server_path)[1].lower().lstrip(".")
-    media_type = {
+    inferred_media_type = {
         "jpg": "image/jpeg",
         "jpeg": "image/jpeg",
         "png": "image/png",
         "webp": "image/webp",
         "gif": "image/gif",
     }.get(extension, "image/png")
+    media_type = (
+        declared_media_type
+        if declared_media_type in {"image/jpeg", "image/png", "image/webp", "image/gif"}
+        else inferred_media_type
+    )
     try:
         with open(server_path, "rb") as file_handle:
             encoded = base64.b64encode(file_handle.read()).decode("ascii")
@@ -198,27 +204,23 @@ def omit_image_fields(value: object) -> object:
     return value
 
 
-def tool_image_message(
-    tool: str,
-    tool_result: Dict[str, object],
-) -> Optional[Dict[str, object]]:
+def _tool_image_kind(tool: str, result_payload: object) -> str:
+    if canonical_screenshot_tool_name(tool, include_mouse_click=True):
+        return "screenshot"
     if (
-        not canonical_screenshot_tool_name(tool, include_mouse_click=True)
-        or not isinstance(tool_result, dict)
+        tool == _WORKSPACE_IMAGE_TOOL
+        and isinstance(result_payload, dict)
+        and result_payload.get("_heysure_model_image") is True
     ):
-        return None
-    result_payload = tool_result.get("result", tool_result)
-    image_payload = find_image_payload(tool_result)
-    public_url = image_payload.get("url", "")
-    data_url = image_payload.get("data_url", "")
-    if not data_url.startswith("data:image/"):
-        data_url = image_path_to_data_url(image_payload.get("path", ""))
-    if not data_url.startswith("data:image/") and not public_url.startswith(
-        ("http://", "https://")
-    ):
-        return None
-    metadata = result_payload if isinstance(result_payload, dict) else {}
-    detail = "\n".join(
+        return "workspace"
+    return ""
+
+
+def _tool_image_detail(kind: str, metadata: dict) -> str:
+    if kind == "workspace":
+        name = metadata.get("file_name") or metadata.get("workspace_path") or "未命名图片"
+        return f"工作区图片已读取。你已经收到这张图片，请直接分析视觉内容；文件：{name}。"
+    return "\n".join(
         part
         for part in [
             "工具截图已捕获。你已经收到这张图片，请直接查看视觉内容并继续，不要让用户打开本地路径。",
@@ -227,6 +229,32 @@ def tool_image_message(
         ]
         if part and not part.endswith(":")
     )
+
+
+def tool_image_message(
+    tool: str,
+    tool_result: Dict[str, object],
+) -> Optional[Dict[str, object]]:
+    if not isinstance(tool_result, dict):
+        return None
+    result_payload = tool_result.get("result", tool_result)
+    kind = _tool_image_kind(tool, result_payload)
+    if not kind:
+        return None
+    image_payload = find_image_payload(tool_result)
+    metadata = result_payload if isinstance(result_payload, dict) else {}
+    public_url = image_payload.get("url", "")
+    data_url = image_payload.get("data_url", "")
+    if not data_url.startswith("data:image/"):
+        data_url = image_path_to_data_url(
+            image_payload.get("path", ""),
+            str(metadata.get("mime_type") or "") if kind == "workspace" else "",
+        )
+    if not data_url.startswith("data:image/") and not public_url.startswith(
+        ("http://", "https://")
+    ):
+        return None
+    detail = _tool_image_detail(kind, metadata)
     return {
         "role": "user",
         "content": [
@@ -312,23 +340,28 @@ def model_visible_tool_result(
         if isinstance(tool_result, dict)
         else tool_result
     )
-    if (
-        not canonical_screenshot_tool_name(tool, include_mouse_click=True)
-        or not isinstance(result_payload, dict)
-    ):
+    if not isinstance(result_payload, dict):
         return result_payload
+    kind = _tool_image_kind(tool, result_payload)
+    if not kind:
+        return result_payload
+    workspace_image = kind == "workspace"
     cleaned = omit_image_fields(_sanitize_large_media(result_payload))
     if not isinstance(cleaned, dict):
         cleaned = {}
-    cleaned["screenshot_attached_to_model"] = image_attached
+    cleaned.pop("_heysure_model_image", None)
+    if workspace_image and result_payload.get("workspace_path"):
+        cleaned["workspace_path"] = result_payload["workspace_path"]
+    attached_key = "image_attached_to_model" if workspace_image else "screenshot_attached_to_model"
+    cleaned[attached_key] = image_attached
     if not image_attached:
         cleaned["instruction"] = (
-            "The screenshot could not be attached because the current model does not support image input. "
+            "The image could not be attached because the current model does not support image input. "
             "Continue from non-image tool data, use a non-visual tool, or explain the limitation."
         )
         return cleaned
     cleaned["instruction"] = (
-        "The screenshot image is attached in a following user message. "
+        "The image is attached in a following user message. "
         "Analyze the image directly; do not ask the user to open a local path."
     )
     return cleaned

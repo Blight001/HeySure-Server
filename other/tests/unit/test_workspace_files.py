@@ -136,6 +136,61 @@ def test_mcp_register_returns_small_model_send_example(tmp_path, monkeypatch):
     assert result["send_example"]["arguments"]["attachments"][0]["file_ref"] == result["file_ref"]
 
 
+def test_mcp_view_image_registers_path_and_returns_private_model_marker(tmp_path, monkeypatch):
+    root = tmp_path / "ai2"
+    root.mkdir()
+    (root / "cat.png").write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    _patch_scope(monkeypatch, {2: root})
+
+    result = _workspace_file_manage(
+        1,
+        {"action": "view_image", "workspace_path": "cat.png"},
+        2,
+    )
+
+    assert result["_heysure_model_image"] is True
+    assert result["mime_type"] == "image/png"
+    assert result["file_ref"].startswith("file_")
+    assert result["server_path"] == os.path.realpath(root / "cat.png")
+
+
+def test_mcp_view_image_rejects_non_image_content(tmp_path, monkeypatch):
+    root = tmp_path / "ai2"
+    root.mkdir()
+    (root / "fake.png").write_bytes(b"not an image")
+    _patch_scope(monkeypatch, {2: root})
+
+    with pytest.raises(HTTPException) as raised:
+        _workspace_file_manage(
+            1,
+            {"action": "view_image", "workspace_path": "fake.png"},
+            2,
+        )
+
+    assert raised.value.detail["code"] == "UNSUPPORTED_IMAGE"
+    assert workspace_files.list_file_refs(user_id=1, ai_config_id=2)["count"] == 0
+
+
+def test_mcp_view_image_rejects_images_over_model_limit(tmp_path, monkeypatch):
+    root = tmp_path / "ai2"
+    root.mkdir()
+    image = root / "large.png"
+    with image.open("wb") as handle:
+        handle.write(b"\x89PNG\r\n\x1a\n")
+        handle.seek(workspace_file_tool.MAX_MODEL_IMAGE_BYTES)
+        handle.write(b"x")
+    _patch_scope(monkeypatch, {2: root})
+
+    with pytest.raises(HTTPException) as raised:
+        _workspace_file_manage(
+            1,
+            {"action": "view_image", "workspace_path": "large.png"},
+            2,
+        )
+
+    assert raised.value.detail["code"] == "IMAGE_TOO_LARGE"
+
+
 def test_mcp_creates_and_revokes_default_five_minute_link(monkeypatch):
     created_calls = []
     monkeypatch.setattr(

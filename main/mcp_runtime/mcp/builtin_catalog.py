@@ -121,6 +121,7 @@ BUILTIN_TOOLS = (
         description=(
             "管理当前 AI 工作区内可发送给用户的文件引用。register 将相对工作区路径注册为不暴露服务器绝对路径的 file_ref；"
             "import_chat_media 可把 /api/chat/media/{media_id}/{token} 对话图片保存到成员工作区；"
+            "view_image 接受 file_ref 或相对工作区路径，将 PNG/JPEG/WebP/GIF 安全附加到下一轮模型输入；"
             "create_temporary_link 创建默认 5 分钟、最长 15 分钟的公网临时下载链接，供其它设备或命令行拉取；"
             "revoke_temporary_link 可提前撤销；info/list 查看引用；unregister 仅移除引用，不删除原文件。"
             "保存结果会返回可直接调用 message.send+to 的示例。"
