@@ -13,7 +13,8 @@ from api.services.bot_directory import (
     update_connection_config,
 )
 from connector_runtime.bots.qq._config import QQ_DEFAULTS
-from connector_runtime.bots.registry import iter_active_for_config, iter_bots
+from connector_runtime.bots.registry import iter_active_for_config, iter_bots, sync_connection_directory
+from gateway.routers.bots import _sync_legacy_channel_enabled
 from connector_runtime.bots.session_cursor import list_ai_sessions
 from api.runtime import run_context
 from tools.conversation import _conversation_base_scope
@@ -86,6 +87,69 @@ def test_same_ai_channel_can_hold_independent_account_instances():
     assert len({row.connection_ref for row in rows}) == 2
     assert [item["app_id"] for item in configs] == ["a", "b"]
     assert [item["app_secret"] for item in configs] == ["secret-a", "secret-b"]
+
+
+def test_legacy_ai_save_does_not_overwrite_connection_directory_credentials():
+    db = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(db, tables=[AssistantAIConfig.__table__, BotConnection.__table__])
+    with Session(db) as session:
+        cfg = AssistantAIConfig(
+            user_id=1,
+            name="multi",
+            bot_configs=json.dumps({
+                "qq": {"enabled": True, "app_id": "stale", "app_secret": "stale-secret"},
+            }),
+        )
+        session.add(cfg)
+        session.commit()
+        session.refresh(cfg)
+        row = ensure_connection(
+            session,
+            user_id=1,
+            ai_config_id=int(cfg.id),
+            channel="qq",
+            name="QQ",
+            create_new=True,
+        )
+        update_connection_config(
+            row,
+            {"enabled": True, "app_id": "current", "app_secret": "current-secret"},
+            QQ_DEFAULTS,
+        )
+        session.commit()
+
+        sync_connection_directory(session, cfg, preserve_existing=True)
+
+        session.refresh(row)
+        saved = connection_config(row, QQ_DEFAULTS)
+    assert saved["app_id"] == "current"
+    assert saved["app_secret"] == "current-secret"
+
+
+def test_connection_directory_projects_channel_enabled_without_credentials():
+    db = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(db, tables=[AssistantAIConfig.__table__, BotConnection.__table__])
+    with Session(db) as session:
+        cfg = AssistantAIConfig(
+            user_id=1,
+            name="multi",
+            bot_configs=json.dumps({"qq": {"enabled": False}}),
+        )
+        session.add(cfg)
+        session.commit()
+        session.refresh(cfg)
+        row = ensure_connection(
+            session, user_id=1, ai_config_id=int(cfg.id), channel="qq", create_new=True
+        )
+        update_connection_config(
+            row,
+            {"enabled": True, "app_id": "directory-only", "app_secret": "directory-secret"},
+            QQ_DEFAULTS,
+        )
+        _sync_legacy_channel_enabled(session, cfg, "qq")
+        session.commit()
+        projected = json.loads(cfg.bot_configs)["qq"]
+    assert projected == {"enabled": True}
 
 
 def test_connection_config_view_has_independent_orm_state():

@@ -340,7 +340,11 @@ def update_ai_config(
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
-    sync_connection_directory(session, cfg)
+    # BotConnection is authoritative after the multi-account directory has
+    # been created. A general AI settings save still carries the legacy
+    # ``bot_configs`` snapshot, which may be stale or secret-redacted; never
+    # let it overwrite credentials saved by the dedicated connection API.
+    sync_connection_directory(session, cfg, preserve_existing=True)
     _write_persona_file(
         user.id,
         cfg,

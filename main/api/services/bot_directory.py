@@ -160,6 +160,18 @@ def update_connection_config(row: BotConnection, values: Dict[str, Any], default
     row.updated_at = time.time()
 
 
+def project_channel_enabled(cfg, channel: str, enabled: bool) -> None:
+    """Update only the legacy enable flag used by card/status projections."""
+    try:
+        payload = json.loads(str(cfg.bot_configs or "{}"))
+    except (TypeError, ValueError):
+        payload = {}
+    channel_config = payload.get(channel) if isinstance(payload.get(channel), dict) else {}
+    channel_config["enabled"] = bool(enabled)
+    payload[channel] = channel_config
+    cfg.bot_configs = json.dumps(payload, ensure_ascii=False)
+
+
 def release_connection_binding(row: BotConnection, *, deleted: bool = False) -> None:
     """Remove provider identity and secrets so an account can be rebound."""
     row.enabled = False

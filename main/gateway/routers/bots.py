@@ -27,6 +27,7 @@ from api.services.bot_directory import (
     ensure_connection,
     public_connection,
     public_contact,
+    project_channel_enabled,
     release_connection_binding,
     update_connection_config,
 )
@@ -80,6 +81,18 @@ def _connection_view(row: BotConnection) -> Dict[str, Any]:
     return out
 
 
+def _sync_legacy_channel_enabled(session: Session, cfg, channel: str) -> None:
+    """Project directory enablement for legacy card/status consumers only."""
+    rows = session.exec(select(BotConnection).where(
+        BotConnection.ai_config_id == int(cfg.id),
+        BotConnection.channel == channel,
+        BotConnection.state != "deleted",
+    )).all()
+    enabled = any(bool(item.enabled) for item in rows)
+    project_channel_enabled(cfg, channel, enabled)
+    session.add(cfg)
+
+
 @router.get("/connections/{config_id}")
 def list_bot_connections(
     config_id: int,
@@ -119,7 +132,7 @@ def create_bot_connection(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ) -> Dict[str, Any]:
-    user, _ = _resolve_user_cfg(config_id, session, authorization)
+    user, cfg = _resolve_user_cfg(config_id, session, authorization)
     channel = str(body.channel or "").strip().lower()
     bot = get_bot(channel)
     if bot is None:
@@ -142,6 +155,7 @@ def create_bot_connection(
     update_connection_config(row, {**body.config, "enabled": True}, bot.default_config())
     row.state = "disconnected" if channel == "wechat" else "configured"
     session.add(row)
+    _sync_legacy_channel_enabled(session, cfg, channel)
     session.commit()
     session.refresh(row)
     return _connection_view(row)
@@ -167,7 +181,7 @@ def update_bot_connection(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ) -> Dict[str, Any]:
-    user, _ = _resolve_user_cfg(config_id, session, authorization)
+    user, cfg = _resolve_user_cfg(config_id, session, authorization)
     row = _owned_connection(session, int(user.id), config_id, connection_ref)
     bot = get_bot(row.channel)
     if body.name is not None:
@@ -191,6 +205,7 @@ def update_bot_connection(
             peer.is_default = peer.id == row.id
             session.add(peer)
     session.add(row)
+    _sync_legacy_channel_enabled(session, cfg, row.channel)
     session.commit()
     session.refresh(row)
     return _connection_view(row)
@@ -203,10 +218,11 @@ def delete_bot_connection(
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ) -> Dict[str, Any]:
-    user, _ = _resolve_user_cfg(config_id, session, authorization)
+    user, cfg = _resolve_user_cfg(config_id, session, authorization)
     row = _owned_connection(session, int(user.id), config_id, connection_ref)
     release_connection_binding(row, deleted=True)
     session.add(row)
+    _sync_legacy_channel_enabled(session, cfg, row.channel)
     session.commit()
     return {"success": True, "connection_ref": connection_ref}
 

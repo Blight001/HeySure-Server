@@ -101,7 +101,7 @@ def sync_connection_directory(
     import time
     from sqlmodel import select
     from api.models import BotConnection
-    from api.services.bot_directory import ensure_connection, update_connection_config
+    from api.services.bot_directory import ensure_connection, project_channel_enabled, update_connection_config
 
     for bot in iter_bots():
         enabled = bool(bot.read_config(cfg).get("enabled"))
@@ -122,6 +122,14 @@ def sync_connection_directory(
                 row.state = "configured" if enabled else "disabled"
             row.updated_at = time.time()
             session.add(row)
+        if preserve_existing and row is not None:
+            enabled_rows = session.exec(select(BotConnection).where(
+                BotConnection.ai_config_id == int(cfg.id or 0),
+                BotConnection.channel == bot.channel,
+                BotConnection.state != "deleted",
+            )).all()
+            project_channel_enabled(cfg, bot.channel, any(item.enabled for item in enabled_rows))
+            session.add(cfg)
     session.commit()
 
 
