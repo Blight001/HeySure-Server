@@ -324,6 +324,10 @@ def compress_session(
     to_summarize = rows[:-effective_keep_recent] if effective_keep_recent > 0 else rows
     kept = rows[-effective_keep_recent:] if effective_keep_recent > 0 else []
     prompt = _build_compression_prompt(to_summarize, request.compression_prompt)
+    # Loading history autobegins a read transaction. The summary model can
+    # take longer than PostgreSQL's idle-in-transaction timeout, so release
+    # that clean transaction before crossing the external network boundary.
+    session.rollback()
     summary = _request_summary(
         base_url=request.base_url,
         api_key=request.api_key,

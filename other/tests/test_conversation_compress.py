@@ -158,6 +158,7 @@ class ConversationCompressTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(rebuilt)
+        self.assertLess(events.index("rollback"), events.index("request"))
         self.assertLess(
             events.index(("tool", True)),
             events.index(("save", "conversation_summary,system_notice_compress_result")),
