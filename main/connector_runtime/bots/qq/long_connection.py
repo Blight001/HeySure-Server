@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import BotConnection
-from api.services.bot_directory import connection_config
+from api.services.bot_directory import readable_connection_config
 from ._config import QQ_DEFAULTS
 
 
@@ -300,6 +300,7 @@ def start_qq_long_connection_clients() -> int:
         return 0
 
     desired: Dict[str, Tuple[int, str, str, bool]] = {}
+    invalid: Dict[str, Tuple[int, str]] = {}
     with Session(engine) as session:
         rows = session.exec(select(BotConnection).where(
             BotConnection.channel == "qq", BotConnection.enabled.is_(True),
@@ -307,7 +308,10 @@ def start_qq_long_connection_clients() -> int:
         )).all()
     for row in rows:
         config_id = int(row.ai_config_id)
-        bot_cfg = connection_config(row, QQ_DEFAULTS)
+        bot_cfg, config_error = readable_connection_config(row, QQ_DEFAULTS)
+        if bot_cfg is None:
+            invalid[row.connection_ref] = (config_id, config_error)
+            continue
         app_id = str(bot_cfg.get("app_id") or "").strip()
         app_secret = str(bot_cfg.get("app_secret") or "").strip()
         if (
@@ -330,6 +334,9 @@ def start_qq_long_connection_clients() -> int:
             wanted = values[1:] if values else None
             if wanted != _SIGNATURES.get(runtime_key):
                 _schedule_disconnect_locked(runtime_key)
+        for runtime_key, (config_id, error) in invalid.items():
+            _CONFIG_IDS[runtime_key] = config_id
+            _LAST_ERRORS[runtime_key] = error
 
     started = 0
     for runtime_key, (config_id, app_id, app_secret, is_sandbox) in desired.items():

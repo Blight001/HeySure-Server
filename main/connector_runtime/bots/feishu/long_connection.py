@@ -9,7 +9,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import BotConnection
-from api.services.bot_directory import connection_config
+from api.services.bot_directory import readable_connection_config
 from ._config import FEISHU_DEFAULTS
 from .router import handle_feishu_event_payload
 
@@ -174,6 +174,7 @@ def start_feishu_long_connection_clients() -> int:
 
     loop = _ensure_lark_loop()
     desired: Dict[str, Tuple[int, str, str]] = {}
+    invalid: Dict[str, Tuple[int, str]] = {}
     with Session(engine) as session:
         rows = session.exec(select(BotConnection).where(
             BotConnection.channel == "feishu", BotConnection.enabled.is_(True),
@@ -181,7 +182,10 @@ def start_feishu_long_connection_clients() -> int:
         )).all()
     for row in rows:
         config_id = int(row.ai_config_id)
-        bot_cfg = connection_config(row, FEISHU_DEFAULTS)
+        bot_cfg, config_error = readable_connection_config(row, FEISHU_DEFAULTS)
+        if bot_cfg is None:
+            invalid[row.connection_ref] = (config_id, config_error)
+            continue
         app_id = str(bot_cfg.get("app_id") or "").strip()
         app_secret = str(bot_cfg.get("app_secret") or "").strip()
         if config_id and bot_cfg.get("enabled") and app_id and app_secret:
@@ -197,6 +201,9 @@ def start_feishu_long_connection_clients() -> int:
                 future = _schedule_disconnect_locked(connection_ref)
                 if future is not None:
                     disconnects.append(future)
+        for connection_ref, (config_id, error) in invalid.items():
+            _CONFIG_IDS[connection_ref] = config_id
+            _LAST_ERRORS[connection_ref] = error
 
     for future in disconnects:
         try:

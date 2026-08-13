@@ -113,6 +113,17 @@ def connection_config(row: BotConnection, defaults: Dict[str, Any]) -> Dict[str,
     return out
 
 
+def readable_connection_config(
+    row: BotConnection,
+    defaults: Dict[str, Any],
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """Load one account without letting bad ciphertext abort peer accounts."""
+    try:
+        return connection_config(row, defaults), ""
+    except ValueError:
+        return None, "机器人凭据无法解密，请重新填写 Secret/Token"
+
+
 def update_connection_config(row: BotConnection, values: Dict[str, Any], defaults: Dict[str, Any]) -> None:
     """Merge whitelisted config without overwriting provider login secrets."""
     unreadable = False

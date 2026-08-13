@@ -7,6 +7,7 @@ from api.models import AssistantAIConfig, BotConnection, BotSessionRoute, ChatSe
 from api.services.bot_directory import (
     connection_config,
     ensure_connection,
+    readable_connection_config,
     release_connection_binding,
     update_connection_config,
 )
@@ -140,3 +141,23 @@ def test_unreadable_connection_can_be_repaired_only_with_fresh_secret(monkeypatc
         QQ_DEFAULTS,
     )
     assert "fresh-secret" in row.credentials_encrypted
+
+
+def test_unreadable_connection_isolated_from_peer_account(monkeypatch):
+    row = BotConnection(
+        connection_ref="conn-bad",
+        user_id=1,
+        ai_config_id=2,
+        channel="qq",
+        credentials_encrypted="fernet:v1:old-key",
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        "api.services.bot_directory.decrypt_credentials",
+        lambda _value: (_ for _ in ()).throw(ValueError("old key")),
+    )
+
+    config, error = readable_connection_config(row, QQ_DEFAULTS)
+
+    assert config is None
+    assert "重新填写" in error
