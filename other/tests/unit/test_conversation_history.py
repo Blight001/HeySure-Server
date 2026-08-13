@@ -68,6 +68,31 @@ def test_reattaches_compacted_mcp_call_to_preceding_assistant(monkeypatch):
     assert result[2] == pair[1]
 
 
+def test_replays_reasoning_for_deepseek_historical_tool_call(monkeypatch):
+    pair = [
+        {"role": "assistant", "tool_calls": [{"id": "call-8"}]},
+        {"role": "tool", "tool_call_id": "call-8", "content": "result"},
+    ]
+    monkeypatch.setattr(
+        mcp_session_context,
+        "compact_mcp_history_messages",
+        lambda *_args: pair,
+    )
+    history = [
+        _message("assistant", "calling", tags="mcp_assistant_call"),
+        _message("system", "bubble", tags="mcp_tool_call", message_id=8),
+    ]
+
+    result = build_conversation_history(
+        history,
+        system_prompt="system",
+        mcp_result_max_chars=123,
+    )
+
+    assert result[1]["reasoning_content"] == "must not be replayed"
+    assert result[1]["tool_calls"] == [{"id": "call-8"}]
+
+
 def test_drops_removed_mode_tool_bubble(monkeypatch):
     def fail_if_called(*_args):
         raise AssertionError("removed mode tool must not be compacted")

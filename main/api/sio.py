@@ -109,6 +109,12 @@ if _HAS_LOCAL_SIO_SERVER:
 else:
     sio = _RemoteSio(settings.api_gateway_url)
 
+# Browser clients always terminate on api-gateway.  Connector owns a separate
+# Socket.IO server for endpoint agents, so emitting a browser event through its
+# local ``sio`` instance would succeed but reach an empty room.  Keep a distinct
+# browser-event transport that relays from every non-gateway process.
+ui_sio = sio if HEYSURE_SERVICE_ROLE == "gateway" else _RemoteSio(settings.api_gateway_url)
+
 # Connected desktop/browser agents: sid -> agent info dict.
 agents = {}
 

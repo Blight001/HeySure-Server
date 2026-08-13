@@ -255,6 +255,23 @@ def handle_wechat_message(config_id: int, message: Dict[str, Any], *, connection
             kwargs={**kwargs, "wait_for_idle": True},
             daemon=True,
         ).start()
+        _notify_prepared_message(prepared, config_id)
         return {"success": True, "queued_after_active": True}
     run_id = launch_message_run(**kwargs, wait_for_idle=False)
+    _notify_prepared_message(prepared, config_id)
     return {"success": True, "run_id": run_id}
+
+
+def _notify_prepared_message(prepared: PreparedMessage, config_id: int) -> None:
+    # Publish only after the ChatRun row exists. The browser can then adopt the
+    # externally-started run immediately instead of racing the connector.
+    from api.services.chat.chat_realtime import notify_history_changed
+
+    notify_history_changed(
+        user_id=prepared.user_id,
+        session_id=prepared.session_id,
+        ai_config_id=config_id,
+        ai_kind=prepared.ai_kind,
+        message_id=prepared.message_id,
+        source="wechat",
+    )

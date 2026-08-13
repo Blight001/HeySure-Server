@@ -61,12 +61,22 @@ def _connection_view(row: BotConnection) -> Dict[str, Any]:
     out = public_connection(row)
     bot = get_bot(row.channel)
     if bot is not None:
-        values = connection_config(row, bot.default_config())
+        credentials_unreadable = False
+        try:
+            values = connection_config(row, bot.default_config())
+        except ValueError:
+            # Key rotation can make an old credential envelope unrecoverable.
+            # Listing accounts must remain available so the user can repair or
+            # delete that account without exposing or guessing its old secret.
+            values = dict(bot.default_config())
+            values["enabled"] = bool(row.enabled)
+            credentials_unreadable = True
         for key in tuple(values):
             if "secret" in key or "token" in key:
                 values[key] = ""
         out["config"] = values
-        out["credentials_configured"] = bool(row.credentials_encrypted)
+        out["credentials_configured"] = bool(row.credentials_encrypted) and not credentials_unreadable
+        out["credentials_unreadable"] = credentials_unreadable
     return out
 
 
@@ -165,7 +175,13 @@ def update_bot_connection(
     if body.enabled is not None:
         row.enabled = bool(body.enabled)
     if body.config is not None:
-        update_connection_config(row, body.config, bot.default_config())
+        try:
+            update_connection_config(row, body.config, bot.default_config())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="机器人加密密钥已更换，请重新填写 App Secret/Token 后保存",
+            ) from exc
     if body.is_default:
         peers = session.exec(select(BotConnection).where(
             BotConnection.ai_config_id == config_id,

@@ -108,3 +108,35 @@ def test_deleted_connection_releases_provider_identity_and_credentials():
     assert row.sync_cursor == ""
     assert row.enabled is False
     assert row.is_default is False
+
+
+def test_unreadable_connection_can_be_repaired_only_with_fresh_secret(monkeypatch):
+    row = BotConnection(
+        connection_ref="conn-old-key",
+        user_id=1,
+        ai_config_id=2,
+        channel="qq",
+        credentials_encrypted="fernet:v1:old-key",
+        enabled=True,
+    )
+    monkeypatch.setattr(
+        "api.services.bot_directory.decrypt_credentials",
+        lambda _value: (_ for _ in ()).throw(ValueError("old key")),
+    )
+    try:
+        update_connection_config(row, {"app_id": "new-app"}, QQ_DEFAULTS)
+    except ValueError as exc:
+        assert "require re-entry" in str(exc)
+    else:
+        raise AssertionError("an autosave without a fresh secret must be rejected")
+
+    monkeypatch.setattr(
+        "api.services.bot_directory.encrypt_credentials",
+        lambda value: json.dumps(value),
+    )
+    update_connection_config(
+        row,
+        {"enabled": True, "app_id": "new-app", "app_secret": "fresh-secret"},
+        QQ_DEFAULTS,
+    )
+    assert "fresh-secret" in row.credentials_encrypted

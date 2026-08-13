@@ -115,10 +115,29 @@ def connection_config(row: BotConnection, defaults: Dict[str, Any]) -> Dict[str,
 
 def update_connection_config(row: BotConnection, values: Dict[str, Any], defaults: Dict[str, Any]) -> None:
     """Merge whitelisted config without overwriting provider login secrets."""
-    envelope = decrypt_credentials(row.credentials_encrypted) if row.credentials_encrypted else {}
+    unreadable = False
+    try:
+        envelope = decrypt_credentials(row.credentials_encrypted) if row.credentials_encrypted else {}
+    except ValueError:
+        # A rotated encryption key cannot recover the previous ciphertext. Only
+        # replace it when the user supplies fresh sensitive credentials; simple
+        # name/toggle autosaves must not silently turn the broken record into a
+        # misleading "configured" one.
+        unreadable = True
+        envelope = {}
     if not isinstance(envelope, dict):
         envelope = {}
-    current = connection_config(row, defaults)
+    if unreadable:
+        supplied_secret = any(
+            ("secret" in str(key).lower() or "token" in str(key).lower())
+            and value not in {"", None}
+            for key, value in values.items()
+        )
+        if not supplied_secret:
+            raise ValueError("bot credentials require re-entry after encryption key rotation")
+        current = dict(defaults)
+    else:
+        current = connection_config(row, defaults)
     for key in defaults:
         if key in values:
             if ("secret" in key or "token" in key) and values[key] in {"", None}:

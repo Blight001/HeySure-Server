@@ -46,9 +46,7 @@ def _append_history_message(
     role = str(getattr(message, "role", "") or "")
     content = getattr(message, "content", None)
     if role in {"user", "assistant"}:
-        # Historical reasoning is intentionally not replayed. Only the visible
-        # content is stable context for a later inference run.
-        conversation.append({"role": role, "content": content})
+        conversation.append(_history_conversation_item(message, role, content, tags))
         return
     if role != "system":
         return
@@ -70,6 +68,22 @@ def _append_history_message(
         conversation.append(compact_pair[1])
         return
     conversation.extend(compact_pair)
+
+
+def _history_conversation_item(
+    message: object,
+    role: str,
+    content: Any,
+    tags: str,
+) -> dict[str, Any]:
+    item = {"role": role, "content": content}
+    # DeepSeek thinking mode requires reasoning_content to accompany a
+    # historical assistant tool call when that call is passed back. Replay it
+    # only for persisted tool-call turns; ordinary reasoning remains UI-only.
+    reasoning = str(getattr(message, "think", "") or "")
+    if role == "assistant" and "mcp_assistant_call" in tags and reasoning:
+        item["reasoning_content"] = reasoning
+    return item
 
 
 def _can_attach_tool_call(conversation: list[dict[str, Any]]) -> bool:
