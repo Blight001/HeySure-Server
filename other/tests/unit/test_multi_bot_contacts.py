@@ -4,7 +4,12 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from api.models import AssistantAIConfig, BotConnection, BotSessionRoute, ChatSession
-from api.services.bot_directory import connection_config, ensure_connection, update_connection_config
+from api.services.bot_directory import (
+    connection_config,
+    ensure_connection,
+    release_connection_binding,
+    update_connection_config,
+)
 from connector_runtime.bots.qq._config import QQ_DEFAULTS
 from connector_runtime.bots.registry import iter_active_for_config, iter_bots
 from connector_runtime.bots.session_cursor import list_ai_sessions
@@ -79,3 +84,27 @@ def test_same_ai_channel_can_hold_independent_account_instances():
     assert len({row.connection_ref for row in rows}) == 2
     assert [item["app_id"] for item in configs] == ["a", "b"]
     assert [item["app_secret"] for item in configs] == ["secret-a", "secret-b"]
+
+
+def test_deleted_connection_releases_provider_identity_and_credentials():
+    row = BotConnection(
+        connection_ref="conn-old",
+        user_id=1,
+        ai_config_id=2,
+        channel="wechat",
+        provider_account_id="wx-account",
+        owner_external_id="wx-user",
+        base_url="https://ilinkai.weixin.qq.com",
+        credentials_encrypted="encrypted",
+        sync_cursor="cursor",
+        state="connected",
+        is_default=True,
+    )
+    release_connection_binding(row, deleted=True)
+    assert row.state == "deleted"
+    assert row.provider_account_id == ""
+    assert row.owner_external_id == ""
+    assert row.credentials_encrypted == ""
+    assert row.sync_cursor == ""
+    assert row.enabled is False
+    assert row.is_default is False

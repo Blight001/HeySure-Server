@@ -130,6 +130,21 @@ def update_connection_config(row: BotConnection, values: Dict[str, Any], default
     row.updated_at = time.time()
 
 
+def release_connection_binding(row: BotConnection, *, deleted: bool = False) -> None:
+    """Remove provider identity and secrets so an account can be rebound."""
+    row.enabled = False
+    row.is_default = False
+    row.provider_account_id = ""
+    row.owner_external_id = ""
+    row.base_url = ""
+    row.credentials_encrypted = ""
+    row.sync_cursor = ""
+    row.last_error_code = ""
+    row.last_seen_at = 0.0
+    row.state = "deleted" if deleted else "disconnected"
+    row.updated_at = time.time()
+
+
 def config_view_for_connection(cfg, row: BotConnection, defaults: Dict[str, Any]):
     """Return a detached AI config whose channel slice comes from one instance."""
     clone = cfg.model_copy(deep=True)

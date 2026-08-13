@@ -15,7 +15,7 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import BotConnection
 from api.services.bot_credentials import decrypt_credentials, encrypt_credentials
-from api.services.bot_directory import ensure_connection
+from api.services.bot_directory import ensure_connection, release_connection_binding
 from .ilink_client import ILinkClient, LOGIN_BASE_URL, _safe_base_url
 
 
@@ -62,7 +62,11 @@ class WeChatLoginManager:
         tokens: list[str] = []
         with Session(engine) as session:
             rows = session.exec(
-                select(BotConnection).where(BotConnection.channel == "wechat")
+                select(BotConnection).where(
+                    BotConnection.channel == "wechat",
+                    BotConnection.enabled.is_(True),
+                    BotConnection.state != "deleted",
+                )
                 .order_by(BotConnection.updated_at.desc())
             ).all()
         for row in rows:
@@ -198,6 +202,16 @@ class WeChatLoginManager:
         base_url = _safe_base_url(str(response.get("baseurl") or LOGIN_BASE_URL))
         now = time.time()
         with Session(engine) as session:
+            stale_rows = session.exec(select(BotConnection).where(
+                BotConnection.channel == "wechat",
+                BotConnection.provider_account_id == account_id,
+                BotConnection.state == "deleted",
+            )).all()
+            for stale in stale_rows:
+                release_connection_binding(stale, deleted=True)
+                session.add(stale)
+            if stale_rows:
+                session.flush()
             row = session.exec(select(BotConnection).where(
                 BotConnection.channel == "wechat",
                 BotConnection.ai_config_id == attempt.config_id,

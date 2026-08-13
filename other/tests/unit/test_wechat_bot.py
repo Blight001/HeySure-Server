@@ -40,6 +40,35 @@ def test_bot_credentials_round_trip():
     assert decrypt_credentials(encrypted) == {"bot_token": "secret-value"}
 
 
+def test_local_tokens_ignore_deleted_or_disabled_connections(monkeypatch):
+    manager = WeChatLoginManager()
+    rows = [
+        SimpleNamespace(enabled=True, state="connected", credentials_encrypted=encrypt_credentials({"bot_token": "active"})),
+        SimpleNamespace(enabled=False, state="disconnected", credentials_encrypted=encrypt_credentials({"bot_token": "disabled"})),
+        SimpleNamespace(enabled=False, state="deleted", credentials_encrypted=encrypt_credentials({"bot_token": "deleted"})),
+    ]
+
+    class FakeResult:
+        def all(self):
+            return [row for row in rows if row.enabled and row.state != "deleted"]
+
+    class FakeSession:
+        def __init__(self, _engine):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def exec(self, _stmt):
+            return FakeResult()
+
+    monkeypatch.setattr("connector_runtime.bots.wechat.login.Session", FakeSession)
+    assert manager._local_tokens() == ["active"]
+
+
 @pytest.mark.parametrize("url", [
     "http://ilinkai.weixin.qq.com",
     "https://example.com",

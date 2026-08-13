@@ -27,6 +27,7 @@ from api.services.bot_directory import (
     ensure_connection,
     public_connection,
     public_contact,
+    release_connection_binding,
     update_connection_config,
 )
 from .auth import get_current_user
@@ -188,10 +189,7 @@ def delete_bot_connection(
 ) -> Dict[str, Any]:
     user, _ = _resolve_user_cfg(config_id, session, authorization)
     row = _owned_connection(session, int(user.id), config_id, connection_ref)
-    row.enabled = False
-    row.is_default = False
-    row.state = "deleted"
-    row.updated_at = time.time()
+    release_connection_binding(row, deleted=True)
     session.add(row)
     session.commit()
     return {"success": True, "connection_ref": connection_ref}
