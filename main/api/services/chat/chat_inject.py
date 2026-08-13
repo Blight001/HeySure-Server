@@ -50,9 +50,28 @@ def _pending_stmt(user_id: int, ai_config_id: Optional[int], ai_kind: str, sessi
         ChatMessage.ai_kind == ai_kind,
         ChatMessage.session_id == session_id,
         ChatMessage.role == "user",
-        ChatMessage.tags == PENDING_INJECT_TAG,
+        ChatMessage.tags.contains(PENDING_INJECT_TAG),
     )
     return _match_config(stmt, ai_config_id)
+
+
+def mark_message_pending_inject(session: Session, message: ChatMessage) -> ChatMessage:
+    """Mark a persisted bot message for injection without losing dedupe tags."""
+    tags = [part.strip() for part in str(message.tags or "").split(",") if part.strip()]
+    if PENDING_INJECT_TAG not in tags:
+        tags.append(PENDING_INJECT_TAG)
+    message.tags = ",".join(tags)
+    session.add(message)
+    session.commit()
+    return message
+
+
+def _clear_pending_tag(tags: str) -> str:
+    return ",".join(
+        part.strip()
+        for part in str(tags or "").split(",")
+        if part.strip() and part.strip() != PENDING_INJECT_TAG
+    )
 
 
 def queue_pending_inject(
@@ -114,7 +133,7 @@ def pop_pending_injects(
                     ai_config_id=ai_config_id,
                     text=text,
                 ))
-            row.tags = ""
+            row.tags = _clear_pending_tag(row.tags)
             session.add(row)
         if rows:
             session.commit()
@@ -202,7 +221,7 @@ def resume_orphaned_injects(
         if not rows:
             return None
         for row in rows:
-            row.tags = ""
+            row.tags = _clear_pending_tag(row.tags)
             session.add(row)
         run_id = f"run_{uuid.uuid4().hex}"
         session.add(

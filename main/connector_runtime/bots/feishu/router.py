@@ -1,5 +1,4 @@
 import threading
-import time
 import uuid
 from typing import Any, Dict
 
@@ -28,9 +27,6 @@ router = APIRouter()
 PREFIX = "/api/feishu"
 # Feishu text messages have a length cap; split only inside one logical reply segment.
 FEISHU_TEXT_MAX_CHARS = 1800
-FEISHU_BUSY_REPLY = "稍等，AI正在调用工具中。"
-_FEISHU_DEFERRED_LOCK = threading.Lock()
-_FEISHU_DEFERRED_SESSIONS: set[str] = set()
 
 
 def _verify_token(cfg: AssistantAIConfig, payload: Dict[str, Any]) -> None:
@@ -134,77 +130,6 @@ def _start_feishu_worker(worker_kwargs: Dict[str, Any]) -> str:
     _RUN_THREADS[run_id] = worker
     worker.start()
     return run_id
-
-
-def _feishu_session_has_live_run(
-    *,
-    user_id: int,
-    ai_config_id: int,
-    ai_kind: str,
-    session_id: str,
-) -> bool:
-    now = time.time()
-    with Session(engine) as session:
-        rows = session.exec(
-            select(ChatRun).where(
-                ChatRun.user_id == user_id,
-                ChatRun.ai_config_id == ai_config_id,
-                ChatRun.ai_kind == ai_kind,
-                ChatRun.session_id == session_id,
-                ChatRun.status.in_(["queued", "running"]),
-            ).order_by(ChatRun.updated_at.desc())
-        ).all()
-    for row in rows:
-        run_id = str(row.run_id or "")
-        worker = _RUN_THREADS.get(run_id)
-        if worker and worker.is_alive():
-            return True
-        # A newly inserted run may not have reached _RUN_THREADS yet.
-        if str(row.status or "") == "queued" and now - float(row.created_at or now) < 5:
-            return True
-    return False
-
-
-def _wait_for_feishu_idle_then_run(
-    *,
-    deferred_key: str,
-    worker_kwargs: Dict[str, Any],
-) -> None:
-    try:
-        send_kwargs = {
-            "user_id": int(worker_kwargs["user_id"]),
-            "ai_config_id": int(worker_kwargs["ai_config_id"]),
-            "ai_kind": str(worker_kwargs["ai_kind"]),
-            "session_id": str(worker_kwargs["session_id"]),
-        }
-        deadline = time.time() + 24 * 60 * 60
-        while time.time() < deadline:
-            if not _feishu_session_has_live_run(**send_kwargs):
-                break
-            time.sleep(0.5)
-        if _feishu_session_has_live_run(**send_kwargs):
-            logger.debug(f"deferred run timeout session={send_kwargs['session_id']}")
-            return
-
-        run_id = f"run_{uuid.uuid4().hex}"
-        with Session(engine) as session:
-            row = ChatRun(
-                run_id=run_id,
-                user_id=send_kwargs["user_id"],
-                ai_config_id=send_kwargs["ai_config_id"],
-                ai_kind=send_kwargs["ai_kind"],
-                session_id=send_kwargs["session_id"],
-                session_name=str(worker_kwargs.get("session_name") or ""),
-                status="queued",
-                stop_requested=False,
-            )
-            session.add(row)
-            session.commit()
-        worker_kwargs["run_id"] = run_id
-        _start_feishu_worker(worker_kwargs)
-    finally:
-        with _FEISHU_DEFERRED_LOCK:
-            _FEISHU_DEFERRED_SESSIONS.discard(deferred_key)
 
 
 @router.post("/events/{config_id}")
@@ -316,7 +241,10 @@ def handle_feishu_event_payload(
                     ChatMessage.ai_config_id == cfg.id,
                     ChatMessage.ai_kind == ai_kind,
                     ChatMessage.session_id == session_id,
-                    ChatMessage.tags == inbound_tag,
+                    ChatMessage.tags.in_([
+                        inbound_tag,
+                        f"{inbound_tag},pending_user_inject",
+                    ]),
                 )
             ).first()
             if existing_inbound:
@@ -361,43 +289,22 @@ def handle_feishu_event_payload(
             )
         ).first()
         if active:
-            cfg_id = int(cfg.id or 0)
-            cfg_user_id = int(cfg.user_id)
-            inbound_message_id = int(inbound_msg.id or 0)
-            _send_feishu_text(
-                user_id=cfg_user_id,
-                ai_config_id=cfg_id,
-                receive_id=receive_id,
-                receive_id_type=receive_id_type,
-                text=FEISHU_BUSY_REPLY,
+            from api.services.chat import chat_inject
+
+            chat_inject.mark_message_pending_inject(session, inbound_msg)
+            chat_inject.resume_orphaned_injects(
+                user_id=int(cfg.user_id),
+                ai_config_id=int(cfg.id or 0),
+                ai_kind=ai_kind,
+                session_id=session_id,
+                session_name=session_name,
             )
-            worker_kwargs = {
-                "run_id": "",
-                "user_id": cfg_user_id,
-                "ai_config_id": cfg_id,
-                "ai_kind": ai_kind,
-                "session_id": session_id,
-                "session_name": session_name,
-                "model_user_content": None,
-                "merged_system_prompt": merged_system_prompt,
-                "max_steps": None,
-                "current_user_message_id": inbound_message_id,
+            return {
+                "success": True,
+                "run_id": active.run_id,
+                "already_active": True,
+                "injected": True,
             }
-            deferred_key = f"{cfg_user_id}:{cfg_id}:{ai_kind}:{session_id}"
-            with _FEISHU_DEFERRED_LOCK:
-                should_start_deferred = deferred_key not in _FEISHU_DEFERRED_SESSIONS
-                if should_start_deferred:
-                    _FEISHU_DEFERRED_SESSIONS.add(deferred_key)
-            if should_start_deferred:
-                threading.Thread(
-                    target=_wait_for_feishu_idle_then_run,
-                    kwargs={
-                        "deferred_key": deferred_key,
-                        "worker_kwargs": worker_kwargs,
-                    },
-                    daemon=True,
-                ).start()
-            return {"success": True, "run_id": active.run_id, "already_active": True, "queued_after_active": True}
 
         run_id = f"run_{uuid.uuid4().hex}"
         row = ChatRun(

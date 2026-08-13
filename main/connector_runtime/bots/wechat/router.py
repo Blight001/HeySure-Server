@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -16,9 +15,6 @@ from connector_runtime.bots.session_cursor import get_active_session_id
 from .routes_store import register_wechat_route
 from .service import send_wechat_text
 from .worker import active_run, launch_message_run
-
-
-BUSY_REPLY = "稍等，AI 正在处理上一条消息。"
 
 
 @dataclass(frozen=True)
@@ -117,7 +113,7 @@ def _duplicate_inbound(session: Session, cfg: AssistantAIConfig, ai_kind: str, s
         ChatMessage.ai_config_id == cfg.id,
         ChatMessage.ai_kind == ai_kind,
         ChatMessage.session_id == session_id,
-        ChatMessage.tags == tag,
+        ChatMessage.tags.in_([tag, f"{tag},pending_user_inject"]),
     )).first() is not None
 
 
@@ -209,6 +205,17 @@ def _prepare_message(config_id: int, incoming: IncomingMessage, connection_ref: 
             session, user_id=int(cfg.user_id), config_id=config_id,
             ai_kind=ai_kind, session_id=session_id,
         )
+        if active is not None:
+            from api.services.chat import chat_inject
+
+            chat_inject.mark_message_pending_inject(session, inbound)
+            chat_inject.resume_orphaned_injects(
+                user_id=int(cfg.user_id),
+                ai_config_id=config_id,
+                ai_kind=ai_kind,
+                session_id=session_id,
+                session_name=session_name,
+            )
         return PreparedMessage(
             user_id=int(cfg.user_id),
             ai_kind=ai_kind,
@@ -245,18 +252,8 @@ def handle_wechat_message(config_id: int, message: Dict[str, Any], *, connection
         "model_content": prepared.model_content,
     }
     if prepared.active:
-        send_wechat_text(
-            prepared.user_id, config_id, text=BUSY_REPLY,
-            to_user_id=incoming.sender, context_token=incoming.context_token,
-            connection_ref=connection_ref,
-        )
-        threading.Thread(
-            target=launch_message_run,
-            kwargs={**kwargs, "wait_for_idle": True},
-            daemon=True,
-        ).start()
         _notify_prepared_message(prepared, config_id)
-        return {"success": True, "queued_after_active": True}
+        return {"success": True, "injected": True}
     run_id = launch_message_run(**kwargs, wait_for_idle=False)
     _notify_prepared_message(prepared, config_id)
     return {"success": True, "run_id": run_id}

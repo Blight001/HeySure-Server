@@ -31,9 +31,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 PREFIX = "/api/qq"
-QQ_BUSY_REPLY = "稍等，AI正在调用工具中。"
-_QQ_DEFERRED_LOCK = threading.Lock()
-_QQ_DEFERRED_SESSIONS: set[str] = set()
 _LAST_CALLBACKS: Dict[int, Dict[str, Any]] = {}
 
 
@@ -161,71 +158,6 @@ def _start_qq_worker(worker_kwargs: Dict[str, Any]) -> str:
     _RUN_THREADS[run_id] = worker
     worker.start()
     return run_id
-
-
-def _qq_session_has_live_run(
-    *,
-    user_id: int,
-    ai_config_id: int,
-    ai_kind: str,
-    session_id: str,
-) -> bool:
-    now = time.time()
-    with Session(engine) as session:
-        rows = session.exec(
-            select(ChatRun).where(
-                ChatRun.user_id == user_id,
-                ChatRun.ai_config_id == ai_config_id,
-                ChatRun.ai_kind == ai_kind,
-                ChatRun.session_id == session_id,
-                ChatRun.status.in_(["queued", "running"]),
-            ).order_by(ChatRun.updated_at.desc())
-        ).all()
-    for row in rows:
-        run_id = str(row.run_id or "")
-        worker = _RUN_THREADS.get(run_id)
-        if worker and worker.is_alive():
-            return True
-        if str(row.status or "") == "queued" and now - float(row.created_at or now) < 5:
-            return True
-    return False
-
-
-def _wait_for_qq_idle_then_run(*, deferred_key: str, worker_kwargs: Dict[str, Any]) -> None:
-    try:
-        send_kwargs = {
-            "user_id": int(worker_kwargs["user_id"]),
-            "ai_config_id": int(worker_kwargs["ai_config_id"]),
-            "ai_kind": str(worker_kwargs["ai_kind"]),
-            "session_id": str(worker_kwargs["session_id"]),
-        }
-        deadline = time.time() + 24 * 60 * 60
-        while time.time() < deadline:
-            if not _qq_session_has_live_run(**send_kwargs):
-                break
-            time.sleep(0.5)
-        if _qq_session_has_live_run(**send_kwargs):
-            logger.debug(f"deferred run timeout session={send_kwargs['session_id']}")
-            return
-        run_id = f"run_{uuid.uuid4().hex}"
-        with Session(engine) as session:
-            row = ChatRun(
-                run_id=run_id,
-                user_id=send_kwargs["user_id"],
-                ai_config_id=send_kwargs["ai_config_id"],
-                ai_kind=send_kwargs["ai_kind"],
-                session_id=send_kwargs["session_id"],
-                session_name=str(worker_kwargs.get("session_name") or ""),
-                status="queued",
-                stop_requested=False,
-            )
-            session.add(row)
-            session.commit()
-        worker_kwargs["run_id"] = run_id
-        _start_qq_worker(worker_kwargs)
-    finally:
-        with _QQ_DEFERRED_LOCK:
-            _QQ_DEFERRED_SESSIONS.discard(deferred_key)
 
 
 @router.post("/events/{config_id}")
@@ -422,7 +354,10 @@ def handle_qq_event_payload(
                     ChatMessage.ai_config_id == cfg.id,
                     ChatMessage.ai_kind == ai_kind,
                     ChatMessage.session_id == session_id,
-                    ChatMessage.tags == inbound_tag,
+                    ChatMessage.tags.in_([
+                        inbound_tag,
+                        f"{inbound_tag},pending_user_inject",
+                    ]),
                 )
             ).first()
             if existing_inbound:
@@ -465,54 +400,23 @@ def handle_qq_event_payload(
         cfg_user_id = int(cfg.user_id)
         inbound_message_id = int(inbound_msg.id or 0)
         if active:
-            _send_qq_text(
-                user_id=cfg_user_id,
-                ai_config_id=cfg_id,
-                target_id=target_id,
-                target_type=target_type,
-                text=QQ_BUSY_REPLY,
-                msg_id=qq_message_id,
-                event_id=qq_event_id,
-                msg_seq=1 if qq_message_id else None,
-                connection_ref=connection_ref,
-            )
-            register_qq_session_route(
-                session,
+            from api.services.chat import chat_inject
+
+            chat_inject.mark_message_pending_inject(session, inbound_msg)
+            chat_inject.resume_orphaned_injects(
                 user_id=cfg_user_id,
                 ai_config_id=cfg_id,
                 ai_kind=ai_kind,
                 session_id=session_id,
-                target_id=target_id,
-                target_type=target_type,
-                source_message_id=qq_message_id,
-                source_event_id=qq_event_id,
-                next_msg_seq=2,
-                connection_ref=connection_ref,
+                session_name=session_name,
             )
-            worker_kwargs = {
-                "run_id": "",
-                "user_id": cfg_user_id,
-                "ai_config_id": cfg_id,
-                "ai_kind": ai_kind,
-                "session_id": session_id,
-                "session_name": session_name,
-                "model_user_content": None,
-                "merged_system_prompt": merged_system_prompt,
-                "max_steps": None,
-                "current_user_message_id": inbound_message_id,
+            return {
+                "op": 12,
+                "d": 0,
+                "run_id": active.run_id,
+                "already_active": True,
+                "injected": True,
             }
-            deferred_key = f"{cfg_user_id}:{cfg_id}:{ai_kind}:{session_id}"
-            with _QQ_DEFERRED_LOCK:
-                should_start_deferred = deferred_key not in _QQ_DEFERRED_SESSIONS
-                if should_start_deferred:
-                    _QQ_DEFERRED_SESSIONS.add(deferred_key)
-            if should_start_deferred:
-                threading.Thread(
-                    target=_wait_for_qq_idle_then_run,
-                    kwargs={"deferred_key": deferred_key, "worker_kwargs": worker_kwargs},
-                    daemon=True,
-                ).start()
-            return {"op": 12, "d": 0, "run_id": active.run_id, "already_active": True, "queued_after_active": True}
 
         run_id = f"run_{uuid.uuid4().hex}"
         row = ChatRun(
