@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -16,6 +17,25 @@ from api.models import BotConnection
 from api.services.bot_credentials import decrypt_credentials, encrypt_credentials
 from api.services.bot_directory import ensure_connection
 from .ilink_client import ILinkClient, LOGIN_BASE_URL, _safe_base_url
+
+
+logger = logging.getLogger(__name__)
+
+
+def _credentials_with_token(
+    credentials_encrypted: str,
+    connection_state: str,
+    token: str,
+) -> str:
+    """Replace stale credentials only when the connection is already inactive."""
+    try:
+        envelope = decrypt_credentials(credentials_encrypted) if credentials_encrypted else {}
+    except ValueError:
+        if connection_state == "connected":
+            raise
+        envelope = {}
+    envelope["bot_token"] = token
+    return encrypt_credentials(envelope)
 
 
 @dataclass
@@ -196,9 +216,11 @@ class WeChatLoginManager:
             row.provider_account_id = account_id
             row.owner_external_id = str(response.get("ilink_user_id") or "")
             row.base_url = base_url
-            envelope = decrypt_credentials(row.credentials_encrypted) if row.credentials_encrypted else {}
-            envelope["bot_token"] = token
-            row.credentials_encrypted = encrypt_credentials(envelope)
+            row.credentials_encrypted = _credentials_with_token(
+                row.credentials_encrypted,
+                row.state,
+                token,
+            )
             row.state = "connected"
             row.last_error_code = ""
             row.last_seen_at = now
@@ -258,6 +280,11 @@ class WeChatLoginManager:
                 if done:
                     return
             except Exception as exc:
+                logger.exception(
+                    "wechat login failed connection_ref=%s error_type=%s",
+                    attempt.connection_ref,
+                    type(exc).__name__,
+                )
                 self._set_attempt(attempt, "failed", f"微信连接失败：{type(exc).__name__}")
                 return
         self._set_attempt(attempt, "expired", "二维码已过期，请重新生成")

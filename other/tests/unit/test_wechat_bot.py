@@ -8,7 +8,11 @@ from api.models import BotSessionRoute
 from api.services.bot_credentials import decrypt_credentials, encrypt_credentials
 from connector_runtime.bots import get as get_bot
 from connector_runtime.bots.wechat.ilink_client import ILinkClient, _safe_base_url
-from connector_runtime.bots.wechat.login import LoginAttempt, WeChatLoginManager
+from connector_runtime.bots.wechat.login import (
+    LoginAttempt,
+    WeChatLoginManager,
+    _credentials_with_token,
+)
 from connector_runtime.bots.wechat.media import (
     _aes_decrypt,
     _parse_aes_key,
@@ -240,6 +244,16 @@ def test_login_confirmed_persists_before_marking_connected(monkeypatch):
     assert finished is True
     assert saved and saved[0][0] is attempt
     assert manager.snapshot(7)["connected"] is True
+
+
+def test_login_replaces_unreadable_credentials_for_disconnected_connection():
+    encrypted = _credentials_with_token("fernet:v1:unreadable", "disconnected", "new-token")
+    assert decrypt_credentials(encrypted) == {"bot_token": "new-token"}
+
+
+def test_login_preserves_unreadable_credentials_for_connected_connection():
+    with pytest.raises(ValueError, match="cannot be decrypted"):
+        _credentials_with_token("fernet:v1:unreadable", "connected", "new-token")
 
 
 def test_replaced_login_attempt_cannot_update_current_state():
