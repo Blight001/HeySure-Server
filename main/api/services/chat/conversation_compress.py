@@ -13,7 +13,7 @@ subsequent turns, while the most recent few messages are kept verbatim.
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import requests
 from sqlmodel import Session, select
@@ -31,10 +31,6 @@ _MAX_MSG_CHARS = 4000
 
 _ROLE_LABELS = {"user": "用户", "assistant": "助手", "system": "系统"}
 
-_COMPRESSION_STARTED_NOTICE = (
-    "[系统提示]\n正在自动压缩较早的对话历史；系统会保留最近消息，"
-    "并用详细摘要承接目标、约束、进度、关键数据、待办与风险。"
-)
 _COMPRESSION_FAILED_NOTICE = (
     "[系统提示]\n对话历史自动压缩未完成；系统已保留原始消息，"
     "并会继续当前对话。"
@@ -49,6 +45,25 @@ class _CompressionMessageContext:
     session_id: str
     session_name: Optional[str]
     model: Optional[str]
+
+
+@dataclass(frozen=True)
+class CompressionRequest:
+    convo: List[Dict[str, Any]]
+    user_id: int
+    ai_config_id: Optional[int]
+    ai_kind: str
+    session_id: str
+    session_name: Optional[str]
+    model: Optional[str]
+    api_key: str
+    base_url: str
+    system_prompt: str
+    compression_prompt: str
+    session_tokens: int
+    threshold: int
+    keep_recent: int = 4
+    on_tool_result: Optional[Callable[[bool, str], None]] = None
 
 
 def _response_debug(resp: requests.Response, *, max_body: int = 1200) -> str:
@@ -285,21 +300,7 @@ def _rebuild_conversation(
 
 def compress_session(
     session: Session,
-    *,
-    convo: List[Dict[str, Any]],
-    user_id: int,
-    ai_config_id: Optional[int],
-    ai_kind: str,
-    session_id: str,
-    session_name: Optional[str],
-    model: Optional[str],
-    api_key: str,
-    base_url: str,
-    system_prompt: str,
-    compression_prompt: str,
-    session_tokens: int,
-    threshold: int,
-    keep_recent: int = 4,
+    request: CompressionRequest,
 ) -> Optional[List[Dict[str, Any]]]:
     """Summarize the older part of a session and rebuild the live ``convo``.
 
@@ -307,30 +308,31 @@ def compress_session(
     worth doing or fails (so the caller can avoid retry-looping forever).
     """
     message_context = _CompressionMessageContext(
-        user_id=user_id,
-        ai_config_id=ai_config_id,
-        ai_kind=ai_kind,
-        session_id=session_id,
-        session_name=session_name,
-        model=model,
+        user_id=request.user_id,
+        ai_config_id=request.ai_config_id,
+        ai_kind=request.ai_kind,
+        session_id=request.session_id,
+        session_name=request.session_name,
+        model=request.model,
     )
     rows = _load_compression_rows(session, message_context=message_context)
-    if len(rows) < keep_recent + 2:
+    if not rows:
         return None
-    to_summarize = rows[:-keep_recent] if keep_recent > 0 else rows
-    kept = rows[-keep_recent:] if keep_recent > 0 else []
-    if not to_summarize:
-        return None
-    prompt = _build_compression_prompt(to_summarize, compression_prompt)
-    if not _persist_compression_notice(
-        session,
-        message_context=message_context,
-        content=_COMPRESSION_STARTED_NOTICE,
-        tags="system_notice_compress_started",
-    ):
-        return None
-    summary = _request_summary(base_url=base_url, api_key=api_key, model=model, prompt=prompt)
+    # A manual compression request is an explicit MCP action. Always fold at
+    # least one eligible row instead of turning short histories into a no-op.
+    effective_keep_recent = min(request.keep_recent, max(0, len(rows) - 1))
+    to_summarize = rows[:-effective_keep_recent] if effective_keep_recent > 0 else rows
+    kept = rows[-effective_keep_recent:] if effective_keep_recent > 0 else []
+    prompt = _build_compression_prompt(to_summarize, request.compression_prompt)
+    summary = _request_summary(
+        base_url=request.base_url,
+        api_key=request.api_key,
+        model=request.model,
+        prompt=prompt,
+    )
     if summary is None:
+        if request.on_tool_result is not None:
+            request.on_tool_result(False, "对话历史压缩未完成，原始消息已保留。")
         _persist_compression_notice(
             session,
             message_context=message_context,
@@ -338,6 +340,8 @@ def compress_session(
             tags="system_notice_compress_failed",
         )
         return None
+    if request.on_tool_result is not None:
+        request.on_tool_result(True, "已完成上下文压缩，较早历史已折叠为摘要。")
     summary_content = _persist_compression_result(
         session,
         message_context=message_context,
@@ -347,7 +351,7 @@ def compress_session(
     if summary_content is None:
         return None
     return _rebuild_conversation(
-        system_prompt=system_prompt,
+        system_prompt=request.system_prompt,
         summary_content=summary_content,
         kept=kept,
     )

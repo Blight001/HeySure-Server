@@ -2,7 +2,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from api.services.chat.conversation_compress import _extract_summary_response, compress_session
+from api.services.chat.conversation_compress import (
+    CompressionRequest,
+    _extract_summary_response,
+    compress_session,
+)
 
 
 class _Response:
@@ -57,23 +61,26 @@ def _history_rows(count=6):
     ]
 
 
-def _compress(session):
+def _compress(session, **kwargs):
     return compress_session(
         session,
-        convo=[],
-        user_id=7,
-        ai_config_id=3,
-        ai_kind="assistant",
-        session_id="session-a",
-        session_name="任务",
-        model="model-a",
-        api_key="key",
-        base_url="http://model",
-        system_prompt="system",
-        compression_prompt="压缩：{history}",
-        session_tokens=100,
-        threshold=80,
-        keep_recent=2,
+        CompressionRequest(
+            convo=[],
+            user_id=7,
+            ai_config_id=3,
+            ai_kind="assistant",
+            session_id="session-a",
+            session_name="任务",
+            model="model-a",
+            api_key="key",
+            base_url="http://model",
+            system_prompt="system",
+            compression_prompt="压缩：{history}",
+            session_tokens=100,
+            threshold=80,
+            keep_recent=2,
+            **kwargs,
+        ),
     )
 
 
@@ -122,7 +129,7 @@ class ConversationCompressTests(unittest.TestCase):
 
         self.assertEqual(_extract_summary_response(resp), "")
 
-    def test_started_notice_is_saved_before_summary_request(self):
+    def test_tool_result_precedes_compression_boundary(self):
         events = []
         session = _Session(_history_rows(), events)
 
@@ -145,14 +152,36 @@ class ConversationCompressTests(unittest.TestCase):
             patch("api.services.chat.conversation_compress._save_message", save_message),
             patch("api.services.chat.conversation_compress.ai_http_post", post_summary),
         ):
-            rebuilt = _compress(session)
+            rebuilt = _compress(
+                session,
+                on_tool_result=lambda success, _text: events.append(("tool", success)),
+            )
 
         self.assertIsNotNone(rebuilt)
         self.assertLess(
-            events.index(("save", "system_notice_compress_started")),
-            events.index("request"),
+            events.index(("tool", True)),
+            events.index(("save", "conversation_summary,system_notice_compress_result")),
         )
-        self.assertIn(("save", "conversation_summary,system_notice_compress_result"), events)
+
+    def test_short_history_still_compresses_one_message(self):
+        events = []
+        session = _Session(_history_rows(2), events)
+
+        with (
+            patch("api.services.chat.conversation_compress._save_message"),
+            patch(
+                "api.services.chat.conversation_compress.ai_http_post",
+                return_value=SimpleNamespace(
+                    headers={"content-type": "application/json"},
+                    raise_for_status=lambda: None,
+                    json=lambda: {"choices": [{"message": {"content": "摘要"}}]},
+                ),
+            ),
+        ):
+            rebuilt = _compress(session)
+
+        self.assertIsNotNone(rebuilt)
+        self.assertEqual(rebuilt[-1]["content"], "message-1")
 
     def test_failed_summary_adds_terminal_notice(self):
         events = []
@@ -168,16 +197,20 @@ class ConversationCompressTests(unittest.TestCase):
                 side_effect=RuntimeError("model unavailable"),
             ),
         ):
-            rebuilt = _compress(session)
+            tool_results = []
+            rebuilt = _compress(
+                session,
+                on_tool_result=lambda success, text: tool_results.append((success, text)),
+            )
 
         self.assertIsNone(rebuilt)
         self.assertEqual(
             [event for event in events if isinstance(event, tuple)],
             [
-                ("save", "system_notice_compress_started"),
                 ("save", "system_notice_compress_failed"),
             ],
         )
+        self.assertEqual(tool_results[0][0], False)
 
 
 if __name__ == "__main__":

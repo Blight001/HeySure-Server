@@ -381,20 +381,22 @@ def _compress_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Opt
 
         rebuilt = conversation_compress.compress_session(
             session,
-            convo=[],
-            user_id=user_id,
-            ai_config_id=scope["ai_config_id"],
-            ai_kind=scope["ai_kind"],
-            session_id=session_id,
-            session_name=session_name,
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            system_prompt=system_prompt,
-            compression_prompt=compression_prompt,
-            session_tokens=0,
-            threshold=0,
-            keep_recent=keep_recent,
+            conversation_compress.CompressionRequest(
+                convo=[],
+                user_id=user_id,
+                ai_config_id=scope["ai_config_id"],
+                ai_kind=scope["ai_kind"],
+                session_id=session_id,
+                session_name=session_name,
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                system_prompt=system_prompt,
+                compression_prompt=compression_prompt,
+                session_tokens=0,
+                threshold=0,
+                keep_recent=keep_recent,
+            ),
         )
 
     if rebuilt:
@@ -404,7 +406,8 @@ def _compress_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Opt
         }
     return {
         "compressed": False,
-        "note": "对话历史较短，暂无需压缩。",
+        "error": "compression_failed",
+        "note": "上下文压缩未完成，原始消息已保留。",
     }
 
 

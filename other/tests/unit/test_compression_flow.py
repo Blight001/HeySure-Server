@@ -56,7 +56,18 @@ def test_manual_compression_ignores_unrelated_turn():
 def test_manual_compression_rebuilds_and_reanchors_active_plan(monkeypatch):
     context, resets, phases, _ = _context(plan=SimpleNamespace())
     rebuilt = [{"role": "system", "content": "summary"}]
-    monkeypatch.setattr(compression_flow, "_compress", lambda *args: rebuilt)
+    bubbles = []
+
+    def compress(*_args, **kwargs):
+        kwargs["on_tool_result"](True, "完成")
+        return rebuilt
+
+    monkeypatch.setattr(compression_flow, "_compress", compress)
+    monkeypatch.setattr(
+        compression_flow.tool_persistence,
+        "save_tool_bubble",
+        lambda request: bubbles.append(request),
+    )
 
     decision = compression_flow.handle_manual_compression(
         context,
@@ -76,12 +87,14 @@ def test_manual_compression_rebuilds_and_reanchors_active_plan(monkeypatch):
     assert decision.state.phase_mcp_statuses == []
     assert resets == [True]
     assert phases == ["generating"]
+    assert bubbles[0].tool == "conversation.manage"
+    assert bubbles[0].arguments == {"action": "compress", "keep_recent": 30}
 
 
-def test_manual_noop_answers_compress_and_pending_native_calls(monkeypatch):
+def test_manual_failure_answers_compress_and_pending_native_calls(monkeypatch):
     context, _, phases, _ = _context()
     state = _state()
-    monkeypatch.setattr(compression_flow, "_compress", lambda *args: None)
+    monkeypatch.setattr(compression_flow, "_compress", lambda *args, **kwargs: None)
     calls = [
         {
             "tool": "conversation.manage",
@@ -104,13 +117,25 @@ def test_manual_noop_answers_compress_and_pending_native_calls(monkeypatch):
     ]
     assert decision.state is state
     assert phases == ["generating"]
+    assert '"success": false' in state.conversation[-2]["content"]
 
 
 def test_auto_compression_rebuilds_and_reinjects_plan(monkeypatch):
     context, resets, _, directives = _context(plan=SimpleNamespace())
     rebuilt = [{"role": "system", "content": "summary"}]
+    bubbles = []
+
+    def compress(*_args, **kwargs):
+        kwargs["on_tool_result"](True, "完成")
+        return rebuilt
+
     monkeypatch.setattr(compression_flow, "_session_total_tokens", lambda *args: 150)
-    monkeypatch.setattr(compression_flow, "_compress", lambda *args: rebuilt)
+    monkeypatch.setattr(compression_flow, "_compress", compress)
+    monkeypatch.setattr(
+        compression_flow.tool_persistence,
+        "save_tool_bubble",
+        lambda request: bubbles.append(request),
+    )
 
     decision = compression_flow.maybe_auto_compress(
         context,
@@ -124,12 +149,13 @@ def test_auto_compression_rebuilds_and_reinjects_plan(monkeypatch):
     assert decision.state.conversation is rebuilt
     assert resets == [True]
     assert directives == [rebuilt]
+    assert bubbles[0].arguments == {"action": "compress", "trigger": "auto"}
 
 
 def test_auto_compression_failure_disables_retry_for_run(monkeypatch):
     context, _, _, _ = _context()
     monkeypatch.setattr(compression_flow, "_session_total_tokens", lambda *args: 150)
-    monkeypatch.setattr(compression_flow, "_compress", lambda *args: None)
+    monkeypatch.setattr(compression_flow, "_compress", lambda *args, **kwargs: None)
 
     decision = compression_flow.maybe_auto_compress(
         context,

@@ -10,6 +10,7 @@ from sqlmodel import Session
 from api.chat_runtime.chat_runtime_helpers import _session_total_tokens
 from api.chat_runtime.chat_prompt_utils import _safe_json
 from api.services.chat import conversation_compress
+from ai_runtime.inference import tool_persistence
 from ai_runtime.inference.tool_resolution import append_pending_call_responses
 
 
@@ -72,7 +73,17 @@ def handle_manual_compression(
     if compress_call is None:
         return CompressionDecision(False, False, state)
     keep_recent = _bounded_keep_recent(compress_call.get("arguments") or {})
-    rebuilt = _compress(context, state.conversation, 0, 0, keep_recent)
+    rebuilt = _compress(
+        context,
+        state.conversation,
+        0,
+        0,
+        keep_recent,
+        on_tool_result=_tool_result_callback(
+            context,
+            compress_call.get("arguments") or {},
+        ),
+    )
     next_state = state
     if rebuilt:
         rebuilt.append({
@@ -85,7 +96,7 @@ def handle_manual_compression(
         context.reset_live_usage()
         next_state = _reanchor_state(state, rebuilt, context.plan_state is not None)
     else:
-        _append_manual_noop(
+        _append_manual_failure(
             state.conversation,
             turn_calls,
             compress_call,
@@ -103,40 +114,74 @@ def _bounded_keep_recent(arguments: dict) -> int:
     return max(0, min(keep_recent, 20))
 
 
-def _compress(context, conversation, session_tokens, threshold, keep_recent=None):
-    kwargs = {
-        "convo": conversation,
-        "user_id": context.user_id,
-        "ai_config_id": context.ai_config_id,
-        "ai_kind": context.ai_kind,
-        "session_id": context.session_id,
-        "session_name": context.session_name,
-        "model": context.model,
-        "api_key": context.api_key,
-        "base_url": context.base_url,
-        "system_prompt": context.system_prompt,
-        "compression_prompt": context.compression_prompt,
-        "session_tokens": session_tokens,
-        "threshold": threshold,
-    }
-    if keep_recent is not None:
-        kwargs["keep_recent"] = keep_recent
+def _tool_result_callback(context: CompressionContext, arguments: dict):
+    started_at = time.perf_counter()
+
+    def persist_tool_result(success: bool, result_text: str) -> None:
+        tool_persistence.save_tool_bubble(tool_persistence.ToolBubbleRequest(
+            session=context.session,
+            user_id=context.user_id,
+            ai_config_id=context.ai_config_id,
+            ai_kind=context.ai_kind,
+            session_id=context.session_id,
+            session_name=context.session_name,
+            model=context.model,
+            tool="conversation.manage",
+            arguments=arguments,
+            result_text=result_text,
+            failed=not success,
+            latency=max(0.0, time.perf_counter() - started_at),
+        ))
+
+    return persist_tool_result
+
+
+def _compress(
+    context,
+    conversation,
+    session_tokens,
+    threshold,
+    keep_recent=None,
+    on_tool_result=None,
+):
+    request = conversation_compress.CompressionRequest(
+        convo=conversation,
+        user_id=context.user_id,
+        ai_config_id=context.ai_config_id,
+        ai_kind=context.ai_kind,
+        session_id=context.session_id,
+        session_name=context.session_name,
+        model=context.model,
+        api_key=context.api_key,
+        base_url=context.base_url,
+        system_prompt=context.system_prompt,
+        compression_prompt=context.compression_prompt,
+        session_tokens=session_tokens,
+        threshold=threshold,
+        keep_recent=4 if keep_recent is None else keep_recent,
+        on_tool_result=on_tool_result,
+    )
     try:
-        return conversation_compress.compress_session(context.session, **kwargs)
+        return conversation_compress.compress_session(context.session, request)
     except Exception:
         logger.exception("conversation compression failed")
         return None
 
 
-def _append_manual_noop(conversation, turn_calls, compress_call, native) -> None:
-    note = "当前对话历史较短，暂无需压缩，请直接继续。"
+def _append_manual_failure(conversation, turn_calls, compress_call, native) -> None:
+    note = "上下文压缩未完成，原始消息已保留，请继续当前对话。"
     if not native:
         conversation.append({"role": "user", "content": note})
         return
     conversation.append({
         "role": "tool",
         "tool_call_id": compress_call["id"],
-        "content": _safe_json({"success": True, "compressed": False, "note": note}),
+        "content": _safe_json({
+            "success": False,
+            "compressed": False,
+            "error": "compression_failed",
+            "note": note,
+        }),
     })
     append_pending_call_responses(
         conversation,
@@ -171,7 +216,16 @@ def maybe_auto_compress(
     )
     if session_tokens < threshold:
         return CompressionDecision(False, False, state)
-    rebuilt = _compress(context, state.conversation, session_tokens, threshold)
+    rebuilt = _compress(
+        context,
+        state.conversation,
+        session_tokens,
+        threshold,
+        on_tool_result=_tool_result_callback(
+            context,
+            {"action": "compress", "trigger": "auto"},
+        ),
+    )
     if not rebuilt:
         return CompressionDecision(
             True,
