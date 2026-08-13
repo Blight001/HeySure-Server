@@ -247,15 +247,20 @@ class QQBot(BotAdapter):
         bot_cfg = self.read_config(cfg)
         if not bot_cfg.get("enabled"):
             return status.disabled("QQ机器人未启用")
+        if remote_state is not None:
+            report = status.from_connection_state(
+                remote_state, mode="long_connection", starting_hint="启动中"
+            )
+            if not report["message"]:
+                report["message"] = "botpy 长连接未运行"
+            return report
         app_id = str(bot_cfg.get("app_id") or "").strip()
         app_secret = str(bot_cfg.get("app_secret") or "").strip()
         if not app_id or not app_secret:
             return status.failed("long_connection", "App ID / Secret 配置不完整")
-        state = remote_state
-        if state is None:
-            if remote_error:
-                return status.failed("long_connection", f"connector-runtime 状态不可用: {remote_error}")
-            state = self.get_long_connection_state(int(cfg.id or 0))
+        if remote_error:
+            return status.failed("long_connection", f"connector-runtime 状态不可用: {remote_error}")
+        state = self.get_long_connection_state(int(cfg.id or 0))
         report = status.from_connection_state(state, mode="long_connection", starting_hint="启动中")
         if not report["message"]:
             report["message"] = "botpy 长连接未运行"

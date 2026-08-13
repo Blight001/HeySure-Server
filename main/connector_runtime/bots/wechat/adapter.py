@@ -19,7 +19,32 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-WECHAT_TEXT_MAX_CHARS = 4000
+WECHAT_TEXT_MAX_CHARS = 2000
+
+
+def split_wechat_text(text: str, limit: int = WECHAT_TEXT_MAX_CHARS) -> list[str]:
+    """Split visible text into independent finished iLink messages."""
+    remaining = str(text or "").strip()
+    chunks: list[str] = []
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        window = remaining[: limit + 1]
+        cut = 0
+        for separator in ("\n\n", "\n", "。", "！", "？", " "):
+            position = window.rfind(separator, 0, limit + 1)
+            readable = position >= max(1, limit // 3)
+            if position > 0 and (readable or separator.startswith("\n")):
+                cut = position if separator.startswith("\n") or separator == " " else position + 1
+                break
+        if not cut:
+            cut = limit
+        chunk = remaining[:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].strip()
+    return chunks
 
 
 class WeChatBot(BotAdapter):
@@ -79,10 +104,7 @@ class WeChatBot(BotAdapter):
 
     def notify_assistant_message(self, session: "Session", message: "ChatMessage", *, rendered_content: str, route: Any) -> None:
         from .service import send_wechat_text
-        for start in range(0, len(rendered_content), WECHAT_TEXT_MAX_CHARS):
-            chunk = rendered_content[start:start + WECHAT_TEXT_MAX_CHARS].strip()
-            if not chunk:
-                continue
+        for chunk in split_wechat_text(rendered_content):
             try:
                 send_wechat_text(
                     int(message.user_id),

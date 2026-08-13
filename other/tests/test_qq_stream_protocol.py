@@ -51,7 +51,7 @@ def test_first_stream_packet_omits_id_and_finishes_with_newline(monkeypatch):
         target_id="openid",
         target_type="c2c",
         stream_id="",
-        stream_index=0,
+        stream_index=1,
         stream_state=10,
         msg_id="source-message",
         msg_seq=1,
@@ -59,7 +59,7 @@ def test_first_stream_packet_omits_id_and_finishes_with_newline(monkeypatch):
 
     payload = captured[0]
     assert "id" not in payload["stream"]
-    assert payload["stream"]["index"] == 0
+    assert payload["stream"]["index"] == 1
     assert payload["markdown"]["content"] == "hello\n"
 
 
@@ -94,7 +94,7 @@ def _bare_stream_session():
     stream.markdown_mode = "native"
     stream.template_id = ""
     stream._seq = 1
-    stream._index = 0
+    stream._index = 1
     stream._lock = threading.Lock()
     stream._stream_id = ""
     stream._started = False
@@ -119,7 +119,7 @@ def test_failed_stream_packet_does_not_consume_passive_reply_sequence(monkeypatc
 
     assert stream._failed is True
     assert stream._seq == 1
-    assert stream._index == 0
+    assert stream._index == 1
 
 
 def test_stream_sends_full_snapshots_and_reuses_passive_reply_sequence(monkeypatch):
@@ -138,7 +138,7 @@ def test_stream_sends_full_snapshots_and_reuses_passive_reply_sequence(monkeypat
     stream._send_packet("hello world", final=True, force=True)
 
     assert [call["text"] for call in calls] == ["hello", "hello world", "hello world"]
-    assert [call["stream_index"] for call in calls] == [0, 1, 2]
+    assert [call["stream_index"] for call in calls] == [1, 2, 3]
     assert [call["msg_seq"] for call in calls] == [1, 1, 1]
     assert [call["reset"] for call in calls] == [False, True, True]
     assert calls[-1]["reset"] is True
@@ -182,7 +182,7 @@ def test_finalize_bubble_closes_the_existing_run_stream(monkeypatch):
     assert calls[0]["reset"] is True
     assert stream._started is True
     assert stream._stream_id == "stream-1"
-    assert stream._index == 1
+    assert stream._index == 2
     assert stream._last_sent_text == "answer"
     assert stream._seq == 1
 

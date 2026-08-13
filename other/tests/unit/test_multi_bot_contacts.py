@@ -13,7 +13,7 @@ from api.services.bot_directory import (
     update_connection_config,
 )
 from connector_runtime.bots.qq._config import QQ_DEFAULTS
-from connector_runtime.bots.registry import iter_active_for_config, iter_bots, sync_connection_directory
+from connector_runtime.bots.registry import get as get_bot, iter_active_for_config, iter_bots, sync_connection_directory
 from gateway.routers.bots import (
     BotConnectionUpdateRequest,
     _connection_config_update,
@@ -166,6 +166,34 @@ def test_top_level_enabled_wins_over_stale_nested_config():
         "app_id": "app",
         "app_secret": "secret",
     }
+
+
+def test_qq_card_status_prefers_authoritative_directory_runtime_state():
+    cfg = AssistantAIConfig(
+        user_id=1,
+        name="multi",
+        bot_configs=json.dumps({"qq": {"enabled": True}}),
+    )
+    report = get_bot("qq").build_status(
+        cfg,
+        remote_state={"status": "success", "message": "botpy 长连接运行中"},
+    )
+    assert report["status"] == "success"
+    assert report["mode"] == "long_connection"
+
+
+def test_feishu_card_status_prefers_authoritative_directory_runtime_state():
+    cfg = AssistantAIConfig(
+        user_id=1,
+        name="multi",
+        bot_configs=json.dumps({"feishu": {"enabled": True}}),
+    )
+    report = get_bot("feishu").build_status(
+        cfg,
+        remote_state={"status": "success", "message": "飞书长连接运行中"},
+    )
+    assert report["status"] == "success"
+    assert report["mode"] == "long_connection"
 
 
 def test_connection_config_view_has_independent_orm_state():

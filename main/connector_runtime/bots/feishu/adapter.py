@@ -255,17 +255,19 @@ class FeishuBot(BotAdapter):
         bot_cfg = self.read_config(cfg)
         if not bot_cfg.get("enabled"):
             return status.disabled("飞书机器人未启用")
+        if remote_state is not None:
+            return status.from_connection_state(
+                remote_state, mode="long_connection", starting_hint=""
+            )
         app_id = str(bot_cfg.get("app_id") or "").strip()
         app_secret = str(bot_cfg.get("app_secret") or "").strip()
         webhook_url = str(bot_cfg.get("webhook_url") or "").strip()
         if app_id or app_secret:
             if not app_id or not app_secret:
                 return status.failed("long_connection", "App ID / Secret 配置不完整")
-            state = remote_state
-            if state is None:
-                if remote_error:
-                    return status.failed("long_connection", f"connector-runtime 状态不可用: {remote_error}")
-                state = self.get_long_connection_state(int(cfg.id or 0))
+            if remote_error:
+                return status.failed("long_connection", f"connector-runtime 状态不可用: {remote_error}")
+            state = self.get_long_connection_state(int(cfg.id or 0))
             return status.from_connection_state(state, mode="long_connection", starting_hint="")
         if webhook_url:
             return status.status_report("success", "webhook", "仅通知发送配置已完成")

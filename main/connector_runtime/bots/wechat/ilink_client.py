@@ -107,7 +107,14 @@ class ILinkClient:
             "ilink/bot/sendmessage",
             {
                 "msg": {
+                    "from_user_id": "",
                     "to_user_id": str(to_user_id),
+                    # iLink may return HTTP 200 for an incomplete message
+                    # envelope while silently dropping it downstream. Keep
+                    # text sends identical to the working media path.
+                    "client_id": f"heysure-wechat-{uuid.uuid4().hex}",
+                    "message_type": 2,
+                    "message_state": 2,
                     "context_token": str(context_token),
                     "item_list": [{"type": 1, "text_item": {"text": str(text)}}],
                 },

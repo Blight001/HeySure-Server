@@ -24,6 +24,7 @@ from connector_runtime.bots.wechat.media import (
 )
 from connector_runtime.bots.wechat.router import _message_text, _parse_incoming
 from connector_runtime.bots.wechat.routes_store import load_wechat_route, register_wechat_route
+from connector_runtime.bots.wechat.adapter import split_wechat_text
 
 
 def test_wechat_adapter_is_registered():
@@ -98,8 +99,22 @@ def test_ilink_send_text_uses_protocol_headers_and_base_info(monkeypatch):
     assert result == {"ret": 0}
     assert captured["headers"]["Authorization"] == "Bearer token-value"
     assert captured["headers"]["AuthorizationType"] == "ilink_bot_token"
-    assert captured["json"]["msg"]["context_token"] == "context"
+    msg = captured["json"]["msg"]
+    assert msg["context_token"] == "context"
+    assert msg["from_user_id"] == ""
+    assert msg["message_type"] == 2
+    assert msg["message_state"] == 2
+    assert msg["client_id"].startswith("heysure-wechat-")
     assert captured["json"]["base_info"]["bot_agent"] == "HeySureAI/2.0.0"
+
+
+def test_wechat_text_chunks_prefer_visible_boundaries():
+    text = "第一段。\n\n" + ("甲" * 30) + "\n\n第二段。" + ("乙" * 20)
+    chunks = split_wechat_text(text, limit=24)
+
+    assert all(len(chunk) <= 24 for chunk in chunks)
+    assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
+    assert chunks[0] == "第一段。"
 
 
 def test_message_text_accepts_text_and_voice_transcript_only():

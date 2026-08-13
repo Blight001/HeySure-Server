@@ -412,7 +412,7 @@ def post_qq_stream_packet(
         stream = {
             "state": 1,   # 1 = 生成中 (first/intermediate packet), 10 = 完成 (final)
             "id":    "",  # omitted on the first packet, then QQ's returned id
-            "index": 0,   # first packet is 0, then strictly increases
+            "index": 1,   # first packet is 1, then strictly increases
             "reset": False,  # True replaces the whole message body
         }
 

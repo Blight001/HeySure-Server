@@ -158,7 +158,8 @@ class QQStreamSession:
         self._completed_text = ""
         self._current_text = ""
         self._last_text = ""
-        self._index = 0
+        # QQ rejects index=0 with 40011021; packet indexes are one-based.
+        self._index = 1
         self._stream_id = ""
         self._started = False
         self._failed = False
