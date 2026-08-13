@@ -5,6 +5,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from api.models import AssistantAIConfig, BotConnection, BotSessionRoute, ChatSession
 from api.services.bot_directory import (
+    config_view_for_connection,
     connection_config,
     ensure_connection,
     readable_connection_config,
@@ -85,6 +86,31 @@ def test_same_ai_channel_can_hold_independent_account_instances():
     assert len({row.connection_ref for row in rows}) == 2
     assert [item["app_id"] for item in configs] == ["a", "b"]
     assert [item["app_secret"] for item in configs] == ["secret-a", "secret-b"]
+
+
+def test_connection_config_view_has_independent_orm_state():
+    cfg = AssistantAIConfig(user_id=1, name="multi")
+    cfg.bot_configs = json.dumps({"qq": {"enabled": False}, "feishu": {"enabled": True}})
+    row = BotConnection(
+        connection_ref="conn-qq",
+        user_id=1,
+        ai_config_id=2,
+        channel="qq",
+    )
+    update_connection_config(
+        row,
+        {"enabled": True, "app_id": "app", "app_secret": "secret"},
+        QQ_DEFAULTS,
+    )
+
+    view = config_view_for_connection(cfg, row, QQ_DEFAULTS)
+
+    assert view is not cfg
+    assert json.loads(view.bot_configs)["qq"]["enabled"] is True
+    assert json.loads(cfg.bot_configs)["qq"]["enabled"] is False
+    # Regression: assigning a scoped channel view must not emit an ORM event
+    # through the original SQLModel instance's weak parent reference.
+    view.bot_configs = view.bot_configs
 
 
 def test_deleted_connection_releases_provider_identity_and_credentials():

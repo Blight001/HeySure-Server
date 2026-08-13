@@ -177,7 +177,13 @@ def release_connection_binding(row: BotConnection, *, deleted: bool = False) -> 
 
 def config_view_for_connection(cfg, row: BotConnection, defaults: Dict[str, Any]):
     """Return a detached AI config whose channel slice comes from one instance."""
-    clone = cfg.model_copy(deep=True)
+    # ``model_copy`` also copies SQLAlchemy's instrumentation state on a
+    # SQLModel instance.  Assigning to the copy can then emit an ORM change
+    # event through a weak reference to the original instance; once that
+    # reference is collected, inbound bot events fail with
+    # ``ObjectDereferencedError``.  Re-validate only the public model fields so
+    # the view owns a fresh ORM state and remains safely detached.
+    clone = type(cfg).model_validate(cfg.model_dump(mode="python"))
     try:
         payload = json.loads(str(getattr(clone, "bot_configs", "") or "{}"))
     except Exception:
