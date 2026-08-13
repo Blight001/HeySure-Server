@@ -63,8 +63,14 @@ def _connection_view(row: BotConnection) -> Dict[str, Any]:
     bot = get_bot(row.channel)
     if bot is not None:
         credentials_unreadable = False
+        credentials_configured = False
         try:
             values = connection_config(row, bot.default_config())
+            credentials_configured = bool(row.provider_account_id) or any(
+                value not in {"", None}
+                for key, value in values.items()
+                if "secret" in key or "token" in key
+            )
         except ValueError:
             # Key rotation can make an old credential envelope unrecoverable.
             # Listing accounts must remain available so the user can repair or
@@ -76,7 +82,7 @@ def _connection_view(row: BotConnection) -> Dict[str, Any]:
             if "secret" in key or "token" in key:
                 values[key] = ""
         out["config"] = values
-        out["credentials_configured"] = bool(row.credentials_encrypted) and not credentials_unreadable
+        out["credentials_configured"] = credentials_configured and not credentials_unreadable
         out["credentials_unreadable"] = credentials_unreadable
     return out
 
@@ -351,7 +357,8 @@ def _connector_login_call(
         return _remote_login_call(client, channel, config_id, action, payload, user_id, connection_ref)
     except Exception as exc:
         logger.warning("connector bot login call failed channel=%s action=%s error_type=%s", channel, action, type(exc).__name__)
-        raise HTTPException(status_code=502, detail="Connector Runtime 微信连接服务不可用") from exc
+        label = bot.label if bot is not None else channel
+        raise HTTPException(status_code=502, detail=f"Connector Runtime {label}连接服务不可用") from exc
     finally:
         client.close()
 

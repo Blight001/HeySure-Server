@@ -82,6 +82,18 @@ class QQBot(BotAdapter):
         from .long_connection import get_qq_long_connection_state
         return get_qq_long_connection_state(ai_config_id, connection_ref)
 
+    def start_login(self, config_id: int, user_id: int, connection_ref: str = "") -> Dict[str, Any]:
+        from .login import manager
+        return manager.start(config_id, user_id, connection_ref)
+
+    def login_status(self, config_id: int, connection_ref: str = "") -> Dict[str, Any]:
+        from .login import manager
+        return manager.snapshot(config_id, connection_ref)
+
+    def logout(self, config_id: int, connection_ref: str = "") -> Dict[str, Any]:
+        from .login import manager
+        return manager.logout(config_id, connection_ref)
+
     # ---- outbound messaging -----------------------------------------------
 
     def parse_recipient(self, raw: Dict[str, Any]) -> "Recipient":
