@@ -1,0 +1,17 @@
+[Unit]
+Description=HeySure host-side repository updater
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/www/server/panel/data/compose/heysureai2
+Environment=PYTHONUNBUFFERED=1
+Environment=HEYSURE_REPO_ROOT=/www/server/panel/data/compose/heysureai2
+ExecStart=/usr/bin/python3 /www/server/panel/data/compose/heysureai2/deploy/server/other/scripts/repo-updater.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
