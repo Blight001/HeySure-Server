@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from api.chat_runtime.chat_prompt_utils import _set_run_live_meta
+from api.chat_runtime.chat_prompt_utils import _set_run_live_meta, _set_run_live_phase
 from api.chat_runtime.chat_runtime_helpers import _run_set_status, _run_should_stop
 from api.services.model_presets import session_model_preset_entry
 from ai_runtime.inference.debug_support import (
@@ -64,6 +64,13 @@ def start_worker_run(request: WorkerRequest) -> bool:
         session_id=request.session_id,
         session_name=request.session_name,
     )
+    # Publish an observable frame as soon as the worker owns the run. Bot input
+    # is persisted just before the connector creates the ChatRun, so an already
+    # open browser can otherwise query once inside that narrow gap, miss the
+    # run, and receive no adoptable event until the model yields its first
+    # token.  The forced phase transition carries the session/config metadata
+    # and lets the browser subscribe before deep reasoning starts.
+    _set_run_live_phase(request.run_id, "generating")
     ai_debug_stage(
         "START",
         f"{ai_short_run_id(request.run_id)} u={request.user_id} "
