@@ -1,4 +1,5 @@
 import asyncio
+import time
 from unittest.mock import AsyncMock
 
 from api.chat_runtime import chat_prompt_utils
@@ -69,6 +70,31 @@ def test_run_live_event_identifies_external_conversation(monkeypatch):
         assert payload["session_id"] == "qq_3_conn_peer"
         assert payload["ai_config_id"] == 3
         assert payload["ai_kind"] == "core"
+    finally:
+        with chat_prompt_utils._RUN_STATE_LOCK:
+            chat_prompt_utils._RUN_LIVE_STATE.pop(run_id, None)
+            chat_prompt_utils._RUN_LIVE_META.pop(run_id, None)
+
+
+def test_first_reasoning_frame_bypasses_phase_throttle(monkeypatch):
+    emit = AsyncMock()
+    monkeypatch.setattr(chat_prompt_utils.sio, "emit", emit)
+    run_id = "run_external_reasoning"
+    with chat_prompt_utils._RUN_STATE_LOCK:
+        chat_prompt_utils._RUN_LIVE_STATE[run_id] = {"reasoning": ""}
+        chat_prompt_utils._RUN_LIVE_META[run_id] = {
+            "user_id": 7,
+            "session_id": "wechat_3_conn_peer",
+            "ai_config_id": 3,
+            "ai_kind": "core",
+            "last_emit_at": time.time(),
+        }
+
+    try:
+        chat_prompt_utils._set_run_live_reasoning(run_id, "first thought")
+        payload = emit.await_args.args[1]
+        assert payload["reasoning"] == "first thought"
+        assert payload["session_id"] == "wechat_3_conn_peer"
     finally:
         with chat_prompt_utils._RUN_STATE_LOCK:
             chat_prompt_utils._RUN_LIVE_STATE.pop(run_id, None)

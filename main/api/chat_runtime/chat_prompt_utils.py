@@ -858,18 +858,17 @@ def _set_run_live_reasoning(run_id: str, reasoning: str):
     with _RUN_STATE_LOCK:
         prev = _RUN_LIVE_STATE.get(run_id) or {}
         meta = _RUN_LIVE_META.get(run_id) or {}
+        force = bool(reasoning) and not bool(prev.get("reasoning"))
         _RUN_LIVE_STATE[run_id] = {
             "text": prev.get("text", ""),
             "reasoning": reasoning,
             "phase": prev.get("phase", "generating"),
             "current_tool": prev.get("current_tool", ""),
-            "pending_prompt_tokens": int(prev.get("pending_prompt_tokens") or 0),
-            "pending_completion_tokens": int(prev.get("pending_completion_tokens") or 0),
-            "pending_total_tokens": int(prev.get("pending_total_tokens") or 0),
+            **{key: int(prev.get(key) or 0) for key in ("pending_prompt_tokens", "pending_completion_tokens", "pending_total_tokens")},
             "updated_at": time.time(),
         }
         _RUN_LIVE_META[run_id] = meta
-    _emit_run_live_update(run_id)
+    _emit_run_live_update(run_id, force=force)
 
 
 def _get_run_live_reasoning(run_id: str) -> str:
