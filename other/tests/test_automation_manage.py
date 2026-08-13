@@ -9,7 +9,10 @@ from tools.automation import (
     _is_admin_role,
     _pending_confirmation_guidance,
     _updated_tags,
+    _edit_card,
 )
+import pytest
+from fastapi import HTTPException
 
 
 def _card(tags):
@@ -67,6 +70,17 @@ def test_registry_exposes_one_aggregated_automation_toolbox_mcp():
     assert {"create", "edit", "start", "pause", "resume", "cancel", "delete"} <= actions
 
 
+def test_automation_schema_prefers_recording_and_scopes_manual_edits_to_patches():
+    schema_description = AUTOMATION_MANAGE_SCHEMA["description"]
+    action_description = AUTOMATION_MANAGE_SCHEMA["properties"]["action"]["description"]
+    patch_description = AUTOMATION_MANAGE_SCHEMA["properties"]["operations"]["description"]
+    definition_description = AUTOMATION_MANAGE_SCHEMA["properties"]["definition"]["description"]
+    assert "record_start" in schema_description and "record_stop(create_card=true)" in schema_description
+    assert "不要默认使用 create/from_trace" in action_description
+    assert "小细节" in patch_description
+    assert "不要凭空手写复杂流程" in definition_description
+
+
 def test_pending_confirmation_guidance_distinguishes_user_and_ai_actions():
     explicit = SimpleNamespace(
         id="confirm-user",
@@ -91,3 +105,8 @@ def test_pending_confirmation_guidance_distinguishes_user_and_ai_actions():
     ai_guidance = _pending_confirmation_guidance(ai_review, 19)
     assert ai_guidance["required_action"] == "automation.manage:respond"
     assert ai_guidance["can_respond"] is True
+
+
+def test_ai_edit_cannot_replace_an_entire_existing_definition():
+    with pytest.raises(HTTPException, match="FULL_DEFINITION_REPLACE_DISABLED"):
+        _edit_card(None, _card([]), {"definition": {"steps": {}}}, 1)

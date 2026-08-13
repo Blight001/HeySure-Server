@@ -37,6 +37,13 @@ from api.services.workflows.run_service import RunActorContext, cancel_run, run_
 from api.services.workflows.schemas import CardCreate, CardUpdate
 from api.services.workflows.secrets import decrypt_json
 from api.services.workflows.trace import definition_from_trace
+from api.services.workflows.patch_service import patch_card_definition
+from api.services.workflows.recording_service import (
+    active_recording,
+    recording_payload,
+    start_recording,
+    stop_recording,
+)
 from tools.automation_access import (
     _admin_actor,
     _card_visible,
@@ -177,6 +184,7 @@ def _create_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             risk_level=str(args.get("risk_level") or ("normal" if action == "from_trace" else "read_only")),
             definition=definition,
             device_id=str(args.get("device_id") or "") or None,
+            default_device_id=str(args.get("default_device_id") or args.get("device_id") or "") or None,
             device_ids=args.get("device_ids") if isinstance(args.get("device_ids"), list) else [],
         )
         return card_payload(create_card(session, user_id, body))
@@ -201,6 +209,8 @@ def _clone_card(
         access_scope="all" if _public_card_creator(session, user_id, ai_config_id) else "owner",
         risk_level=card.risk_level,
         definition=definition,
+        default_device_id=str(definition.get("defaultDeviceId") or "") or None,
+        device_ids=_load(latest.contract_device_ids_json, []) if latest else [],
     )
     return card_payload(create_card(session, user_id, body))
 
@@ -211,10 +221,15 @@ def _edit_card(
     args: Dict[str, Any],
     user_id: int,
 ) -> Dict[str, Any]:
+    if "definition" in args:
+        raise HTTPException(
+            status_code=409,
+            detail="FULL_DEFINITION_REPLACE_DISABLED: use action=patch with base_version_id",
+        )
     values = {
         key: args[key]
         for key in (
-            "name", "description", "risk_level", "definition", "device_id", "device_ids",
+            "name", "description", "risk_level", "definition", "device_id", "default_device_id", "device_ids",
             "access_scope", "allowed_ai_config_ids",
         )
         if key in args
@@ -260,6 +275,14 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             return payload
         if action in {"edit", "update"}:
             return _edit_card(session, card, args, user_id)
+        if action == "patch":
+            return patch_card_definition(
+                session,
+                card=card,
+                user_id=user_id,
+                base_version_id=str(args.get("base_version_id") or ""),
+                operations=args.get("operations") if isinstance(args.get("operations"), list) else [],
+            )
         if action == "clone":
             return _clone_card(session, card, user_id, ai_config_id)
         if action == "delete":
@@ -435,7 +458,11 @@ def _pause_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) 
             raise HTTPException(status_code=409, detail="RUN_BUSY_CANNOT_PAUSE")
         now = time.time()
         variables = _load(run.variables_json, {"steps": {}})
-        variables["_automation_control"] = {"paused_from": run.status, "paused_at": now}
+        variables["_automation_control"] = {
+            "paused_from": run.status,
+            "paused_at": now,
+            "paused_wakeup_at": run.next_wakeup_at,
+        }
         previous = run.status
         run.variables_json = json.dumps(variables, ensure_ascii=False)
         run.status = "paused"
@@ -457,6 +484,9 @@ def _resume_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
         now = time.time()
         variables = _load(run.variables_json, {"steps": {}})
         control = variables.pop("_automation_control", {})
+        if "_debug_single_step" in args:
+            debug = variables.setdefault("_debug", {})
+            debug["pause_after_step"] = bool(args.get("_debug_single_step"))
         paused_at = float(control.get("paused_at") or now)
         shift = max(0.0, now - paused_at)
         restored = str(control.get("paused_from") or "pending")
@@ -465,7 +495,12 @@ def _resume_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
         run.deadline_at += shift
         run.status = restored
         run.variables_json = json.dumps(variables, ensure_ascii=False)
-        run.next_wakeup_at = now if restored in {"pending", "running", "retry_wait", "paused_offline"} else None
+        paused_wakeup = control.get("paused_wakeup_at")
+        run.next_wakeup_at = (
+            float(paused_wakeup) + shift
+            if paused_wakeup is not None and restored in {"retry_wait", "paused_offline"}
+            else now if restored in {"pending", "running", "retry_wait", "paused_offline"} else None
+        )
         run.updated_at = now
         run.lock_version += 1
         steps = session.exec(select(WorkflowStepRun).where(
@@ -499,6 +534,39 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
         return _pause_run(user_id, args, ai_config_id)
     if action == "resume":
         return _resume_run(user_id, args, ai_config_id)
+    if action in {"debug_step", "debug_continue"}:
+        resumed_args = dict(args)
+        resumed_args["_debug_single_step"] = action == "debug_step"
+        return _resume_run(user_id, resumed_args, ai_config_id)
+    if action == "debug_start":
+        with Session(engine) as session:
+            card = _accessible_card(session, user_id, str(args.get("card_id") or ""), ai_config_id)
+            seed_steps = args.get("seed_steps") if isinstance(args.get("seed_steps"), dict) else {}
+            try:
+                row = create_validated_run(
+                    session,
+                    user_id=user_id,
+                    card_id=card.id,
+                    device_id=str(args.get("device_id") or ""),
+                    input_value=args.get("input") if isinstance(args.get("input"), dict) else {},
+                    version_id=str(args.get("version_id") or "") or None,
+                    idempotency_key=str(args.get("idempotency_key") or "") or f"debug:{uuid.uuid4().hex}",
+                    actor=RunActorContext(
+                        actor_type="ai" if ai_config_id else "user",
+                        actor_id=str(ai_config_id or user_id),
+                        initial_variables={
+                            "steps": seed_steps,
+                            "_debug": {"pause_after_step": False},
+                            "_run_debug_options": {
+                                "start_step_id": str(args.get("start_step_id") or ""),
+                                "start_paused": True,
+                            },
+                        },
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
+            return run_payload(row)
     with Session(engine) as session:
         run = _run_for_ai(
             session,
@@ -506,7 +574,7 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
             str(args.get("run_id") or ""),
             ai_config_id,
             assigned_interaction=action == "respond",
-            lock=action in {"cancel", "retry", "respond"},
+            lock=action in {"cancel", "retry", "respond", "debug_restart"},
         )
         if action == "status":
             payload = run_payload(run)
@@ -538,6 +606,31 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
                 ))
             except ValueError as exc:
                 raise HTTPException(status_code=409, detail=str(exc))
+        if action == "debug_restart":
+            try:
+                return run_payload(create_validated_run(
+                    session,
+                    user_id=user_id,
+                    card_id=run.card_id,
+                    device_id=str(args.get("device_id") or run.device_id),
+                    input_value=args.get("input") if isinstance(args.get("input"), dict) else decrypt_json(run.input_json),
+                    version_id=str(args.get("version_id") or run.card_version_id),
+                    idempotency_key=str(args.get("idempotency_key") or "") or f"debug-restart:{run.id}:{uuid.uuid4().hex}",
+                    actor=RunActorContext(
+                        actor_type="ai" if ai_config_id else "user",
+                        actor_id=str(ai_config_id or user_id),
+                        initial_variables={
+                            "steps": args.get("seed_steps") if isinstance(args.get("seed_steps"), dict) else {},
+                            "_debug": {"pause_after_step": False},
+                            "_run_debug_options": {
+                                "start_step_id": str(args.get("start_step_id") or run.current_step_id),
+                                "start_paused": True,
+                            },
+                        },
+                    ),
+                ))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
         if action == "respond":
             if not ai_config_id:
                 raise HTTPException(status_code=403, detail="AI_INTERACTION_REQUIRES_AI")
@@ -566,20 +659,71 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
     raise HTTPException(status_code=400, detail="unsupported run action")
 
 
+def _manage_recording(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+    action = str(args.get("action") or "").strip().lower()
+    with Session(engine) as session:
+        if action == "record_start":
+            row = start_recording(
+                session,
+                user_id=user_id,
+                ai_config_id=ai_config_id,
+                name=str(args.get("name") or "操作录制"),
+                description=str(args.get("description") or ""),
+                default_device_id=str(args.get("default_device_id") or args.get("device_id") or ""),
+                device_ids=args.get("device_ids") if isinstance(args.get("device_ids"), list) else [],
+            )
+            payload = recording_payload(session, row)
+            payload["guidance"] = "录制已开启；继续正常调用工具，完成后调用 record_stop。"
+            return payload
+        row = active_recording(session, user_id, ai_config_id, lock=action in {"record_stop", "record_cancel"})
+        if action == "record_status":
+            return recording_payload(session, row, include_events=True) if row else {"status": "idle"}
+        stopped = stop_recording(session, user_id, ai_config_id, cancel=action == "record_cancel")
+        if not stopped:
+            raise HTTPException(status_code=404, detail="ACTIVE_RECORDING_NOT_FOUND")
+        payload = recording_payload(session, stopped, include_events=True)
+        if action == "record_cancel" or not bool(args.get("create_card")):
+            return payload
+        calls = [
+            item for item in payload.get("calls", [])
+            if item.get("success") and str(item.get("device_id") or "").strip()
+        ]
+        if not calls:
+            raise HTTPException(status_code=422, detail="recording has no successful device calls")
+        definition = definition_from_trace(calls, name=stopped.name, description=stopped.description)
+        owner_id = None if _public_card_creator(session, user_id, ai_config_id) else ai_config_id
+        body = CardCreate(
+            name=str(args.get("name") or stopped.name or "录制生成卡片"),
+            description=str(args.get("description") or stopped.description or ""),
+            tags=_creation_tags(args.get("tags"), owner_id),
+            access_scope="owner" if owner_id else "all",
+            risk_level=str(args.get("risk_level") or "normal_change"),
+            definition=definition,
+            default_device_id=stopped.default_device_id or None,
+            device_ids=_load(stopped.device_ids_json, []),
+        )
+        card = create_card(session, user_id, body)
+        payload["created_card"] = card_payload(card)
+        return payload
+
+
 def _automation_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     action = str(args.get("action") or "").strip().lower()
-    _require_enabled(run=action in {"start", "run", "retry", "resume", "respond"})
+    _require_enabled(run=action in {"start", "run", "retry", "resume", "respond", "debug_start", "debug_step", "debug_continue", "debug_restart"})
     try:
         if action in {
-            "list", "get", "create", "import", "from_trace", "clone", "edit", "update",
+            "list", "get", "create", "import", "from_trace", "clone", "edit", "update", "patch",
             "delete", "validate", "versions", "get_version", "export",
         }:
             return _manage_card(user_id, args, ai_config_id)
         if action in {
             "start", "run", "list_runs", "status", "pause", "resume",
             "cancel", "retry", "respond",
+            "debug_start", "debug_step", "debug_continue", "debug_restart",
         }:
             return _manage_run(user_id, args, ai_config_id)
+        if action in {"record_start", "record_status", "record_stop", "record_cancel"}:
+            return _manage_recording(user_id, args, ai_config_id)
     except WorkflowValidationError as exc:
         raise HTTPException(
             status_code=422,
@@ -590,24 +734,67 @@ def _automation_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
 
 AUTOMATION_MANAGE_SCHEMA = {
     "type": "object",
+    "description": (
+        "自动化卡片创建原则：完整流程必须优先使用录制方案，因为录制会保存实际成功的工具名、参数、"
+        "设备绑定和调用顺序，比 AI 凭空手写 definition 更稳定。标准流程是 record_start → 在真实环境中"
+        "逐步调用工具完成任务 → record_stop(create_card=true) → validate → debug_start/debug_step 验证。"
+        "录制生成后若只有选择器、变量路径、等待时间、初始环境说明等小细节需要调整，使用 patch + "
+        "base_version_id 做最小局部修改。不要为了小改动重新手写或整体替换卡片。仅在无法进入真实环境录制、"
+        "或用户明确提供了完整且已审核的结构化定义时，才使用 create/import/from_trace。"
+    ),
     "properties": {
         "action": {
             "type": "string",
             "enum": [
-                "list", "get", "create", "import", "from_trace", "clone", "edit", "delete",
+                "list", "get", "create", "import", "from_trace", "clone", "edit", "patch", "delete",
                 "validate", "versions", "get_version", "export", "start",
                 "list_runs", "status", "pause", "resume", "cancel", "retry", "respond",
+                "record_start", "record_status", "record_stop", "record_cancel",
+                "debug_start", "debug_step", "debug_continue", "debug_restart",
             ],
             "description": (
                 "唯一动作选择器；聊天中的 start 会停留在当前 MCP 调用，等待真人网页确认并持续到卡片终态，"
+                "新建完整卡片优先选择 record_start/record_stop，录制后的小细节使用 patch；"
+                "不要默认使用 create/from_trace 手写完整流程；"
                 "不要重复轮询 status；status 查看已有运行且会返回 pending_confirmation；"
                 "respond 仅处理分配给当前 AI 的 waiting_ai 交互，真人门禁会明确返回 user_confirmation；"
-                "pause/resume 暂停恢复，edit 编辑卡片。"
+                "浏览器卡片必须从入口执行 browser+tab reload/replace，再用 browser+wait/observe 等待就绪，"
+                "并在 compatibility.initialEnvironment 声明 description、resetStepId、readyStepId；"
+                "pause/resume 暂停恢复；已有卡片优先用 patch 局部修改；"
+                "debug_start 从任意步骤暂停创建调试运行，debug_step 单步，debug_continue 连续运行。"
             ),
         },
         "card_id": {"type": "string"},
         "version_id": {"type": "string"},
+        "base_version_id": {
+            "type": "string",
+            "description": "action=patch 必填，必须等于最新版本 ID，用于防止 AI 覆盖其他人的新修改。",
+        },
+        "operations": {
+            "type": "array", "minItems": 1, "maxItems": 100,
+            "description": (
+                "录制卡片后的首选修正方式。使用 RFC 6902 风格局部修改，只修正选择器、变量路径、参数、"
+                "等待时间、初始环境契约等小细节；仅支持 add/replace/remove/test，且仅允许修改 definition 流程字段。"
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "op": {"type": "string", "enum": ["add", "replace", "remove", "test"]},
+                    "path": {"type": "string", "description": "例如 /steps/open_page/arguments/url 或 /steps/new_step。"},
+                    "value": {},
+                },
+                "required": ["op", "path"],
+            },
+        },
         "run_id": {"type": "string"},
+        "start_step_id": {
+            "type": "string",
+            "description": "debug_start/debug_restart 的起始步骤 ID；可从任意存在的步骤开始。",
+        },
+        "seed_steps": {
+            "type": "object",
+            "description": "从中间步骤启动时注入此前步骤变量，结构为 {saveAs: {result: ...}}。模板依赖缺失会安全失败。",
+        },
         "name": {"type": "string"},
         "description": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
@@ -617,11 +804,32 @@ AUTOMATION_MANAGE_SCHEMA = {
             "description": "access_scope=selected 时允许调用卡片的 AI 成员配置 ID。",
         },
         "risk_level": {"type": "string"},
-        "definition": {"type": "object"},
-        "calls": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"}},
+        "definition": {
+            "type": "object",
+            "description": (
+                "仅供 create/import 使用的完整定义。不要凭空手写复杂流程；优先实战录制生成，再用 patch 修正小细节。"
+            ),
+        },
+        "calls": {
+            "type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"},
+            "description": (
+                "仅供 from_trace 导入已真实执行、顺序明确的结构化调用轨迹；不要由 AI 猜测工具返回结构后伪造轨迹。"
+            ),
+        },
+        "create_card": {
+            "type": "boolean",
+            "description": (
+                "action=record_stop 时设为 true：把录制中真实成功的调用编译、验证并保存为不可变卡片版本。"
+                "这是创建完整自动化卡片的默认推荐方案。"
+            ),
+        },
         "device_id": {
             "type": "string",
-            "description": "运行旧版未绑定设备的卡片时指定目标设备；新版卡片已保存契约设备，action=start 可省略。",
+            "description": "action=start/debug_start 时可指定本次目标设备号，必须属于卡片 contractDeviceIds；省略则使用 defaultDeviceId。",
+        },
+        "default_device_id": {
+            "type": "string",
+            "description": "创建/编辑卡片时指定默认设备号；必须包含在 device_ids 中。不填时使用 device_ids 第一项。",
         },
         "device_ids": {
             "type": "array", "items": {"type": "string"}, "maxItems": 20,

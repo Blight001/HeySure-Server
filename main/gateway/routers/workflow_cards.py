@@ -20,6 +20,7 @@ from api.services.workflows.card_service import (
 )
 from api.services.workflows.compiler import WorkflowValidationError
 from api.services.workflows.trace import definition_from_trace
+from api.services.workflows.patch_service import patch_card_definition
 from api.services.workflows.schemas import CardCreate, CardUpdate, TraceDraftRequest
 from api.core.settings import settings
 from .auth import get_current_user
@@ -32,6 +33,11 @@ def _require_enabled() -> None:
 
 router = APIRouter(dependencies=[Depends(_require_enabled)])
 PREFIX = "/api/workflow-cards"
+
+
+class DefinitionPatchRequest(CardUpdate):
+    base_version_id: str
+    operations: list[dict]
 
 
 def _validation_error(exc: WorkflowValidationError) -> HTTPException:
@@ -157,6 +163,29 @@ def patch_card(
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
     try:
         return card_payload(update_card(session, row, body, user_id=user.id))
+    except WorkflowValidationError as exc:
+        raise _validation_error(exc)
+
+
+@router.post("/{card_id}/patch-definition")
+def patch_definition(
+    card_id: str,
+    body: DefinitionPatchRequest,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    row = owned_card(session, user.id, card_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
+    try:
+        return patch_card_definition(
+            session,
+            card=row,
+            user_id=user.id,
+            base_version_id=body.base_version_id,
+            operations=body.operations,
+        )
     except WorkflowValidationError as exc:
         raise _validation_error(exc)
 

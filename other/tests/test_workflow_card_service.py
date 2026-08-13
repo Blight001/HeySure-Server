@@ -6,6 +6,8 @@ from api.models import AssistantAIConfig, DevicePresence, User, WorkflowCard, Wo
 from api.services.workflows.card_service import create_card, delete_card, owned_card, update_card
 from api.services.workflows.schemas import CardCreate, CardUpdate
 from api.services.workflows.ai_interaction import _run_device_id
+from api.services.workflows.step_device_binding import step_device_id
+from api.models import WorkflowRun
 
 
 def _database():
@@ -175,3 +177,20 @@ def test_run_uses_first_saved_contract_device_when_start_omits_device():
     )
     assert _run_device_id(version, "") == "desktop-one"
     assert _run_device_id(version, "explicit") == "explicit"
+
+
+def test_run_prefers_explicit_default_device_and_overrides_default_bound_steps():
+    version = WorkflowCardVersion(
+        id="version", card_id="card", version_number=1,
+        definition_json='{"defaultDeviceId":"desktop-default"}', definition_digest="digest",
+        contract_device_ids_json='["desktop-default","desktop-test"]', published_by=1,
+    )
+    run = WorkflowRun(
+        id="run", card_id="card", card_version_id="version", user_id=1,
+        device_id="desktop-test", deadline_at=999, idempotency_key="key",
+        variables_json='{"_device_override":{"from":"desktop-default","to":"desktop-test"}}',
+    )
+
+    assert _run_device_id(version, "") == "desktop-default"
+    assert step_device_id({"toolRef": {"deviceId": "desktop-default"}}, run) == "desktop-test"
+    assert step_device_id({"toolRef": {"deviceId": "other-terminal"}}, run) == "other-terminal"

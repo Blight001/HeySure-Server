@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, List, Union
 
 
 TEMPLATE_RE = re.compile(r"\$\{([^{}]+)\}")
@@ -17,15 +17,66 @@ class TemplateResolutionError(ValueError):
     pass
 
 
-def resolve_path(path: str, context: Dict[str, Any]) -> Any:
-    parts = [item.strip() for item in str(path).split(".")]
-    if not parts or parts[0] not in SAFE_ROOTS or len(parts) > 16:
+PathToken = Union[str, int]
+
+
+def parse_path(path: str) -> List[PathToken]:
+    """Parse a safe dotted path with optional non-negative list indexes."""
+    raw = str(path or "").strip()
+    if not raw:
         raise TemplateResolutionError(f"forbidden variable path: {path}")
+    tokens: List[PathToken] = []
+    for segment in raw.split("."):
+        if not segment:
+            raise TemplateResolutionError(f"forbidden variable path: {path}")
+        position = 0
+        while position < len(segment):
+            if segment[position] == "[":
+                match = re.match(r"\[(0|[1-9][0-9]*)\]", segment[position:])
+                if match is None:
+                    raise TemplateResolutionError(f"invalid list index in variable path: {path}")
+                tokens.append(int(match.group(1)))
+                position += len(match.group(0))
+                continue
+            next_bracket = segment.find("[", position)
+            end = len(segment) if next_bracket < 0 else next_bracket
+            key = segment[position:end]
+            if not key or "]" in key or key.startswith("__"):
+                raise TemplateResolutionError(f"forbidden variable path: {path}")
+            tokens.append(key)
+            position = end
+    if not tokens or tokens[0] not in SAFE_ROOTS or len(tokens) > 16:
+        raise TemplateResolutionError(f"forbidden variable path: {path}")
+    return tokens
+
+
+def resolve_path(path: str, context: Dict[str, Any]) -> Any:
+    parts = parse_path(path)
     current: Any = context
+    traversed: List[str] = []
     for part in parts:
-        if not part or part.startswith("__") or not isinstance(current, dict) or part not in current:
-            raise TemplateResolutionError(f"unavailable variable path: {path}")
+        if isinstance(part, int):
+            if not isinstance(current, list):
+                location = "".join(traversed) or "<root>"
+                raise TemplateResolutionError(
+                    f"unavailable variable path: {path} (expected list at {location})"
+                )
+            if part >= len(current):
+                location = "".join(traversed) or "<root>"
+                raise TemplateResolutionError(
+                    f"unavailable variable path: {path} "
+                    f"(index {part} out of range at {location}, length {len(current)})"
+                )
+            current = current[part]
+            traversed.append(f"[{part}]")
+            continue
+        if not isinstance(current, dict) or part not in current:
+            location = "".join(traversed) or "<root>"
+            raise TemplateResolutionError(
+                f"unavailable variable path: {path} (missing key {part} at {location})"
+            )
         current = current[part]
+        traversed.append(("." if traversed else "") + part)
     return current
 
 

@@ -8,6 +8,47 @@ from .compiler import WorkflowValidationError
 SENSITIVE_KEYS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey"}
 
 
+def _call_tool(call: Dict[str, Any]) -> str:
+    return str(call.get("tool") or call.get("name") or "")
+
+
+def _is_reset_call(call: Dict[str, Any]) -> bool:
+    arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+    return _call_tool(call).endswith("browser+tab") and arguments.get("action") in {"reload", "replace"}
+
+
+def _is_ready_call(call: Dict[str, Any]) -> bool:
+    return _call_tool(call).endswith(("browser+wait", "browser+observe"))
+
+
+def _initial_environment(calls: list[Dict[str, Any]]) -> Dict[str, Any]:
+    if not any(".browser+" in _call_tool(call) for call in calls):
+        return {}
+    reset_index = next((index for index, call in enumerate(calls, start=1) if _is_reset_call(call)), None)
+    ready_index = next((
+        index for index, call in enumerate(calls, start=1)
+        if reset_index is not None and index > reset_index and _is_ready_call(call)
+    ), None)
+    if reset_index is None or ready_index is None:
+        return {}
+    return {
+        "initialEnvironment": {
+            "description": "每次运行先重新加载或重置目标页面，并等待页面进入可操作状态，避免继承上次运行的页面状态。",
+            "resetStepId": f"call_{reset_index}",
+            "readyStepId": f"call_{ready_index}",
+        }
+    }
+
+
+def _tool_ref(call: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+    ref = {"namespace": "device", "name": tool_name}
+    device_id = str(call.get("device_id") or call.get("deviceId") or "").strip()
+    ref.update({"deviceId": device_id} if device_id else {})
+    digest = str(call.get("schemaDigest") or "").strip()
+    ref.update({"schemaDigest": digest} if digest else {})
+    return ref
+
+
 def definition_from_trace(calls: list[Dict[str, Any]], *, name: str, description: str = "") -> Dict[str, Any]:
     if not calls or len(calls) > 50:
         raise WorkflowValidationError(["trace must contain 1..50 MCP calls"])
@@ -36,9 +77,7 @@ def definition_from_trace(calls: list[Dict[str, Any]], *, name: str, description
             raise WorkflowValidationError([f"trace call {index} requires tool"])
         step_id = f"call_{index}"
         next_step = f"call_{index + 1}" if index < len(calls) else "finish"
-        ref = {"namespace": "device", "name": tool_name}
-        if call.get("schemaDigest"):
-            ref["schemaDigest"] = str(call["schemaDigest"])
+        ref = _tool_ref(call, tool_name)
         steps[step_id] = {
             "type": "mcp",
             "toolRef": ref,
@@ -49,7 +88,7 @@ def definition_from_trace(calls: list[Dict[str, Any]], *, name: str, description
             "onError": "fail",
         }
     steps["finish"] = {"type": "end"}
-    return {
+    definition = {
         "schemaVersion": 1,
         "name": name,
         "description": description,
@@ -64,3 +103,7 @@ def definition_from_trace(calls: list[Dict[str, Any]], *, name: str, description
         "steps": steps,
         "output": {"lastResult": f"${{steps.call_{len(calls)}_result.result}}"},
     }
+    compatibility = _initial_environment(calls)
+    if compatibility:
+        definition["compatibility"] = compatibility
+    return definition

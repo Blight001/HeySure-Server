@@ -213,6 +213,10 @@ def _run_device_id(version: Optional[WorkflowCardVersion], requested: str) -> st
     selected = str(requested or "").strip()
     if selected or not version:
         return selected
+    definition = _load(version.definition_json, {})
+    selected_default = str(definition.get("defaultDeviceId") or "").strip()
+    if selected_default:
+        return selected_default
     contract_ids = _load(version.contract_device_ids_json, [])
     return str(contract_ids[0]).strip() if isinstance(contract_ids, list) and contract_ids else ""
 
@@ -226,6 +230,45 @@ def _validate_concurrency(session: Session, user_id: int, device_id: str) -> Non
         raise ValueError("RUN_CONCURRENCY_LIMIT")
     if sum(item.device_id == device_id for item in active) >= int(settings.workflow_max_concurrent_per_device):
         raise ValueError("DEVICE_CONCURRENCY_LIMIT")
+
+
+def _validated_device_selection(
+    session: Session,
+    *,
+    user_id: int,
+    version: Optional[WorkflowCardVersion],
+    requested_device_id: str,
+) -> tuple[str, str]:
+    device_id = _run_device_id(version, requested_device_id)
+    if not version:
+        return device_id, ""
+    definition = _load(version.definition_json, {})
+    default_device_id = str(definition.get("defaultDeviceId") or "").strip()
+    contract_ids = _load(version.contract_device_ids_json, [])
+    if requested_device_id and contract_ids and requested_device_id not in contract_ids:
+        raise ValueError("DEVICE_NOT_BOUND_TO_CARD")
+    try:
+        validate_run_device(
+            session,
+            user_id=user_id,
+            device_id=device_id,
+            definition=definition,
+            version=version,
+            default_device_id=default_device_id,
+        )
+    except WorkflowDispatchError as exc:
+        raise ValueError(f"{exc.code}: {exc}") from exc
+    _validate_concurrency(session, user_id, device_id)
+    return device_id, default_device_id
+
+
+def _actor_with_device_override(
+    actor: RunActorContext, requested_device_id: str, default_device_id: str
+) -> RunActorContext:
+    variables = dict(actor.initial_variables or {})
+    if requested_device_id and default_device_id and requested_device_id != default_device_id:
+        variables["_device_override"] = {"from": default_device_id, "to": requested_device_id}
+    return RunActorContext(actor.actor_type, actor.actor_id, variables)
 
 
 def create_validated_run(
@@ -247,19 +290,11 @@ def create_validated_run(
         if existing:
             return existing
     version = _version_for_run_creation(session, user_id, card_id, version_id)
-    device_id = _run_device_id(version, device_id)
-    if version:
-        try:
-            validate_run_device(
-                session,
-                user_id=user_id,
-                device_id=device_id,
-                definition=_load(version.definition_json, {}),
-                version=version,
-            )
-        except WorkflowDispatchError as exc:
-            raise ValueError(f"{exc.code}: {exc}") from exc
-        _validate_concurrency(session, user_id, device_id)
+    requested_device_id = str(device_id or "").strip()
+    device_id, default_device_id = _validated_device_selection(
+        session, user_id=user_id, version=version, requested_device_id=requested_device_id,
+    )
+    effective_actor = _actor_with_device_override(actor, requested_device_id, default_device_id)
     return create_run(
         session,
         user_id=user_id,
@@ -268,7 +303,7 @@ def create_validated_run(
         input_value=input_value,
         version_id=version_id,
         idempotency_key=idempotency_key,
-        actor=actor,
+        actor=effective_actor,
     )
 
 

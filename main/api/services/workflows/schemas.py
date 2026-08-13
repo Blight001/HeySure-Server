@@ -14,6 +14,7 @@ class CardCreate(BaseModel):
     risk_level: str = "read_only"
     definition: Dict[str, Any] = Field(default_factory=dict)
     device_id: Optional[str] = None
+    default_device_id: Optional[str] = None
     device_ids: List[str] = Field(default_factory=list, max_length=20)
 
 
@@ -26,6 +27,7 @@ class CardUpdate(BaseModel):
     risk_level: Optional[str] = None
     definition: Optional[Dict[str, Any]] = None
     device_id: Optional[str] = None
+    default_device_id: Optional[str] = None
     device_ids: Optional[List[str]] = Field(default=None, max_length=20)
 
 
@@ -38,7 +40,7 @@ class TraceDraftRequest(BaseModel):
 
 
 class RunCreate(BaseModel):
-    device_id: str = Field(min_length=1, max_length=256)
+    device_id: str = Field(default="", max_length=256)
     input: Dict[str, Any] = Field(default_factory=dict)
     version_id: Optional[str] = None
     idempotency_key: str = Field(min_length=1, max_length=200)

@@ -245,11 +245,11 @@ class Settings(BaseSettings):
     # ---- Workflow cards -----------------------------------------------------
 
     workflow_cards_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Expose workflow-card mutation/run APIs. Read-only model imports remain safe when disabled.",
     )
     workflow_scheduler_enabled: bool = Field(
-        default=False,
+        default=True,
         description="Run the persistent workflow advancement loop in connector-runtime.",
     )
     workflow_scheduler_interval_seconds: float = Field(

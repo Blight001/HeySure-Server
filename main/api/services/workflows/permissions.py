@@ -103,6 +103,7 @@ def validate_run_device(
     device_id: str,
     definition: Dict[str, Any],
     version: WorkflowCardVersion,
+    default_device_id: str = "",
 ) -> DevicePresence:
     """Validate every MCP node against its own bound device before creating a run."""
     fallback_device = _owned_online_device(session, user_id, device_id)
@@ -115,6 +116,8 @@ def validate_run_device(
         ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
         name = str(ref.get("name") or "").strip()
         target_id = str(ref.get("deviceId") or device_id).strip()
+        if default_device_id and target_id == default_device_id:
+            target_id = device_id
         if bound_ids and target_id not in bound_ids:
             raise WorkflowDispatchError(
                 "DEVICE_NOT_BOUND_TO_CARD",

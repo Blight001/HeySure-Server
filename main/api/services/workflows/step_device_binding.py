@@ -13,7 +13,15 @@ from api.models import WorkflowCardVersion, WorkflowRun, WorkflowStepRun
 def step_device_id(step: Dict[str, Any], run: WorkflowRun) -> str:
     """Use a node binding when present and retain the run device for legacy cards."""
     ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
-    return str(ref.get("deviceId") or run.device_id).strip()
+    target = str(ref.get("deviceId") or run.device_id).strip()
+    try:
+        variables = json.loads(run.variables_json or "{}")
+    except Exception:
+        variables = {}
+    override = variables.get("_device_override") if isinstance(variables, dict) else None
+    if isinstance(override, dict) and target == str(override.get("from") or "").strip():
+        return str(override.get("to") or target).strip()
+    return target
 
 
 def step_contract(definition: Dict[str, Any], step_run: WorkflowStepRun) -> Dict[str, Any]:

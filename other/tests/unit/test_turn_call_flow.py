@@ -92,7 +92,7 @@ def test_machine_carries_rejection_state_between_calls(monkeypatch):
     monkeypatch.setattr(
         turn_call_flow.tool_rejections,
         "handle_mcp_disabled",
-        lambda *args: RejectionOutcome(
+        lambda *args, **kwargs: RejectionOutcome(
             "disabled|workspace.read|{}",
             2,
             TurnCallAction.NEXT_TURN,
@@ -114,7 +114,7 @@ def test_machine_rejects_tool_outside_effective_allowlist(monkeypatch):
     monkeypatch.setattr(
         turn_call_flow.tool_rejections,
         "handle_disallowed_tool",
-        lambda *args: RejectionOutcome(
+        lambda *args, **kwargs: RejectionOutcome(
             "disallowed|workspace.write|{}",
             1,
             TurnCallAction.NEXT_CALL,
@@ -128,6 +128,24 @@ def test_machine_rejects_tool_outside_effective_allowlist(monkeypatch):
 
     assert action is TurnCallAction.NEXT_CALL
     assert machine.state.rejected_repeat == 1
+
+
+def test_machine_normalizes_double_underscore_endpoint_tool_before_gate(monkeypatch):
+    machine, _ = _machine(allowed={"aifree.browser+observe"})
+    captured = {}
+    monkeypatch.setattr(
+        machine,
+        "_execute_regular",
+        lambda tool, arguments, call_id, pending: captured.update(tool=tool) or TurnCallAction.NEXT_CALL,
+    )
+
+    action = machine.execute(
+        {"tool": "aifree__browser__observe", "arguments": {"include_text": True}, "id": "call-1"},
+        [],
+    )
+
+    assert action is TurnCallAction.NEXT_CALL
+    assert captured["tool"] == "aifree.browser+observe"
 
 
 def test_machine_maps_and_executes_joined_legacy_tools(monkeypatch):

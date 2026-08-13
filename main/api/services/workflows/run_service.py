@@ -62,6 +62,31 @@ def error_payload(code: str, message: str, phase: str, retryable: bool = False) 
     return {"code": code, "message": message, "phase": phase, "retryable": retryable}
 
 
+def _pause_after_debug_step(run: WorkflowRun, now: float, completed_step_id: str) -> None:
+    if run.status in TERMINAL_RUN_STATUSES:
+        return
+    variables = _load(run.variables_json, {})
+    debug = variables.get("_debug") if isinstance(variables, dict) else None
+    if not isinstance(debug, dict) or not debug.get("pause_after_step"):
+        return
+    previous = run.status
+    variables["_automation_control"] = {
+        "paused_from": previous,
+        "paused_at": now,
+        "paused_wakeup_at": run.next_wakeup_at,
+    }
+    debug["pause_after_step"] = False
+    debug["last_completed_step_id"] = completed_step_id
+    run.variables_json = _dump(variables)
+    run.status = "paused"
+    run.next_wakeup_at = None
+
+
+def _move_run(run: WorkflowRun, step_id: str, status: str) -> None:
+    run.current_step_id = step_id
+    run.status = status
+
+
 def _redact(value: Any, depth: int = 0) -> Any:
     if depth > 16:
         return "[TRUNCATED]"
@@ -108,6 +133,7 @@ def _context(run: WorkflowRun, device: Optional[DevicePresence] = None) -> Dict[
 
 
 def run_payload(row: WorkflowRun) -> Dict[str, Any]:
+    variables = _load(row.variables_json, {})
     return {
         "id": row.id,
         "card_id": row.card_id,
@@ -125,6 +151,8 @@ def run_payload(row: WorkflowRun) -> Dict[str, Any]:
         "updated_at": row.updated_at,
         "actor_type": row.actor_type,
         "actor_id": row.actor_id,
+        "debug": variables.get("_debug") if isinstance(variables, dict) else None,
+        "device_override": variables.get("_device_override") if isinstance(variables, dict) else None,
     }
 
 
@@ -207,6 +235,7 @@ def create_run(
     if not device:
         raise ValueError("DEVICE_ACCESS_DENIED")
     definition = _load(version.definition_json, {})
+    selected_start, initial_status, variables, initial_wakeup = _initial_run_state(definition, actor, now=time.time())
     errors = list(Draft202012Validator(definition.get("inputSchema", {"type": "object"})).iter_errors(input_value))
     if errors:
         raise ValueError(f"ARGUMENT_VALIDATION_FAILED: {errors[0].message}")
@@ -220,12 +249,12 @@ def create_run(
         actor_type=actor.actor_type,
         actor_id=actor.actor_id or str(user_id),
         device_id=device_id,
-        status="pending",
-        current_step_id=str(definition["startStepId"]),
+        status=initial_status,
+        current_step_id=selected_start,
         input_json=encrypt_json(input_value),
-        variables_json=_dump({"steps": {}, **(actor.initial_variables or {})}),
+        variables_json=_dump(variables),
         deadline_at=now + timeout,
-        next_wakeup_at=now,
+        next_wakeup_at=initial_wakeup,
         idempotency_key=key,
         created_at=now,
         updated_at=now,
@@ -246,10 +275,25 @@ def create_run(
     # an ORM relationship, so SQLAlchemy cannot infer insert ordering. Persist
     # the parent run before enqueueing its audit row.
     session.flush()
-    add_audit(session, event_type="run_created", run=row, status_to="pending")
+    add_audit(session, event_type="run_created", run=row, status_to=initial_status)
     session.commit()
     session.refresh(row)
     return row
+
+
+def _initial_run_state(
+    definition: Dict[str, Any], actor: RunActorContext, *, now: float
+) -> tuple[str, str, Dict[str, Any], Optional[float]]:
+    variables = {"steps": {}, **(actor.initial_variables or {})}
+    options = variables.pop("_run_debug_options", {})
+    options = options if isinstance(options, dict) else {}
+    selected_start = str(options.get("start_step_id") or definition["startStepId"]).strip()
+    if selected_start not in definition.get("steps", {}):
+        raise ValueError("DEBUG_START_STEP_NOT_FOUND")
+    if not options.get("start_paused"):
+        return selected_start, "pending", variables, now
+    variables["_automation_control"] = {"paused_from": "pending", "paused_at": now}
+    return selected_start, "paused", variables, None
 
 
 def fail_run(session: Session, run: WorkflowRun, error: Dict[str, Any], *, status: str = "failed") -> None:
@@ -373,8 +417,7 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
         except Exception as exc:
             fail_run(session, run, error_payload("EXPRESSION_EVALUATION_FAILED", str(exc), "condition"))
         else:
-            run.current_step_id = str(step["onTrue"] if matched else step["onFalse"])
-            run.status = "running"
+            _move_run(run, str(step["onTrue"] if matched else step["onFalse"]), "running")
             run.next_wakeup_at = now
             run.updated_at = now
             session.add(run)
@@ -387,13 +430,13 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
                 status_to="running",
                 detail={"matched": matched, "next": run.current_step_id},
             )
+            _pause_after_debug_step(run, now, entered_step_id)
         session.commit()
         return run
 
     if step_type == "delay":
         delay_seconds = float(step.get("delaySeconds", step.get("seconds", 0)))
-        run.current_step_id = str(step["next"])
-        run.status = "retry_wait"
+        _move_run(run, str(step["next"]), "retry_wait")
         run.next_wakeup_at = min(run.deadline_at, now + delay_seconds)
         run.updated_at = now
         session.add(run)
@@ -406,6 +449,7 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
             status_to="retry_wait",
             detail={"delay_seconds": delay_seconds, "wake_at": run.next_wakeup_at},
         )
+        _pause_after_debug_step(run, now, entered_step_id)
         session.commit()
         return run
 
@@ -576,6 +620,21 @@ def _handle_step_error(
     fail_run(session, run, error, status="timed_out" if error.get("code") == "RUN_TIMEOUT" else "failed")
 
 
+def _handle_debuggable_step_error(
+    session: Session,
+    *,
+    run: WorkflowRun,
+    step_run: WorkflowStepRun,
+    step: Dict[str, Any],
+    definition: Dict[str, Any],
+    error: Dict[str, Any],
+) -> None:
+    _handle_step_error(
+        session, run=run, step_run=step_run, step=step, definition=definition, error=error,
+    )
+    _pause_after_debug_step(run, time.time(), step_run.step_id)
+
+
 def apply_step_result(
     session: Session,
     *,
@@ -633,7 +692,7 @@ def apply_step_result(
         definition = _load(version.definition_json, {}) if version else {}
         definition["_toolContracts"] = _load(version.tool_contracts_json, {}) if version else {}
         step = definition.get("steps", {}).get(step_run.step_id, {})
-        _handle_step_error(
+        _handle_debuggable_step_error(
             session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
         )
         session.commit()
@@ -644,7 +703,7 @@ def apply_step_result(
     step = definition.get("steps", {}).get(step_run.step_id, {})
     normalized = device_step_error(success=success, result=result, transport_error=error)
     if normalized:
-        _handle_step_error(
+        _handle_debuggable_step_error(
             session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
         )
         session.commit()
@@ -653,13 +712,12 @@ def apply_step_result(
         projected = _redact(_project_result(result, step.get("resultProjection")))
     except Exception as exc:
         normalized = error_payload("EXPRESSION_EVALUATION_FAILED", str(exc), "result_projection")
-        _handle_step_error(
+        _handle_debuggable_step_error(
             session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
         )
         session.commit()
         return True
-    encoded = _dump(projected)
-    variable_result = projected
+    encoded, variable_result = _dump(projected), projected
     if len(encoded.encode("utf-8")) > MAX_PROJECTED_RESULT_BYTES:
         try:
             reference, size = save_result(
@@ -670,7 +728,7 @@ def apply_step_result(
             )
         except ValueError:
             normalized = error_payload("STEP_RESULT_TOO_LARGE", "projected result exceeds configured maximum", "result")
-            _handle_step_error(
+            _handle_debuggable_step_error(
                 session, run=run, step_run=step_run, step=step, definition=definition, error=normalized
             )
             session.commit()
@@ -701,6 +759,7 @@ def apply_step_result(
         status_to="running",
         detail={"attempt": step_run.attempt, "result": variable_result},
     )
+    _pause_after_debug_step(run, now, step_run.step_id)
     session.commit()
     return True
 
@@ -755,7 +814,7 @@ def fail_step_dispatch(
     definition = _load(version.definition_json, {}) if version else {}
     definition["_toolContracts"] = _load(version.tool_contracts_json, {}) if version else {}
     step = definition.get("steps", {}).get(step_run.step_id, {})
-    _handle_step_error(
+    _handle_debuggable_step_error(
         session, run=run, step_run=step_run, step=step, definition=definition, error=error
     )
     session.commit()

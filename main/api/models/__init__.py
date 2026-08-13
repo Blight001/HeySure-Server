@@ -83,6 +83,8 @@ from .workflow import (
     WorkflowConfirmation,
     WorkflowRun,
     WorkflowStepRun,
+    WorkflowRecording,
+    WorkflowRecordingEvent,
 )
 
 __all__ = [
@@ -170,4 +172,6 @@ __all__ = [
     "WorkflowConfirmation",
     "WorkflowRun",
     "WorkflowStepRun",
+    "WorkflowRecording",
+    "WorkflowRecordingEvent",
 ]

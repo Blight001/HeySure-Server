@@ -95,3 +95,16 @@ def test_bubble_embeds_device_metadata_for_frontend():
     assert "设备: A 服务器" in content
     assert "设备号: linux-a" in content
     assert content.index("设备号: linux-a") < content.index("[参数]")
+
+
+def test_server_owned_tool_never_infers_device_from_business_result(monkeypatch):
+    monkeypatch.setattr(tool_persistence.registry, "has", lambda name: name == "automation.manage")
+    monkeypatch.setattr(tool_persistence, "is_endpoint_agent_tool", lambda _tool: True)
+
+    device_id, device_name = tool_persistence.tool_device_identity(
+        "automation.manage",
+        1,
+        {"result": {"device_id": "card-default-device", "status": "succeeded"}},
+    )
+
+    assert (device_id, device_name) == ("", "")

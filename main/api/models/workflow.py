@@ -194,3 +194,39 @@ class WorkflowSchedulerHeartbeat(SQLModel, table=True):
     heartbeat_at: float = Field(default_factory=time.time, index=True)
     last_tick_duration_ms: int = Field(default=0)
     last_error: str = Field(default="")
+
+
+class WorkflowRecording(SQLModel, table=True):
+    __table_args__ = (
+        Index("ix_workflowrecording_owner_status", "user_id", "ai_config_id", "status"),
+    )
+
+    id: str = Field(primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    ai_config_id: Optional[int] = Field(default=None, foreign_key="assistantaiconfig.id", index=True)
+    name: str = Field(default="")
+    description: str = Field(default="")
+    status: str = Field(default="active", index=True)
+    default_device_id: str = Field(default="", index=True)
+    device_ids_json: str = Field(default="[]")
+    event_count: int = Field(default=0)
+    created_at: float = Field(default_factory=time.time, index=True)
+    updated_at: float = Field(default_factory=time.time)
+    stopped_at: Optional[float] = None
+
+
+class WorkflowRecordingEvent(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("recording_id", "sequence", name="uq_workflowrecordingevent_sequence"),
+    )
+
+    id: str = Field(primary_key=True)
+    recording_id: str = Field(foreign_key="workflowrecording.id", index=True)
+    sequence: int = Field(index=True)
+    tool_name: str = Field(index=True)
+    device_id: str = Field(default="", index=True)
+    arguments_json: str = Field(default="{}")
+    result_json: str = Field(default="{}")
+    success: bool = Field(default=True)
+    error: str = Field(default="")
+    created_at: float = Field(default_factory=time.time, index=True)

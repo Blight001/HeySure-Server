@@ -30,6 +30,7 @@ def _load(raw: Optional[str], fallback: Any) -> Any:
 
 
 def card_payload(row: WorkflowCard) -> Dict[str, Any]:
+    definition = _load(row.draft_definition_json, {})
     return {
         "id": row.id,
         "name": row.name,
@@ -39,7 +40,8 @@ def card_payload(row: WorkflowCard) -> Dict[str, Any]:
         "tags": _load(row.tags_json, []),
         "access_scope": row.access_scope,
         "allowed_ai_config_ids": _load(row.allowed_ai_config_ids_json, []),
-        "definition": _load(row.draft_definition_json, {}),
+        "definition": definition,
+        "default_device_id": str(definition.get("defaultDeviceId") or ""),
         "latest_version_id": row.latest_version_id,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
@@ -47,6 +49,7 @@ def card_payload(row: WorkflowCard) -> Dict[str, Any]:
 
 
 def version_payload(row: WorkflowCardVersion, *, include_definition: bool = False) -> Dict[str, Any]:
+    definition = _load(row.definition_json, {})
     payload = {
         "id": row.id,
         "card_id": row.card_id,
@@ -55,11 +58,12 @@ def version_payload(row: WorkflowCardVersion, *, include_definition: bool = Fals
         "definition_digest": row.definition_digest,
         "tool_contracts": _load(row.tool_contracts_json, {}),
         "contract_device_ids": _load(row.contract_device_ids_json, []),
+        "default_device_id": str(definition.get("defaultDeviceId") or ""),
         "published_by": row.published_by,
         "published_at": row.published_at,
     }
     if include_definition:
-        payload["definition"] = _load(row.definition_json, {})
+        payload["definition"] = definition
     return payload
 
 
@@ -68,6 +72,14 @@ def create_card(session: Session, user_id: int, body) -> WorkflowCard:
     definition = dict(body.definition or {})
     definition.setdefault("schemaVersion", 1)
     definition.setdefault("name", body.name.strip())
+    requested_default = str(
+        getattr(body, "default_device_id", None) or getattr(body, "device_id", None) or ""
+    ).strip()
+    selected_devices = _contract_device_ids(getattr(body, "device_id", None), getattr(body, "device_ids", None))
+    if not requested_default and selected_devices:
+        requested_default = selected_devices[0]
+    if requested_default:
+        definition["defaultDeviceId"] = requested_default
     access_scope, allowed_ids = _card_access(session, user_id, body.access_scope, body.allowed_ai_config_ids)
     row = WorkflowCard(
         id=f"wcard_{uuid.uuid4().hex}",
@@ -91,6 +103,7 @@ def create_card(session: Session, user_id: int, body) -> WorkflowCard:
         user_id,
         device_id=getattr(body, "device_id", None),
         device_ids=getattr(body, "device_ids", None),
+        default_device_id=requested_default,
     )
     session.refresh(row)
     return row
@@ -142,6 +155,7 @@ def update_card(
         definition = dict(payload["definition"])
         definition.setdefault("schemaVersion", 1)
         row.draft_definition_json = _json(definition)
+    selected_ids, requested_default = _updated_device_selection(session, row, payload)
     row.status = "active"
     row.updated_at = time.time()
     session.add(row)
@@ -150,10 +164,29 @@ def update_card(
         row,
         user_id,
         device_id=payload.get("device_id"),
-        device_ids=payload.get("device_ids"),
+        device_ids=selected_ids,
+        default_device_id=requested_default,
     )
     session.refresh(row)
     return row
+
+
+def _updated_device_selection(
+    session: Session, row: WorkflowCard, payload: Dict[str, Any]
+) -> tuple[List[str], str]:
+    latest = session.get(WorkflowCardVersion, row.latest_version_id) if row.latest_version_id else None
+    inherited_ids = _load(latest.contract_device_ids_json, []) if latest else []
+    selected_ids = payload.get("device_ids")
+    selected_ids = inherited_ids if selected_ids is None else selected_ids
+    current_definition = _load(row.draft_definition_json, {})
+    requested_default = str(
+        payload.get("default_device_id") or payload.get("device_id")
+        or current_definition.get("defaultDeviceId") or (selected_ids[0] if selected_ids else "")
+    ).strip()
+    if requested_default:
+        current_definition["defaultDeviceId"] = requested_default
+        row.draft_definition_json = _json(current_definition)
+    return selected_ids, requested_default
 
 
 def _card_access(session: Session, user_id: int, scope: object, allowed_ids: object) -> Tuple[str, List[int]]:
@@ -311,6 +344,7 @@ def _save_version(
     *,
     device_id: Optional[str] = None,
     device_ids: Optional[List[str]] = None,
+    default_device_id: Optional[str] = None,
 ) -> WorkflowCardVersion:
     compiled = compile_definition(_load(row.draft_definition_json, {}))
     definition = compiled["definition"]
@@ -318,6 +352,15 @@ def _save_version(
     contracts, bound_ids = _snapshot_contracts(
         session, user_id, definition, device_id=device_id, device_ids=device_ids,
     )
+    selected_default = str(default_device_id or definition.get("defaultDeviceId") or "").strip()
+    if not selected_default and bound_ids:
+        selected_default = bound_ids[0]
+    if selected_default and selected_default not in bound_ids:
+        raise WorkflowValidationError(["default device must be one of the selected contract device IDs"])
+    if selected_default:
+        definition["defaultDeviceId"] = selected_default
+    definition["contractDeviceIds"] = bound_ids
+    row.draft_definition_json = _json(definition)
     latest = session.exec(
         select(WorkflowCardVersion)
         .where(WorkflowCardVersion.card_id == row.id)

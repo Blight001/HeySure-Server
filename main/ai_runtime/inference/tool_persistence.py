@@ -17,6 +17,7 @@ from ai_runtime.inference.tool_execution import (
     iter_joined_tool_executions,
 )
 from connector_runtime.dispatch.desktop_device_tools import is_endpoint_agent_tool
+from mcp_runtime.mcp import registry
 
 
 logger = logging.getLogger(__name__)
@@ -164,7 +165,7 @@ def _completed_device_id(
     tool: str,
     tool_result: Optional[Dict[str, object]],
 ) -> tuple[str, str]:
-    if not tool_result or not is_endpoint_agent_tool(tool):
+    if not tool_result or registry.has(tool) or not is_endpoint_agent_tool(tool):
         return "", ""
     payload = tool_result.get("result", tool_result)
     if not isinstance(payload, dict):
@@ -382,6 +383,19 @@ def save_tool_bubble(request: ToolBubbleRequest) -> None:
         request.user_id,
         request.tool_result,
     )
+    try:
+        from api.services.workflows.recording_service import RecordedToolCall, record_completed_tool_call
+
+        envelope = request.tool_result or {}
+        recorded_result = envelope.get("result", envelope) if isinstance(envelope, dict) else envelope
+        record_completed_tool_call(request.session, RecordedToolCall(
+            user_id=request.user_id, ai_config_id=request.ai_config_id,
+            tool=request.tool, arguments=request.arguments, result=recorded_result,
+            success=not request.failed, error="tool call failed" if request.failed else "",
+            device_id=device_id,
+        ))
+    except Exception:
+        logger.warning("workflow operation recording skipped", exc_info=True)
     message = _save_message(
         request.session,
         request.user_id,

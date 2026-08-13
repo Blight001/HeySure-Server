@@ -24,6 +24,8 @@ from ai_runtime.inference.tool_resolution import (
     TurnCallAction,
     append_joined_tool_response,
     append_ordinary_tool_response,
+    known_mcp_tool_names,
+    resolve_mcp_tool_name,
     split_concatenated_native_tool_name,
 )
 
@@ -76,7 +78,12 @@ class TurnCallMachine:
         call: Dict[str, Any],
         pending: List[Dict[str, Any]],
     ) -> TurnCallAction:
-        tool = str(call.get("tool") or "")
+        raw_tool = str(call.get("tool") or "")
+        tool = resolve_mcp_tool_name(
+            raw_tool,
+            self.context.native_tool_name_map,
+            set(self.context.effective_tools),
+        )
         arguments = call.get("arguments") or {}
         call_id = str(call.get("id") or "call_0")
         if self.context.should_stop():
@@ -97,7 +104,8 @@ class TurnCallMachine:
             )
         if tool not in self.context.effective_tools:
             return self._reject_disallowed(
-                rejection_context, tool, arguments, call_id
+                rejection_context, tool, arguments, call_id,
+                raw_tool=raw_tool,
             )
         return self._execute_regular(tool, arguments, call_id, pending)
 
@@ -132,7 +140,7 @@ class TurnCallMachine:
         self._set_rejection_state(outcome)
         return outcome.action
 
-    def _reject_disallowed(self, rejection_context, tool, arguments, call_id):
+    def _reject_disallowed(self, rejection_context, tool, arguments, call_id, *, raw_tool=""):
         outcome = tool_rejections.handle_disallowed_tool(
             rejection_context,
             tool,
@@ -141,6 +149,10 @@ class TurnCallMachine:
             self.context.effective_tools,
             self.state.rejected_tool_signature,
             self.state.rejected_repeat,
+            tool_rejections.ToolResolutionInfo(
+                raw_tool=raw_tool,
+                known_tools=frozenset(known_mcp_tool_names()),
+            ),
         )
         self._set_rejection_state(outcome)
         return outcome.action

@@ -119,6 +119,31 @@ def test_call_routes_endpoint_tool_to_connector_runtime(monkeypatch):
     assert result["result"]["success"] is True
 
 
+def test_registered_server_tool_cannot_be_shadowed_by_device(monkeypatch):
+    observed = {}
+
+    async def fake_runtime_call(runtime_url, tool, user_id, arguments, ai_config_id):
+        observed["call"] = (runtime_url, tool, user_id, arguments, ai_config_id)
+        return {"result": {"success": True, "source": "toolbox"}}
+
+    async def unexpected_device_dispatch(**_kwargs):
+        raise AssertionError("a registered server tool must not dispatch to a device")
+
+    monkeypatch.setattr(tool_execution, "is_workshop_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: True)
+    monkeypatch.setattr(tool_execution.registry, "has", lambda name: name == "automation.manage")
+    monkeypatch.setattr(tool_execution.settings, "mcp_runtime_url", "http://mcp:3001")
+    monkeypatch.setattr(tool_execution, "call_mcp_via_runtime", fake_runtime_call)
+    monkeypatch.setattr(tool_execution, "dispatch_endpoint_in_process", unexpected_device_dispatch)
+
+    result = asyncio.run(tool_execution.call_mcp_or_endpoint_tool(
+        "automation.manage", 1, {"action": "list"}, 7,
+    ))
+
+    assert result["result"]["source"] == "toolbox"
+    assert observed["call"][1] == "automation.manage"
+
+
 def test_execute_tool_call_returns_normalized_success(monkeypatch):
     async def fake_call(tool, user_id, arguments, ai_config_id):
         return {"tool": tool, "result": {"success": True, "value": 7}}

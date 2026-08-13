@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Set
 
 from jsonschema import Draft202012Validator
 
+from .expression import TemplateResolutionError, parse_path
+
 
 STEP_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 SAVE_AS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
@@ -46,10 +48,28 @@ def schema_digest(value: Any) -> str:
     return definition_digest(value if isinstance(value, dict) else {})
 
 
+def _template_ref_error(ref: str) -> str:
+    parts = ref.split(".")
+    if not parts or parts[0] not in ALLOWED_NAMESPACES:
+        return f"template reference uses an unknown namespace: {ref}"
+    if any(not item or item.startswith("__") for item in parts):
+        return f"template reference contains a forbidden path segment: {ref}"
+    if len(parts) > MAX_DEPTH:
+        return f"template reference is too deep: {ref}"
+    try:
+        parse_path(ref)
+    except TemplateResolutionError as exc:
+        return str(exc)
+    return ""
+
+
 def _walk_templates(value: Any, path: str = "definition", depth: int = 0):
     if depth > MAX_DEPTH:
         yield path, "template value exceeds maximum nesting depth"
         return
+    if depth == 0 and isinstance(value, dict):
+        for message in _initial_environment_errors(value):
+            yield "definition.compatibility.initialEnvironment", message
     if isinstance(value, dict):
         for key, child in value.items():
             yield from _walk_templates(child, f"{path}.{key}", depth + 1)
@@ -59,17 +79,81 @@ def _walk_templates(value: Any, path: str = "definition", depth: int = 0):
     elif isinstance(value, str):
         for match in TEMPLATE_RE.finditer(value):
             ref = match.group(1).strip()
-            parts = ref.split(".")
-            if not parts or parts[0] not in ALLOWED_NAMESPACES:
-                yield path, f"template reference uses an unknown namespace: {ref}"
-            elif any(not item or item.startswith("__") for item in parts):
-                yield path, f"template reference contains a forbidden path segment: {ref}"
-            elif len(parts) > MAX_DEPTH:
-                yield path, f"template reference is too deep: {ref}"
+            error = _template_ref_error(ref)
+            if error:
+                yield path, error
 
 
 def _template_refs(value: Any) -> Set[str]:
     return {match.group(1).strip() for match in TEMPLATE_RE.finditer(canonical_json(value))}
+
+
+def _tool_name(step: Any) -> str:
+    return str(step.get("toolRef", {}).get("name") or "") if isinstance(step, dict) else ""
+
+
+def _reset_step_errors(step: Any) -> List[str]:
+    if not isinstance(step, dict):
+        return ["resetStepId must reference an existing step"]
+    action = str(step.get("arguments", {}).get("action") or "")
+    errors = []
+    if not _tool_name(step).endswith("browser+tab") or action not in {"reload", "replace"}:
+        errors.append("reset step must call browser+tab with action reload or replace")
+    if action == "replace" and not str(step.get("arguments", {}).get("url") or "").strip():
+        errors.append("replace reset step requires arguments.url")
+    return errors
+
+
+def _ready_step_errors(step: Any) -> List[str]:
+    if not isinstance(step, dict):
+        return ["readyStepId must reference an existing step"]
+    if _tool_name(step).endswith("browser+wait") or _tool_name(step).endswith("browser+observe"):
+        return []
+    return ["ready step must call browser+wait or browser+observe"]
+
+
+def _follows_next_chain(steps: Dict[str, Any], source: str, target: str) -> bool:
+    current, seen = source, set()
+    while current and current not in seen:
+        if current == target:
+            return True
+        seen.add(current)
+        step = steps.get(current)
+        current = str(step.get("next") or "") if isinstance(step, dict) else ""
+    return False
+
+
+def _initial_topology_errors(
+    definition: Dict[str, Any], steps: Dict[str, Any], reset_id: str, ready_id: str,
+) -> List[str]:
+    errors = []
+    if reset_id in steps and ready_id in steps and not _follows_next_chain(steps, reset_id, ready_id):
+        errors.append("reset step must reach ready step through the initialization next chain")
+    start_id = str(definition.get("startStepId") or "")
+    if reset_id in steps and not _follows_next_chain(steps, start_id, reset_id):
+        errors.append("reset step must be reachable from startStepId before normal workflow actions")
+    return errors
+
+
+def _initial_environment_errors(definition: Dict[str, Any]) -> List[str]:
+    steps = definition.get("steps") if isinstance(definition.get("steps"), dict) else {}
+    if not any(".browser+" in _tool_name(step) for step in steps.values()):
+        return []
+    compatibility = definition.get("compatibility", {})
+    contract = compatibility.get("initialEnvironment") if isinstance(compatibility, dict) else None
+    if contract is None:
+        return ["browser workflow must declare description, resetStepId and readyStepId"]
+    if not isinstance(contract, dict):
+        return ["must be an object"]
+    errors = []
+    if not str(contract.get("description") or "").strip():
+        errors.append("description is required")
+    reset_id = str(contract.get("resetStepId") or "")
+    ready_id = str(contract.get("readyStepId") or "")
+    errors.extend(_reset_step_errors(steps.get(reset_id)))
+    errors.extend(_ready_step_errors(steps.get(ready_id)))
+    errors.extend(_initial_topology_errors(definition, steps, reset_id, ready_id))
+    return errors
 
 
 def _validate_expression(expression: Any, path: str, errors: List[str], depth: int = 0) -> None:

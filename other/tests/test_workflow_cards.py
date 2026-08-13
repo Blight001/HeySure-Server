@@ -85,6 +85,27 @@ def test_template_blocks_dunder_and_missing_values():
         render_template("${steps.not_finished.result}", context)
 
 
+def test_template_supports_bounded_list_indexes():
+    context = {
+        "input": {},
+        "steps": {"observe": {"result": {"items": [{"text": "alpha"}, {"text": "beta"}]}}},
+        "run": {},
+        "device": {},
+    }
+    assert render_template("${steps.observe.result.items[1].text}", context) == "beta"
+    assert render_template("value=${steps.observe.result.items[0].text}", context) == "value=alpha"
+    with pytest.raises(TemplateResolutionError, match="index 2 out of range"):
+        render_template("${steps.observe.result.items[2].text}", context)
+
+
+def test_compile_rejects_dynamic_or_negative_list_indexes():
+    definition = _definition()
+    definition["output"] = {"content": "${steps.first.result.items[-1].text}"}
+    with pytest.raises(WorkflowValidationError) as raised:
+        compile_definition(definition)
+    assert any("invalid list index" in item for item in raised.value.errors)
+
+
 def test_condition_expression_uses_safe_boolean_language():
     context = {
         "input": {"enabled": True, "name": "heysure-agent"},
@@ -189,6 +210,37 @@ def test_trace_to_draft_parameterizes_sensitive_values():
     assert args["password"] == "${input.step_1_password}"
     assert "plain-secret" not in str(definition)
     assert compile_definition(definition)["definition"]["startStepId"] == "call_1"
+
+
+def test_browser_trace_declares_reload_initial_environment_contract():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 500}},
+        {"tool": "aifree.browser+observe", "arguments": {}},
+    ], name="Stable browser flow")
+    contract = definition["compatibility"]["initialEnvironment"]
+    assert contract["resetStepId"] == "call_1"
+    assert contract["readyStepId"] == "call_2"
+    assert compile_definition(definition)["warnings"] == []
+
+
+def test_browser_workflow_without_initial_environment_contract_is_rejected():
+    definition = _definition()
+    definition["steps"]["read_first"]["toolRef"]["name"] = "aifree.browser+observe"
+    with pytest.raises(WorkflowValidationError) as raised:
+        compile_definition(definition)
+    assert any("initialEnvironment" in item for item in raised.value.errors)
+
+
+def test_browser_initial_environment_requires_reload_before_ready_step():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 500}},
+    ], name="Stable browser flow")
+    definition["compatibility"]["initialEnvironment"]["resetStepId"] = "call_2"
+    with pytest.raises(WorkflowValidationError) as raised:
+        compile_definition(definition)
+    assert any("reset step must call browser+tab" in item for item in raised.value.errors)
 
 
 def test_ai_intervention_step_is_compiled_as_a_result_producer():

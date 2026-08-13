@@ -123,3 +123,26 @@ def test_disallowed_third_repeat_closes_pending_and_stops(monkeypatch):
     assert outcome.action is TurnCallAction.STOP_RUN
     assert context.conversation[-1]["tool_call_id"] == "call-2"
     assert errors == ["Repeated disallowed MCP tool call: workspace.write"]
+
+
+def test_unknown_tool_error_is_not_reported_as_permission_denial(monkeypatch):
+    context, _, _ = _context(native=True)
+    monkeypatch.setattr(tool_rejections.tool_persistence, "save_tool_bubble", lambda request: None)
+
+    tool_rejections.handle_disallowed_tool(
+        context,
+        "aifree__browser__observe_typo",
+        {},
+        "call-1",
+        {"aifree.browser+observe"},
+        "",
+        0,
+        tool_rejections.ToolResolutionInfo(
+            raw_tool="aifree__browser__observe_typo",
+            known_tools=frozenset({"aifree.browser+observe"}),
+        ),
+    )
+
+    payload = context.conversation[0]["content"]
+    assert "Unknown MCP tool name" in payload
+    assert "not a permission denial" in payload

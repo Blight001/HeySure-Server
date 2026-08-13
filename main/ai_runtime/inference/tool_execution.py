@@ -56,6 +56,10 @@ async def call_mcp_or_endpoint_tool(
     arguments: dict,
     ai_config_id: Optional[int],
 ) -> Dict[str, object]:
+    # Server-owned names are reserved.  A device may accidentally advertise a
+    # tool with the same name, but it must never shadow the toolbox contract.
+    # Workshop tools are the only intentional endpoint-first namespace.
+    server_owned = registry.has(tool)
     if is_workshop_tool(tool):
         return {
             "tool": tool,
@@ -67,7 +71,7 @@ async def call_mcp_or_endpoint_tool(
                 arguments=arguments,
             ),
         }
-    if is_endpoint_agent_tool(tool):
+    if not server_owned and is_endpoint_agent_tool(tool):
         # Bot-originated runs execute inside connector-runtime itself, which
         # owns the endpoint Socket.IO registry. Other split processes dispatch
         # through the configured socket owner.

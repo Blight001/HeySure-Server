@@ -46,6 +46,12 @@ class RejectionOutcome:
     action: TurnCallAction
 
 
+@dataclass(frozen=True)
+class ToolResolutionInfo:
+    raw_tool: str = ""
+    known_tools: frozenset[str] = frozenset()
+
+
 def handle_mcp_disabled(
     context: RejectionContext,
     tool: str,
@@ -127,6 +133,7 @@ def handle_disallowed_tool(
     allowed_tools: set,
     previous_signature: str,
     previous_count: int,
+    resolution: Optional[ToolResolutionInfo] = None,
 ) -> RejectionOutcome:
     signature, count = track_repeated_tool_call(
         "disallowed",
@@ -135,7 +142,13 @@ def handle_disallowed_tool(
         previous_signature,
         previous_count,
     )
-    error = f"Tool not allowed for this task: {tool}"
+    info = resolution or ToolResolutionInfo()
+    unknown = tool not in info.known_tools
+    requested = str(info.raw_tool or tool)
+    error = (
+        f"Unknown MCP tool name: {requested}. This is a tool-name compatibility error, not a permission denial."
+        if unknown else f"Tool not allowed for this task: {tool}"
+    )
     result = {"result": {"success": False, "error": error}}
     result_text = _build_mcp_display_result(
         tool,
@@ -158,7 +171,7 @@ def handle_disallowed_tool(
         model=context.model, tool=tool, arguments=arguments,
         result_text=result_text, failed=True,
     ))
-    _append_disallowed_response(context, tool, error, call_id, allowed_tools)
+    _append_disallowed_response(context, tool, error, call_id, allowed_tools, unknown=unknown)
     if count >= 3:
         append_pending_call_responses(
             context.conversation,
@@ -171,7 +184,7 @@ def handle_disallowed_tool(
     return RejectionOutcome(signature, count, TurnCallAction.NEXT_CALL)
 
 
-def _append_disallowed_response(context, tool, error, call_id, allowed_tools) -> None:
+def _append_disallowed_response(context, tool, error, call_id, allowed_tools, *, unknown=False) -> None:
     if context.native_tool_calls:
         context.conversation.append({
             "role": "tool",
@@ -182,9 +195,13 @@ def _append_disallowed_response(context, tool, error, call_id, allowed_tools) ->
             ),
         })
         return
+    explanation = (
+        f"工具名 `{tool}` 无法对应当前已注册工具；这是名称或格式错误，不代表 MCP 权限被关闭。"
+        if unknown else f"工具 `{tool}` 已知，但未在当前任务允许范围内。"
+    )
     context.conversation.append({"role": "user", "content": (
         "[MCP执行失败]\n"
-        f"工具 `{tool}` 未在当前任务允许范围内。\n"
+        f"{explanation}\n"
         f"可用工具: {', '.join(sorted(allowed_tools)) or '（空）'}\n"
-        "请改用任务允许的 MCP 工具继续执行。"
+        "请使用规范工具名或改用当前任务允许的 MCP 工具继续执行。"
     )})

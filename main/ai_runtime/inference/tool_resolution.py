@@ -11,6 +11,7 @@ from api.chat_runtime.chat_prompt_utils import _safe_json
 from ai_runtime.inference import tool_media
 from connector_runtime.dispatch.desktop_device_tools import (
     build_endpoint_tools_payload,
+    connected_endpoint_tool_catalog,
     is_endpoint_agent_tool,
 )
 from mcp_runtime.mcp import registry
@@ -271,6 +272,13 @@ def resolve_mcp_tool_name(
 
     candidates = set(native_tool_name_map.values())
     candidates.update(allowed_tools or set())
+    candidates.update(known_mcp_tool_names())
+    return resolve_tool_name(name, candidates) or name
+
+
+def known_mcp_tool_names() -> set[str]:
+    """Return current server and online endpoint tool names for error classification."""
+    candidates: set[str] = set()
     try:
         candidates.update(
             str(item.get("name") or "").strip()
@@ -279,7 +287,15 @@ def resolve_mcp_tool_name(
         )
     except Exception:
         pass
-    return resolve_tool_name(name, candidates) or name
+    try:
+        candidates.update(
+            str(item.get("name") or "").strip()
+            for item in connected_endpoint_tool_catalog()
+            if item.get("name")
+        )
+    except Exception:
+        pass
+    return candidates
 
 
 def split_concatenated_native_tool_name(
