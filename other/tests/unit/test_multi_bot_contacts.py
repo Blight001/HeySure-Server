@@ -14,7 +14,11 @@ from api.services.bot_directory import (
 )
 from connector_runtime.bots.qq._config import QQ_DEFAULTS
 from connector_runtime.bots.registry import iter_active_for_config, iter_bots, sync_connection_directory
-from gateway.routers.bots import _sync_legacy_channel_enabled
+from gateway.routers.bots import (
+    BotConnectionUpdateRequest,
+    _connection_config_update,
+    _sync_legacy_channel_enabled,
+)
 from connector_runtime.bots.session_cursor import list_ai_sessions
 from api.runtime import run_context
 from tools.conversation import _conversation_base_scope
@@ -150,6 +154,18 @@ def test_connection_directory_projects_channel_enabled_without_credentials():
         session.commit()
         projected = json.loads(cfg.bot_configs)["qq"]
     assert projected == {"enabled": True}
+
+
+def test_top_level_enabled_wins_over_stale_nested_config():
+    body = BotConnectionUpdateRequest(
+        enabled=True,
+        config={"enabled": False, "app_id": "app", "app_secret": "secret"},
+    )
+    assert _connection_config_update(body) == {
+        "enabled": True,
+        "app_id": "app",
+        "app_secret": "secret",
+    }
 
 
 def test_connection_config_view_has_independent_orm_state():

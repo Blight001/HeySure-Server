@@ -93,6 +93,15 @@ def _sync_legacy_channel_enabled(session: Session, cfg, channel: str) -> None:
     session.add(cfg)
 
 
+def _connection_config_update(body: BotConnectionUpdateRequest) -> Optional[Dict[str, Any]]:
+    if body.config is None:
+        return None
+    values = dict(body.config)
+    if body.enabled is not None:
+        values["enabled"] = bool(body.enabled)
+    return values
+
+
 @router.get("/connections/{config_id}")
 def list_bot_connections(
     config_id: int,
@@ -186,16 +195,17 @@ def update_bot_connection(
     bot = get_bot(row.channel)
     if body.name is not None:
         row.name = str(body.name).strip() or bot.label
-    if body.enabled is not None:
-        row.enabled = bool(body.enabled)
-    if body.config is not None:
+    config_update = _connection_config_update(body)
+    if config_update is not None:
         try:
-            update_connection_config(row, body.config, bot.default_config())
+            update_connection_config(row, config_update, bot.default_config())
         except ValueError as exc:
             raise HTTPException(
                 status_code=409,
                 detail="机器人加密密钥已更换，请重新填写 App Secret/Token 后保存",
             ) from exc
+    elif body.enabled is not None:
+        row.enabled = bool(body.enabled)
     if body.is_default:
         peers = session.exec(select(BotConnection).where(
             BotConnection.ai_config_id == config_id,
