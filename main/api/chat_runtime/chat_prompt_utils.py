@@ -953,13 +953,12 @@ def _emit_run_live_update(run_id: str, force: bool = False) -> None:
     payload = {
         "run_id": run_id,
         "user_id": user_id,
+        **{key: meta.get(key) for key in ("session_id", "ai_config_id", "ai_kind")},
         "text": str(live.get("text") or ""),
         "reasoning": str(live.get("reasoning") or ""),
         "phase": str(live.get("phase") or "generating"),
         "current_tool": str(live.get("current_tool") or ""),
-        "prompt_tokens": int(live.get("pending_prompt_tokens") or 0),
-        "completion_tokens": int(live.get("pending_completion_tokens") or 0),
-        "total_tokens": int(live.get("pending_total_tokens") or 0),
+        **{f"{key}_tokens": int(live.get(f"pending_{key}_tokens") or 0) for key in ("prompt", "completion", "total")},
         "updated_at": live.get("updated_at"),
     }
 

@@ -55,6 +55,21 @@ def _save_message(
         total_tokens=db_msg.total_tokens or 0,
     )
     try:
+        from .chat_realtime import notify_history_changed
+
+        notify_history_changed(
+            user_id=user_id,
+            session_id=db_msg.session_id,
+            ai_config_id=db_msg.ai_config_id,
+            ai_kind=db_msg.ai_kind,
+            message_id=db_msg.id,
+            source="persistence",
+        )
+    except Exception as exc:
+        # The database remains the source of truth. Realtime delivery is only
+        # an acceleration path and must never make a successful save fail.
+        logger.exception(f"chat history notify failed message_id={db_msg.id}: {exc}")
+    try:
         from connector_runtime.bots.notify import notify_saved_assistant_message
 
         notify_saved_assistant_message(session, db_msg)
