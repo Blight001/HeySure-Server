@@ -1,15 +1,12 @@
 """Shared "active session" cursor for the unified bot conversation pool.
 
-Every AI exposes a single shared conversation pool ("机器人对话区") that spans
-the web UI and all bot channels (QQ / Feishu / future platforms). This module
-records, per inbound identity, *which session that identity's next message
-should land in* — and nothing more.
+Each external contact owns an isolated conversation pool while the account
+owner's web view may inspect every pool. This module records which session a
+given inbound identity's next message should land in.
 
 Design notes:
-- **No isolation.** ``list_ai_sessions`` returns every session belonging to the
-  AI regardless of channel or identity. ``conversation.switch`` may target any
-  of them. The per-identity cursor only prevents concurrent external users from
-  clobbering each other's "current session"; it is not a privacy boundary.
+- **Contact isolation.** Bot callers can list/switch only sessions carrying
+  their ``bot_contact_id``. Owner web calls omit that scope and retain full view.
 - **Channel-agnostic.** Helpers take a generic ``identity_key`` (QQ openid /
   Feishu receive_id / …). Routers compute it inline from their own event shape;
   the reverse direction (MCP tool → identity) decodes it from the stored
@@ -24,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from sqlmodel import select
 
-from api.models import BotSessionRoute, BotUserCursor, ChatSession
+from api.models import BotConnection, BotSessionRoute, BotUserCursor, ChatSession
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -76,15 +73,17 @@ def _session_exists(
     ai_config_id: int,
     ai_kind: str,
     session_id: str,
+    contact_id: Optional[int] = None,
 ) -> bool:
-    row = session.exec(
-        select(ChatSession).where(
+    stmt = select(ChatSession).where(
             ChatSession.user_id == int(user_id),
             ChatSession.ai_config_id == int(ai_config_id),
             ChatSession.ai_kind == str(ai_kind or "core"),
             ChatSession.session_id == str(session_id),
         )
-    ).first()
+    if contact_id is not None:
+        stmt = stmt.where(ChatSession.bot_contact_id == int(contact_id))
+    row = session.exec(stmt).first()
     return row is not None
 
 
@@ -117,6 +116,18 @@ def get_active_session_id(
         identity_key=identity_key,
     )
     if cur and str(cur.active_session_id or "").strip():
+        if cur.contact_id is None and default:
+            home_route = session.exec(select(BotSessionRoute).where(
+                BotSessionRoute.channel == str(channel),
+                BotSessionRoute.user_id == int(user_id),
+                BotSessionRoute.ai_config_id == int(ai_config_id),
+                BotSessionRoute.ai_kind == str(ai_kind or "core"),
+                BotSessionRoute.session_id == default,
+            )).first()
+            if home_route and home_route.contact_id:
+                cur.contact_id = home_route.contact_id
+                session.add(cur)
+                session.commit()
         active = str(cur.active_session_id).strip()
         if _session_exists(
             session,
@@ -124,6 +135,7 @@ def get_active_session_id(
             ai_config_id=ai_config_id,
             ai_kind=ai_kind,
             session_id=active,
+            contact_id=cur.contact_id,
         ):
             return active
         # Stale pointer (session was deleted) -> reset to home.
@@ -160,17 +172,34 @@ def set_active_session_id(
     )
     now = time.time()
     if cur is None:
+        route = session.exec(select(BotSessionRoute).where(
+            BotSessionRoute.channel == str(channel),
+            BotSessionRoute.user_id == int(user_id),
+            BotSessionRoute.ai_config_id == int(ai_config_id),
+            BotSessionRoute.ai_kind == str(ai_kind or "core"),
+            BotSessionRoute.session_id == session_id,
+        )).first()
         cur = BotUserCursor(
             channel=str(channel),
             user_id=int(user_id),
             ai_config_id=int(ai_config_id),
             ai_kind=str(ai_kind or "core"),
             identity_key=identity_key,
+            contact_id=route.contact_id if route else None,
             active_session_id=session_id,
             created_at=now,
             updated_at=now,
         )
     else:
+        route = session.exec(select(BotSessionRoute).where(
+            BotSessionRoute.channel == str(channel),
+            BotSessionRoute.user_id == int(user_id),
+            BotSessionRoute.ai_config_id == int(ai_config_id),
+            BotSessionRoute.ai_kind == str(ai_kind or "core"),
+            BotSessionRoute.session_id == session_id,
+        )).first()
+        if route and route.contact_id:
+            cur.contact_id = route.contact_id
         cur.active_session_id = session_id
         cur.updated_at = now
     session.add(cur)
@@ -203,7 +232,26 @@ def resolve_identity_for_session(
     identity_key = _identity_from_target(row.channel, row.target_json)
     if not identity_key:
         return None
+    connection = session.get(BotConnection, row.connection_id) if row.connection_id else None
+    if connection and connection.connection_ref:
+        identity_key = f"{connection.connection_ref}:{identity_key}"
     return (str(row.channel), identity_key)
+
+
+def resolve_route_scope_for_session(
+    session: "Session",
+    *,
+    user_id: int,
+    ai_config_id: int,
+    ai_kind: str,
+    session_id: str,
+) -> Optional[BotSessionRoute]:
+    return session.exec(select(BotSessionRoute).where(
+        BotSessionRoute.user_id == int(user_id),
+        BotSessionRoute.ai_config_id == int(ai_config_id),
+        BotSessionRoute.ai_kind == str(ai_kind or "core"),
+        BotSessionRoute.session_id == str(session_id),
+    )).first()
 
 
 def list_ai_sessions(
@@ -214,13 +262,9 @@ def list_ai_sessions(
     ai_kind: str,
     active_session_id: str = "",
     limit: int = 50,
+    bot_contact_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """List every session in the AI's shared pool (web + all bot channels).
-
-    No channel/identity filtering — the pool is shared. Each row is tagged with
-    its source channel (``"web"`` when no bot route exists) and whether it is
-    the currently active session for the asking identity.
-    """
+    """List owner-visible sessions or one external contact's isolated pool."""
     stmt = select(ChatSession).where(
         ChatSession.user_id == int(user_id),
         ChatSession.ai_kind == str(ai_kind or "core"),
@@ -229,6 +273,8 @@ def list_ai_sessions(
         stmt = stmt.where(ChatSession.ai_config_id == int(ai_config_id))
     else:
         stmt = stmt.where(ChatSession.ai_config_id.is_(None))
+    if bot_contact_id is not None:
+        stmt = stmt.where(ChatSession.bot_contact_id == int(bot_contact_id))
     rows = session.exec(stmt.order_by(ChatSession.updated_at.desc())).all()
 
     # Tag each session with its originating channel (web when no route).
@@ -238,6 +284,8 @@ def list_ai_sessions(
     )
     if ai_config_id is not None:
         route_stmt = route_stmt.where(BotSessionRoute.ai_config_id == int(ai_config_id))
+    if bot_contact_id is not None:
+        route_stmt = route_stmt.where(BotSessionRoute.contact_id == int(bot_contact_id))
     channel_by_sid: Dict[str, str] = {
         str(r.session_id): str(r.channel) for r in session.exec(route_stmt).all()
     }

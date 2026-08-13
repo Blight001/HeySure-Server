@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from api.chat_runtime.chat_scheduler import _task_run_session_id
 from api.chat_runtime.chat_runtime_helpers import _renew_loop_scheduled_job
 from api.models import AITaskJob
 from api.services.tasks import task_schedule
@@ -39,6 +40,7 @@ def _loop_job(**schedule_overrides):
         last_supervised_at=150.0,
         supervision_count=3,
         completion_notified_at=199.0,
+        session_id="session_task_job_same_g1",
     )
 
 
@@ -51,6 +53,7 @@ def test_loop_job_is_renewed_in_place_and_stays_editable():
     assert renewed is job
     assert renewed.job_id == "job_same"
     assert renewed.status == "queued"
+    assert renewed.session_id == "session_task_job_same_g1"
     assert renewed.started_at is None
     assert renewed.finished_at is None
     assert renewed.last_supervised_at is None
@@ -61,6 +64,24 @@ def test_loop_job_is_renewed_in_place_and_stays_editable():
     schedule = json.loads(renewed.task_payload)["schedule"]
     assert schedule["runs_done"] == 1
     assert schedule["schedule_at"] == 1_300.0
+    assert _task_run_session_id(renewed) == "session_task_job_same_g2"
+
+
+def test_task_occurrence_reuses_session_until_loop_renewal():
+    job = _loop_job()
+
+    assert _task_run_session_id(job) == "session_task_job_same_g1"
+
+    job.session_id = None
+    assert _task_run_session_id(job) == "session_task_job_same_g1"
+
+    legacy_job = _loop_job()
+    legacy_job.session_id = "session_task_job_same"
+    assert _task_run_session_id(legacy_job) == "session_task_job_same"
+
+    legacy_job = _loop_job(runs_done=1)
+    legacy_job.session_id = "session_task_job_same"
+    assert _task_run_session_id(legacy_job) == "session_task_job_same_g2"
 
 
 def test_loop_job_renews_even_after_supervision_overwrote_trigger_type():

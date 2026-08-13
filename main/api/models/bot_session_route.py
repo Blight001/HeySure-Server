@@ -12,7 +12,58 @@ its addressing payload under its own ``channel`` value.
 import time
 from typing import Optional
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
+
+
+class BotConnection(SQLModel, table=True):
+    """Encrypted credentials and cursor for a stateful bot account."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    connection_ref: str = Field(default="", index=True, unique=True)
+    name: str = Field(default="")
+    enabled: bool = Field(default=True, index=True)
+    is_default: bool = Field(default=False)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    ai_config_id: int = Field(foreign_key="assistantaiconfig.id", index=True)
+    channel: str = Field(index=True)
+    provider: str = Field(default="")
+    provider_account_id: str = Field(default="", index=True)
+    owner_external_id: str = Field(default="")
+    base_url: str = Field(default="")
+    credentials_encrypted: str = Field(default="")
+    sync_cursor: str = Field(default="")
+    state: str = Field(default="disconnected", index=True)
+    last_error_code: str = Field(default="")
+    last_seen_at: float = Field(default=0.0)
+    created_at: float = Field(default_factory=time.time)
+    updated_at: float = Field(default_factory=time.time)
+
+
+class BotContact(SQLModel, table=True):
+    """An external recipient known by a bot connection.
+
+    Only opaque refs are exposed to models. Provider ids and addressing data
+    are stored as a hash/encrypted envelope respectively.
+    """
+
+    __table_args__ = (
+        UniqueConstraint("connection_id", "external_id_hash", name="uq_bot_contact_connection_identity"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    connection_id: int = Field(foreign_key="botconnection.id", index=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    ai_config_id: int = Field(foreign_key="assistantaiconfig.id", index=True)
+    contact_ref: str = Field(default="", index=True, unique=True)
+    external_id_hash: str = Field(default="", index=True)
+    display_name: str = Field(default="")
+    target_encrypted: str = Field(default="")
+    enabled: bool = Field(default=True, index=True)
+    allow_proactive: bool = Field(default=True)
+    last_seen_at: float = Field(default=0.0)
+    created_at: float = Field(default_factory=time.time)
+    updated_at: float = Field(default_factory=time.time)
 
 
 class BotSessionRoute(SQLModel, table=True):
@@ -22,6 +73,8 @@ class BotSessionRoute(SQLModel, table=True):
     ai_config_id: int = Field(foreign_key="assistantaiconfig.id", index=True)
     ai_kind: str = Field(default="core", index=True)
     session_id: str = Field(index=True)
+    connection_id: Optional[int] = Field(default=None, foreign_key="botconnection.id", index=True)
+    contact_id: Optional[int] = Field(default=None, foreign_key="botcontact.id", index=True)
     # JSON-encoded bot-specific addressing payload, e.g.
     #   Feishu: {"receive_id": "...", "receive_id_type": "..."}
     #   QQ:     {"target_id": "...", "target_type": "..."}
@@ -37,17 +90,10 @@ class BotSessionRoute(SQLModel, table=True):
 
 
 class BotUserCursor(SQLModel, table=True):
-    """Per-identity "active session" pointer for the unified bot conversation pool.
+    """Per-contact active-session pointer and conversation isolation scope.
 
-    A single AI exposes one shared conversation pool ("机器人对话区") that spans
-    the web UI and every bot channel. This table only records *where the next
-    inbound message from a given identity should land* — it does not partition
-    or isolate the pool. ``conversation.list / switch / new`` may target any
-    session belonging to the AI regardless of channel or identity.
-
-    The per-identity cursor exists so concurrent external users talking to the
-    same AI don't clobber each other's "current session"; it is not an
-    isolation boundary. Logical uniqueness:
+    The contact id is the privacy boundary used by conversation list/switch;
+    the channel identity key remains only an adapter-side lookup key. Logical uniqueness:
     ``(channel, ai_config_id, ai_kind, identity_key)`` — upserted on read/write.
     """
 
@@ -59,6 +105,7 @@ class BotUserCursor(SQLModel, table=True):
     # Channel-agnostic identity key (QQ openid / Feishu receive_id / …),
     # supplied by each adapter's ``route_identity_key``.
     identity_key: str = Field(index=True)
+    contact_id: Optional[int] = Field(default=None, foreign_key="botcontact.id", index=True)
     # The session this identity's next inbound message will be routed to.
     active_session_id: str = Field(default="")
     created_at: float = Field(default_factory=time.time)

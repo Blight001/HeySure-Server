@@ -68,7 +68,7 @@ from .device_dynamic_tool import DeviceDynamicTool
 from .device_dynamic_tool_version import DeviceDynamicToolVersion
 from .device_permission_policy import DevicePermissionPolicy
 from .mcp_call_stat import McpToolStat, McpFailureEvent
-from .bot_session_route import BotSessionRoute, BotUserCursor
+from .bot_session_route import BotConnection, BotContact, BotSessionRoute, BotUserCursor
 from .workshop_binding import WorkshopAiBinding
 from .knowledge import KnowledgeEntry, Memory
 from .project import EvolutionProject, EvolutionProjectCreate, EvolutionProjectUpdate
@@ -158,6 +158,8 @@ __all__ = [
     # communication
     "AIMessage",
     # bots (unified session route, channel-keyed)
+    "BotConnection",
+    "BotContact",
     "BotSessionRoute",
     "BotUserCursor",
     # deterministic workflow cards

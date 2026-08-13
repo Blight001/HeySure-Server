@@ -141,6 +141,9 @@ def _resolve_session_ref(
         ai_config_id=ai_config_id,
         ai_kind=ai_kind,
     )
+    contact_id = session.info.get("bot_contact_id")
+    if contact_id is not None:
+        stmt = stmt.where(ChatSession.bot_contact_id == int(contact_id))
     if value.isdigit():
         by_id = session.exec(stmt.where(ChatSession.id == int(value))).first()
         if by_id is not None:
@@ -191,6 +194,7 @@ def _list_command(
         ai_kind=ai_kind,
         active_session_id=current_session_id,
         limit=50,
+        bot_contact_id=session.info.get("bot_contact_id"),
     )
     counts = {
         str(sid): int(count or 0)

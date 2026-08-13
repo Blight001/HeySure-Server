@@ -161,8 +161,8 @@ BUILTIN_TOOLS = (
         name="message.send+to",
         description=(
             "统一发消息工具，用 to 指定收件方。\n"
-            "to=\"user\"：优先通过该 AI 已绑定的飞书或 QQ 给真人用户发送通知；"
-            "未绑定或机器人发送失败时自动进入 HeySure 收件箱，并向在线安卓端/网页推送，不会因外部机器人缺失而报错。"
+            "to=\"user\"：通过该 AI 已绑定的飞书、QQ 或微信发送。机器人会话中默认只回复当前联系人；"
+            "网页/后台存在多个目标时必须使用 connection_ref + recipient_ref 明确选择。"
             "正常调用只需提供 text、file_ref 或 attachments；图片、视频、音频、文档、压缩包等统一按文件发送。"
             "工作区文件先用 workspace.file+manage(action=register) 获取 file_ref；不要向用户询问会话 id、openid、target_id 等寻址参数。"
             "QQ 会自动使用当前会话绑定、配置的默认接收目标或最近一次已绑定 QQ 会话；"
@@ -191,8 +191,16 @@ BUILTIN_TOOLS = (
                 "text": {"type": "string", "description": "发给当前已绑定用户的文本；只发媒体时可省略。"},
                 "channel": {
                     "type": "string",
-                    "enum": ["feishu", "qq"],
+                    "enum": ["feishu", "qq", "wechat"],
                     "description": "兼容性覆盖项；通常不要传，默认自动使用该 AI 绑定的机器人渠道。",
+                },
+                "connection_ref": {
+                    "type": "string",
+                    "description": "机器人连接稳定引用（conn_...）；多连接主动发送时与 recipient_ref 一起传。",
+                },
+                "recipient_ref": {
+                    "type": "string",
+                    "description": "联系人稳定引用（recipient_...）；不要传平台 openid/chat_id 等原始标识。",
                 },
                 "receive_id": {"type": "string", "description": "兼容性覆盖项；通知当前绑定用户时不要传，由系统自动解析。"},
                 "receive_id_type": {

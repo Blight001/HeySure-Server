@@ -152,22 +152,32 @@ def get_current_user(token: Optional[str], session: Session = Depends(get_sessio
                 detail="Could not validate credentials",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        username: str = payload.get("sub")
-        if username is None:
+        username = payload.get("sub")
+        user_id = payload.get("user_id")
+        token_auth_version = payload.get("auth_version")
+        if username is None or user_id is None or token_auth_version is None:
              raise HTTPException(status_code=401, detail="Invalid token")
-             
-        statement = select(User).where(User.account == username)
-        user = session.exec(statement).first()
-        if user is None:
-            raise HTTPException(status_code=404, detail="User not found")
+        try:
+            user_id = int(user_id)
+            token_auth_version = int(token_auth_version)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        user = session.get(User, user_id)
+        if (
+            user is None
+            or user.account != username
+            or int(user.auth_version) != token_auth_version
+        ):
+            raise HTTPException(status_code=401, detail="Session expired")
         return user
     except HTTPException:
          raise
-    except Exception as e:
-         logger.exception(f"Error in get_current_user: {e}")
+    except Exception:
+         logger.exception("Error in get_current_user")
          raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Could not validate credentials: {str(e)}",
+            detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -285,7 +295,12 @@ def login(user_in: UserLogin, request: Request, session: Session = Depends(get_s
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.account, "user_id": user.id}, expires_delta=access_token_expires
+        data={
+            "sub": user.account,
+            "user_id": user.id,
+            "auth_version": user.auth_version,
+        },
+        expires_delta=access_token_expires,
     )
     
     return {
@@ -314,7 +329,11 @@ def login_with_email(payload: EmailLoginPayload, request: Request, session: Sess
     ensure_default_ai_for_user(session, user.id)
 
     access_token = create_access_token(
-        data={"sub": user.account, "user_id": user.id},
+        data={
+            "sub": user.account,
+            "user_id": user.id,
+            "auth_version": user.auth_version,
+        },
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     return {
@@ -339,6 +358,41 @@ def agent_endpoint(
         "agent_socket_url": _agent_socket_url(request),
         "ice_servers": ice_settings.build_ice_servers(session),
     }
+
+
+def _apply_password_update(session: Session, user: User, update_data: dict) -> bool:
+    password = update_data.pop("password", None)
+    if not password:
+        return False
+    from api.services.access.session_security import revoke_user_sessions
+
+    revoke_user_sessions(session, user)
+    user.hashed_password = get_password_hash(password)
+    return True
+
+
+def _disconnect_changed_password(user_id: int, password_changed: bool) -> None:
+    if not password_changed:
+        return
+    from api.socket_events import disconnect_user_sockets
+
+    disconnect_user_sockets(user_id)
+
+
+@router.post("/logout", status_code=204)
+def logout(
+    authorization: Optional[str] = Header(None),
+    session: Session = Depends(get_session),
+):
+    """Revoke all access tokens issued for the current auth version."""
+    from api.services.access.session_security import revoke_user_sessions
+    from api.socket_events import disconnect_user_sockets
+
+    user = get_current_user(authorization, session)
+    revoke_user_sessions(session, user)
+    session.commit()
+    disconnect_user_sockets(user.id)
+    return None
 
 
 @router.put("/profile", response_model=UserRead)
@@ -417,10 +471,7 @@ def update_profile(
         if key in file_keys
     }
 
-    if "password" in update_data:
-        password = update_data.pop("password")
-        if password:
-            user.hashed_password = get_password_hash(password)
+    password_changed = _apply_password_update(session, user, update_data)
             
     for key, value in update_data.items():
         setattr(user, key, value)
@@ -428,6 +479,7 @@ def update_profile(
     session.add(user)
     session.commit()
     session.refresh(user)
+    _disconnect_changed_password(user.id, password_changed)
     # 文件为真相源：写入后回读确认，响应由 _user_payload 合并文件值。
     for key, value in prompt_updates.items():
         text = str(value or "")

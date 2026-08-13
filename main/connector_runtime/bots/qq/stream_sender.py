@@ -37,7 +37,9 @@ from sqlmodel import Session, select
 from api.chat_runtime.mcp_parser import strip_tool_call_blocks
 from api.chat_runtime.run_state import pop_run_stream, register_run_stream
 from api.database import engine
-from api.models import AssistantAIConfig, BotSessionRoute
+from api.models import AssistantAIConfig, BotConnection, BotSessionRoute
+from api.services.bot_directory import connection_config
+from ._config import QQ_DEFAULTS
 from ._config import read_qq_config
 from .service import post_qq_stream_packet, send_qq_markdown_message
 
@@ -132,7 +134,7 @@ class QQStreamSession:
         event_id: str,
         start_seq: int,
         markdown_mode: str,
-        template_id: str,
+        **options,
     ) -> None:
         self.user_id = int(user_id)
         self.ai_config_id = int(ai_config_id)
@@ -143,7 +145,8 @@ class QQStreamSession:
         self.msg_id = str(msg_id or "")
         self.event_id = str(event_id or "")
         self.markdown_mode = str(markdown_mode or "native")
-        self.template_id = str(template_id or "")
+        self.template_id = str(options.get("template_id") or "")
+        self.connection_ref = str(options.get("connection_ref") or "")
 
         self._lock = threading.Lock()
         self._close_evt = threading.Event()
@@ -272,6 +275,7 @@ class QQStreamSession:
                 msg_seq=seq if self.msg_id else None,
                 markdown_mode=self.markdown_mode,
                 template_id=self.template_id,
+                connection_ref=getattr(self, "connection_ref", ""),
             )
             # Prefer a server-assigned stream id once we have one.
             if isinstance(data, dict):
@@ -305,6 +309,7 @@ class QQStreamSession:
                 markdown_mode=self.markdown_mode,
                 template_id=self.template_id,
                 fallback_plain=True,
+                connection_ref=getattr(self, "connection_ref", ""),
             )
             self._bump_route_sequence(seq + 1)
         except Exception as exc:
@@ -346,6 +351,54 @@ def _load_route_row(session: Session, *, user_id: int, ai_config_id: int, ai_kin
     ).first()
 
 
+def _qq_stream_config(session: Session, cfg, row):
+    connection = session.get(BotConnection, row.connection_id) if row.connection_id else None
+    bot_cfg = connection_config(connection, QQ_DEFAULTS) if connection else read_qq_config(cfg)
+    if not bot_cfg.get("enabled") or not bool(bot_cfg.get("stream_enabled", True)):
+        return None, None
+    if str(bot_cfg.get("markdown_mode") or "native").strip().lower() == "off":
+        return None, None
+    return bot_cfg, connection
+
+
+def _qq_stream_target(row):
+    import json as _json
+
+    try:
+        target = _json.loads(row.target_json or "{}")
+    except Exception:
+        target = {}
+    target_id = str(target.get("target_id") or "").strip()
+    target_type = str(target.get("target_type") or "c2c").strip().lower()
+    return (target_id, target_type) if target_id and target_type == "c2c" else ("", "")
+
+
+def _load_qq_stream(session: Session, user_id: int, ai_config_id: int, ai_kind: str, session_id: str):
+
+    cfg = session.get(AssistantAIConfig, ai_config_id)
+    if not cfg or int(cfg.user_id or 0) != int(user_id):
+        return None
+    row = _load_route_row(
+        session, user_id=user_id, ai_config_id=ai_config_id,
+        ai_kind=ai_kind, session_id=session_id,
+    )
+    if row is None:
+        return None
+    bot_cfg, connection = _qq_stream_config(session, cfg, row)
+    target_id, target_type = _qq_stream_target(row)
+    if bot_cfg is None or not target_id:
+        return None
+    return QQStreamSession(
+        user_id=user_id, ai_config_id=ai_config_id, ai_kind=str(ai_kind or "core"),
+        session_id=session_id, target_id=target_id, target_type=target_type,
+        msg_id=str(row.source_message_id or ""), event_id=str(row.source_event_id or ""),
+        start_seq=int(row.next_msg_seq or 1),
+        markdown_mode=str(bot_cfg.get("markdown_mode") or "native"),
+        template_id=str(bot_cfg.get("markdown_template_id") or ""),
+        connection_ref=connection.connection_ref if connection else "",
+    )
+
+
 def maybe_start_qq_stream(
     *,
     run_id: str,
@@ -363,53 +416,12 @@ def maybe_start_qq_stream(
     try:
         if not ai_config_id or not str(session_id or "").startswith("qq_"):
             return None
-        import json as _json
-
         with Session(engine) as session:
-            cfg = session.get(AssistantAIConfig, int(ai_config_id))
-            if not cfg or int(cfg.user_id or 0) != int(user_id):
-                return None
-            if str(cfg.bot_channel or "feishu").strip().lower() != CHANNEL:
-                return None
-            bot_cfg = read_qq_config(cfg)
-            if not bot_cfg.get("enabled") or not bool(bot_cfg.get("stream_enabled", True)):
-                return None
-            if str(bot_cfg.get("markdown_mode") or "native").strip().lower() == "off":
-                # Streaming rides on markdown messages; without markdown there is
-                # nothing to stream into.
-                return None
-            row = _load_route_row(
-                session,
-                user_id=user_id,
-                ai_config_id=int(ai_config_id),
-                ai_kind=ai_kind,
-                session_id=session_id,
+            stream = _load_qq_stream(
+                session, int(user_id), int(ai_config_id), ai_kind, str(session_id),
             )
-            if row is None:
-                return None
-            try:
-                target = _json.loads(row.target_json or "{}")
-            except Exception:
-                target = {}
-            target_id = str(target.get("target_id") or "").strip()
-            if not target_id:
-                return None
-            target_type = str(target.get("target_type") or "c2c").strip().lower()
-            if target_type != "c2c":
-                return None
-            stream = QQStreamSession(
-                user_id=int(user_id),
-                ai_config_id=int(ai_config_id),
-                ai_kind=str(ai_kind or "core"),
-                session_id=str(session_id),
-                target_id=target_id,
-                target_type=target_type,
-                msg_id=str(row.source_message_id or ""),
-                event_id=str(row.source_event_id or ""),
-                start_seq=int(row.next_msg_seq or 1),
-                markdown_mode=str(bot_cfg.get("markdown_mode") or "native"),
-                template_id=str(bot_cfg.get("markdown_template_id") or ""),
-            )
+        if stream is None:
+            return None
         _mark_active(session_id)
         register_run_stream(run_id, stream)
         return stream

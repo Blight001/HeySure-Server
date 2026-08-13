@@ -130,7 +130,7 @@ class WorkerRunMachine:
 
     def _set_runtime_context(self) -> None:
         request = self.request
-        run_context.set_run_session_context({
+        context = {
             "run_id": request.run_id,
             "user_id": request.user_id,
             "ai_config_id": request.ai_config_id,
@@ -139,7 +139,8 @@ class WorkerRunMachine:
             "session_name": self.state.session_name,
             "model": self.setup.model,
             "current_user_message_id": request.current_user_message_id,
-        })
+        }
+        run_context.set_run_session_context(run_context.enrich_bot_scope(self.session, context))
 
     def _load_plan(self) -> None:
         request = self.request

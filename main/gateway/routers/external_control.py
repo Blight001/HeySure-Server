@@ -299,7 +299,11 @@ async def _tool_call_mcp(args, service, credential, user, cfg):
     if not tool_name:
         raise HTTPException(status_code=400, detail="tool is required")
     try:
-        local_token = create_access_token(data={"sub": user.account})
+        local_token = create_access_token(data={
+            "sub": user.account,
+            "user_id": user.id,
+            "auth_version": user.auth_version,
+        })
         result = await call_mcp_tool(
             MCPCallRequest(tool=tool_name, arguments=args.get("arguments") or {}, ai_config_id=cfg.id),
             service.session,

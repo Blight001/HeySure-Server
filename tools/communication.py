@@ -20,7 +20,8 @@ from sqlmodel import Session, select
 from connector_runtime.bots.messaging import MediaPayload, Recipient, dispatcher
 from api.database import engine
 from mcp_runtime.mcp.core import get_project_root
-from api.models import AssistantAIConfig
+from api.models import AssistantAIConfig, BotConnection, BotContact, BotSessionRoute
+from api.services.bot_directory import resolve_contact_target
 from api.services.storage.workspace_files import resolve_file_ref
 from ai_runtime.inference import ai_message_service
 from api.runtime.run_context import get_run_session_context
@@ -190,12 +191,6 @@ def _resolve_qq_notification_recipient(
                 "当前 AI 未绑定 QQ 连接（未找到对应的 AI 配置）。",
                 reason="qq_ai_config_not_found",
             )
-        if str(cfg.bot_channel or "").strip().lower() != "qq":
-            return None, "", _qq_not_bound(
-                "当前 AI 未绑定 QQ 连接（当前机器人渠道不是 QQ）。",
-                reason="qq_channel_not_bound",
-            )
-
         from connector_runtime.bots.qq._config import read_qq_config
         from connector_runtime.bots.qq.routes_store import find_qq_bound_target
 
@@ -292,6 +287,110 @@ def _external_recipient(
     return _resolve_qq_notification_recipient(user_id, ai_config_id)
 
 
+def _scoped_external_recipient(
+    user_id: int,
+    ai_config_id: Optional[int],
+    args: Dict[str, Any],
+) -> tuple[Optional[str], Optional[Recipient], str, bool]:
+    """Resolve opaque refs/current bot route without exposing provider ids."""
+    if not ai_config_id:
+        return None, None, "", False
+    connection_ref = str(args.get("connection_ref") or "").strip()
+    contact_ref = str(args.get("recipient_ref") or "").strip()
+    if bool(connection_ref) != bool(contact_ref):
+        raise HTTPException(status_code=400, detail={
+            "code": "BOT_TARGET_INCOMPLETE",
+            "message": "connection_ref and recipient_ref must be provided together",
+        })
+    run_ctx = get_run_session_context() or {}
+    current_session_id = str(run_ctx.get("session_id") or "").strip()
+    if not contact_ref and not current_session_id:
+        return None, None, "", False
+    with Session(engine) as session:
+        current_route = None
+        if current_session_id:
+            current_route = session.exec(select(BotSessionRoute).where(
+                BotSessionRoute.user_id == int(user_id),
+                BotSessionRoute.ai_config_id == int(ai_config_id),
+                BotSessionRoute.session_id == current_session_id,
+            )).first()
+        current_contact = session.get(BotContact, current_route.contact_id) if current_route and current_route.contact_id else None
+        current_connection = session.get(BotConnection, current_route.connection_id) if current_route and current_route.connection_id else None
+        if contact_ref:
+            if current_contact is not None and current_contact.contact_ref != contact_ref:
+                raise HTTPException(status_code=403, detail={
+                    "code": "BOT_CONTACT_SCOPE_VIOLATION",
+                    "message": "bot-originated runs may only message their current contact",
+                })
+            resolved = resolve_contact_target(
+                session,
+                user_id=user_id,
+                ai_config_id=int(ai_config_id),
+                connection_ref=connection_ref,
+                contact_ref=contact_ref,
+            )
+            if resolved is None:
+                raise HTTPException(status_code=404, detail={"code": "BOT_TARGET_NOT_FOUND", "message": "bot target not found"})
+            bot = dispatcher.resolve_bot(resolved.connection.channel)
+            if bot is None:
+                raise HTTPException(status_code=400, detail="bot channel is not supported")
+            target = {**resolved.target, "connection_ref": resolved.connection.connection_ref}
+            return resolved.connection.channel, bot.parse_recipient(target), "explicit_ref", True
+        if current_contact is not None and current_connection is not None:
+            resolved = resolve_contact_target(
+                session,
+                user_id=user_id,
+                ai_config_id=int(ai_config_id),
+                connection_ref=current_connection.connection_ref,
+                contact_ref=current_contact.contact_ref,
+            )
+            if resolved is not None:
+                bot = dispatcher.resolve_bot(resolved.connection.channel)
+                if bot is not None:
+                    target = {**resolved.target, "connection_ref": resolved.connection.connection_ref}
+                    return resolved.connection.channel, bot.parse_recipient(target), "current_contact", True
+    return None, None, "", False
+
+
+def _ensure_unambiguous_owner_channel(user_id: int, ai_config_id: Optional[int], explicit_channel: str) -> None:
+    if explicit_channel or not ai_config_id:
+        return
+    from connector_runtime.bots.registry import iter_active_for_config
+    try:
+        with Session(engine) as session:
+            cfg = session.exec(select(AssistantAIConfig).where(
+                AssistantAIConfig.id == int(ai_config_id),
+                AssistantAIConfig.user_id == int(user_id),
+            )).first()
+            enabled = [bot.channel for bot in iter_active_for_config(cfg)] if cfg else []
+            contacts = session.exec(select(BotContact, BotConnection).join(
+                BotConnection, BotConnection.id == BotContact.connection_id
+            ).where(
+                BotContact.user_id == int(user_id),
+                BotContact.ai_config_id == int(ai_config_id),
+                BotContact.enabled.is_(True),
+                BotConnection.enabled.is_(True),
+            ).order_by(BotContact.last_seen_at.desc())).all()
+    except Exception:
+        return
+    if len(enabled) > 1 or len(contacts) > 1:
+        targets = [
+            {
+                "channel": connection.channel,
+                "connection_ref": connection.connection_ref,
+                "recipient_ref": contact.contact_ref,
+                "display_name": contact.display_name or "未命名联系人",
+            }
+            for contact, connection in contacts[:20]
+        ]
+        raise HTTPException(status_code=409, detail={
+            "code": "BOT_TARGET_AMBIGUOUS",
+            "message": "multiple bot targets are available; provide connection_ref and recipient_ref",
+            "channels": enabled,
+            "targets": targets,
+        })
+
+
 def _send_external_user_message(
     *,
     user_id: int,
@@ -370,8 +469,16 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     if not text and not attachments:
         raise HTTPException(status_code=400, detail="text or an attachment is required when message.send+to targets the user")
     attachment_records = _notification_attachment_records(user_id, ai_config_id, args)
-    channel = dispatcher.resolve_channel(str(args.get("channel") or "").strip().lower() or None, ai_config_id, user_id)
-    recipient, binding_source, unavailable = _external_recipient(user_id, ai_config_id, args, channel)
+    requested_channel = str(args.get("channel") or "").strip().lower()
+    scoped_channel, scoped_recipient, binding_source, target_scoped = _scoped_external_recipient(
+        user_id, ai_config_id, args
+    )
+    if scoped_channel:
+        channel, recipient, unavailable = scoped_channel, scoped_recipient, None
+    else:
+        _ensure_unambiguous_owner_channel(user_id, ai_config_id, requested_channel)
+        channel = dispatcher.resolve_channel(requested_channel or None, ai_config_id, user_id)
+        recipient, binding_source, unavailable = _external_recipient(user_id, ai_config_id, args, channel)
     deliveries: List[Any] = []
     external_error: Optional[Exception] = None
     if unavailable is None:
@@ -380,6 +487,16 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
             attachments=attachments, channel=channel, recipient=recipient,
         )
     external_delivered = bool(deliveries) and all(bool(item.ok) for item in deliveries) and external_error is None
+    if target_scoped and not external_delivered:
+        return {
+            "accepted": False,
+            "delivered": False,
+            "pending": False,
+            "fallback_used": False,
+            "channel": channel,
+            "binding_source": binding_source,
+            "error": type(external_error).__name__ if external_error else "external_delivery_failed",
+        }
     notification_id = _persist_user_notification(
         user_id=user_id,
         ai_config_id=ai_config_id,

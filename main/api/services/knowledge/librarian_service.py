@@ -141,6 +141,11 @@ from .librarian_clawhub import (
     _extract_skill_zip,
 )
 
+from .librarian_topics import (
+    delete_topic,
+    update_topic_content,
+)
+
 from ...sio import sio
 
 logger = logging.getLogger(__name__)

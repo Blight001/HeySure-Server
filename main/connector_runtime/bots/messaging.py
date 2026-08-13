@@ -47,6 +47,7 @@ class Recipient:
     reply_message_id: str = ""
     reply_event_id: str = ""
     msg_seq: Optional[int] = None
+    connection_ref: str = ""
 
     @property
     def is_explicit(self) -> bool:

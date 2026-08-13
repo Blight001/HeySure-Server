@@ -17,8 +17,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, TYPE_CHECKING, Optional
 
 from sqlmodel import select
+from fastapi import HTTPException
 
-from api.models import BotSessionRoute
+from api.models import BotConnection, BotSessionRoute
+from api.services.bot_directory import attach_route_contact
+from ..connection_scope import resolve_inbound_config, scoped_home_session, scoped_identity
+from ._config import QQ_DEFAULTS, read_qq_config
 
 if TYPE_CHECKING:
     from sqlmodel import Session
@@ -27,6 +31,34 @@ if TYPE_CHECKING:
 
 
 CHANNEL = "qq"
+
+
+def scope_qq_inbound(session, cfg, connection_ref: str, read_config=read_qq_config):
+    cfg, connection_ref = resolve_inbound_config(
+        session, cfg, channel="qq", connection_ref=connection_ref, defaults=QQ_DEFAULTS,
+    )
+    if not read_config(cfg).get("enabled"):
+        raise HTTPException(status_code=400, detail="QQ bot is disabled for this AI")
+    return cfg, connection_ref
+
+
+def qq_scope_keys(connection_ref: str, config_id: int, target_id: str, session_key: str):
+    return scoped_identity(connection_ref, target_id), scoped_home_session(
+        "qq", config_id, connection_ref, session_key,
+    )
+
+
+def send_qq_text_safely(**values) -> bool:
+    from .service import send_qq_text_message
+
+    body = str(values.pop("text", "") or "").strip()
+    if not body:
+        return False
+    try:
+        send_qq_text_message(text=body, **values)
+        return True
+    except Exception:
+        return False
 
 
 def external_mcp_route_response(cfg: Any) -> Optional[Dict[str, Any]]:
@@ -57,6 +89,7 @@ class QQRouteHandle:
     row: BotSessionRoute
     target_id: str
     target_type: str
+    connection_ref: str = ""
 
     @property
     def source_message_id(self) -> str:
@@ -78,6 +111,7 @@ class QQBoundTarget:
     target_id: str
     target_type: str
     session_id: str
+    connection_ref: str = ""
 
 
 def _decode_target(row: BotSessionRoute) -> tuple[str, str]:
@@ -91,6 +125,36 @@ def _decode_target(row: BotSessionRoute) -> tuple[str, str]:
     )
 
 
+def _bind_qq_contact(session: "Session", row: BotSessionRoute, target_id: str, target_type: str, connection_ref: str) -> None:
+    if connection_ref:
+        connection = session.exec(select(BotConnection).where(
+            BotConnection.connection_ref == connection_ref,
+            BotConnection.ai_config_id == int(row.ai_config_id),
+            BotConnection.channel == CHANNEL,
+        )).first()
+        if connection:
+            row.connection_id = connection.id
+    session.add(row)
+    session.flush()
+    attach_route_contact(
+        session, route=row, identity_key=target_id,
+        target={"target_id": target_id, "target_type": target_type},
+    )
+
+
+def _upsert_qq_route(row, **values):
+    if row is None:
+        return BotSessionRoute(
+            channel=CHANNEL, **values,
+        )
+    row.target_json = values["target_json"]
+    row.source_message_id = values["source_message_id"]
+    row.source_event_id = values["source_event_id"]
+    row.next_msg_seq = values["next_msg_seq"]
+    row.updated_at = time.time()
+    return row
+
+
 def register_qq_session_route(
     session: "Session",
     *,
@@ -102,8 +166,10 @@ def register_qq_session_route(
     target_type: str,
     source_message_id: str = "",
     source_event_id: str = "",
-    next_msg_seq: int = 1,
+    **options,
 ) -> None:
+    connection_ref = str(options.get("connection_ref") or "")
+    next_msg_seq = int(options.get("next_msg_seq") or 1)
     session_id = str(session_id or "").strip()
     target_id = str(target_id or "").strip()
     target_type = str(target_type or "c2c").strip() or "c2c"
@@ -122,26 +188,13 @@ def register_qq_session_route(
         {"target_id": target_id, "target_type": target_type},
         ensure_ascii=False,
     )
-    now = time.time()
-    if row is None:
-        row = BotSessionRoute(
-            channel=CHANNEL,
-            user_id=int(user_id),
-            ai_config_id=int(ai_config_id),
-            ai_kind=str(ai_kind or "core"),
-            session_id=session_id,
-            target_json=target_json,
-            source_message_id=str(source_message_id or ""),
-            source_event_id=str(source_event_id or ""),
-            next_msg_seq=max(1, int(next_msg_seq or 1)),
-        )
-    else:
-        row.target_json = target_json
-        row.source_message_id = str(source_message_id or "")
-        row.source_event_id = str(source_event_id or "")
-        row.next_msg_seq = max(1, int(next_msg_seq or 1))
-        row.updated_at = now
-    session.add(row)
+    row = _upsert_qq_route(
+        row, user_id=int(user_id), ai_config_id=int(ai_config_id),
+        ai_kind=str(ai_kind or "core"), session_id=session_id, target_json=target_json,
+        source_message_id=str(source_message_id or ""),
+        source_event_id=str(source_event_id or ""), next_msg_seq=max(1, next_msg_seq),
+    )
+    _bind_qq_contact(session, row, target_id, target_type, connection_ref)
     session.commit()
 
 
@@ -162,7 +215,11 @@ def load_qq_route(
     if row is None:
         return None
     target_id, target_type = _decode_target(row)
-    return QQRouteHandle(row=row, target_id=target_id, target_type=target_type)
+    connection = session.get(BotConnection, row.connection_id) if row.connection_id else None
+    return QQRouteHandle(
+        row=row, target_id=target_id, target_type=target_type,
+        connection_ref=connection.connection_ref if connection else "",
+    )
 
 
 def find_qq_bound_target(
@@ -194,9 +251,12 @@ def find_qq_bound_target(
     for row in rows:
         target_id, target_type = _decode_target(row)
         if target_id:
+            connection_id = getattr(row, "connection_id", None)
+            connection = session.get(BotConnection, connection_id) if connection_id and hasattr(session, "get") else None
             return QQBoundTarget(
                 target_id=target_id,
                 target_type=target_type or "c2c",
                 session_id=str(row.session_id or ""),
+                connection_ref=connection.connection_ref if connection else "",
             )
     return None

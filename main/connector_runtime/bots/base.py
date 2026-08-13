@@ -93,7 +93,7 @@ class BotAdapter(ABC):
         """
 
     @abstractmethod
-    def get_long_connection_state(self, ai_config_id: int) -> Dict[str, str]:
+    def get_long_connection_state(self, ai_config_id: int, connection_ref: str = "") -> Dict[str, str]:
         """Return ``{"status": "...", "label": "...", "message": "..."}``."""
 
     # ---- outbound messaging -------------------------------------------------

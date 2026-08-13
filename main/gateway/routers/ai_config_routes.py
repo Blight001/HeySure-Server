@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import Depends, Header, HTTPException
 from sqlmodel import Session, select
 
-from connector_runtime.bots import all_channels, iter_bots
+from connector_runtime.bots import all_channels, iter_bots, sync_connection_directory
 
 
 logger = logging.getLogger(__name__)
@@ -207,6 +207,7 @@ def create_ai_config(
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
+    sync_connection_directory(session, cfg)
     _ensure_ai_workspace_dir(user.id, cfg.id)
     _write_persona_file(user.id, cfg, prompt=body.prompt or "")
     # 工具箱默认自动绑定：新建 AI 即获得默认工具集（多绑；之后完全由用户在设备/AI配置中管理绑定与解绑）。
@@ -272,19 +273,11 @@ def _apply_bot_configs_from_payload(
     *,
     active_channel: str,
 ) -> None:
-    """Route the create/update ``bot_configs`` payload through each adapter.
-
-    Bots whose channel is NOT the currently-active one have their
-    ``enabled`` flag force-cleared so the AI config can't accidentally
-    have two bots both flipped on at once.
-    """
+    """Apply every channel independently; active_channel is only the default."""
+    _ = active_channel
     payload = payload if isinstance(payload, dict) else {}
     for bot in iter_bots():
         slice_payload = payload.get(bot.channel) if isinstance(payload.get(bot.channel), dict) else {}
-        if bot.channel != active_channel:
-            # Force-disable inactive bots so a stray ``enabled=True`` in
-            # the JSON can't turn the wrong channel on.
-            slice_payload = {**slice_payload, "enabled": False}
         bot.apply_config_payload(cfg, slice_payload)
 
 @router.put("/configs/{config_id}")
@@ -347,6 +340,7 @@ def update_ai_config(
     session.add(cfg)
     session.commit()
     session.refresh(cfg)
+    sync_connection_directory(session, cfg)
     _write_persona_file(
         user.id,
         cfg,

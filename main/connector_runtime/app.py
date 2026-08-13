@@ -28,7 +28,7 @@ import socketio
 from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from connector_runtime.bots import iter_bots
+from connector_runtime.bots import backfill_legacy_connection_directories, iter_bots
 from api.database import create_db_and_tables
 from api.models import AssistantAIConfig
 from api.sio import sio
@@ -64,6 +64,16 @@ class FeishuSendRequest(BaseModel):
     receive_id_type: Optional[str] = None
 
 
+class BotLoginRequest(BaseModel):
+    user_id: int
+    connection_ref: str = ""
+
+
+class BotVerifyCodeRequest(BaseModel):
+    value: str
+    connection_ref: str = ""
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     from api.runtime.health import state_for
@@ -71,6 +81,9 @@ async def _lifespan(app: FastAPI):
     health = state_for("connector")
     health.mark_not_ready("schema check")
     create_db_and_tables()
+    # Existing deployments stored one channel config directly on the AI row.
+    # Backfill only missing directory rows; never overwrite instance edits.
+    backfill_legacy_connection_directories()
     # This process owns endpoint-agent sockets in split deployments. Its
     # in-memory socket registry is empty after a restart, so clear stale shared
     # presence before surviving agents reconnect and register themselves.
@@ -199,6 +212,68 @@ def _register_control_routes(router: APIRouter) -> None:
         logger.warning("restart requested via /internal/restart")
         return {"ok": True, "restarting": True, "command": cmd}
 
+    _register_bot_login_routes(router)
+
+
+def _qr_bot(channel: str, method_name: str):
+    from connector_runtime.bots import get as get_bot
+
+    bot = get_bot(channel)
+    if bot is None or not hasattr(bot, method_name):
+        raise HTTPException(status_code=404, detail="bot channel does not support QR login")
+    return bot
+
+
+def _register_bot_login_routes(router: APIRouter) -> None:
+    @router.post("/bot/{channel}/login/{config_id}")
+    def bot_login(channel: str, config_id: int, req: BotLoginRequest) -> Dict[str, Any]:
+        return _qr_bot(channel, "start_login").start_login(config_id, req.user_id, req.connection_ref)
+
+    @router.get("/bot/{channel}/login/{config_id}")
+    def bot_login_status(channel: str, config_id: int, connection_ref: str = "") -> Dict[str, Any]:
+        return _qr_bot(channel, "login_status").login_status(config_id, connection_ref)
+
+    @router.post("/bot/{channel}/login/{config_id}/verify-code")
+    def bot_login_verify_code(channel: str, config_id: int, req: BotVerifyCodeRequest) -> Dict[str, Any]:
+        try:
+            return _qr_bot(channel, "submit_login_verify_code").submit_login_verify_code(config_id, req.value, req.connection_ref)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @router.post("/bot/{channel}/logout/{config_id}")
+    def bot_logout(channel: str, config_id: int, connection_ref: str = "") -> Dict[str, Any]:
+        return _qr_bot(channel, "logout").logout(config_id, connection_ref)
+
+
+def _bot_runtime_statuses() -> Dict[str, Any]:
+    from sqlmodel import Session, select
+    from api.database import engine
+    from api.models import BotConnection
+
+    with Session(engine) as session:
+        configs = session.exec(select(AssistantAIConfig)).all()
+        connections = session.exec(select(BotConnection).where(
+            BotConnection.enabled.is_(True), BotConnection.state != "deleted"
+        )).all()
+    bots = list(iter_bots())
+    per_channel: Dict[str, Dict[str, Dict[str, str]]] = {bot.channel: {} for bot in bots}
+    for cfg in configs:
+        if cfg.id:
+            for bot in bots:
+                per_channel[bot.channel][str(cfg.id)] = bot.get_long_connection_state(int(cfg.id))
+    payload: Dict[str, Any] = {
+        "ok": True,
+        **{f"{channel}_statuses": states for channel, states in per_channel.items()},
+    }
+    payload["connection_statuses"] = {
+        row.connection_ref: next(
+            bot.get_long_connection_state(int(row.ai_config_id), row.connection_ref)
+            for bot in bots if bot.channel == row.channel
+        )
+        for row in connections
+    }
+    return payload
+
 
 def create_app() -> FastAPI:
     fastapi_app = _new_fastapi_app()
@@ -220,25 +295,7 @@ def create_app() -> FastAPI:
         ``"<channel>_statuses"`` so existing clients keep working but the
         set of keys grows automatically when new bots register.
         """
-        from sqlmodel import Session, select
-        from api.database import engine
-
-        per_channel: Dict[str, Dict[str, Dict[str, str]]] = {
-            bot.channel: {} for bot in iter_bots()
-        }
-        with Session(engine) as session:
-            configs = session.exec(select(AssistantAIConfig)).all()
-        for cfg in configs:
-            config_id = int(cfg.id or 0)
-            if not config_id:
-                continue
-            for bot in iter_bots():
-                per_channel[bot.channel][str(config_id)] = bot.get_long_connection_state(config_id)
-
-        payload: Dict[str, Any] = {"ok": True}
-        for channel, statuses in per_channel.items():
-            payload[f"{channel}_statuses"] = statuses
-        return payload
+        return _bot_runtime_statuses()
 
     @router.post("/agent/dispatch")
     async def device_dispatch(req: DeviceDispatchRequest) -> Dict[str, Any]:

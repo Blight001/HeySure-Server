@@ -48,6 +48,10 @@ class ClawHubInstalledUpdateBody(BaseModel):
     skill_card: str = ""
 
 
+class KnowledgeEntryUpdateBody(BaseModel):
+    content: str = ""
+
+
 class InheritanceThoughtEndpointBody(BaseModel):
     endpoint_kind: str = "any"
 
@@ -191,6 +195,47 @@ def read_entry(
     user = get_current_user(authorization, session)
     try:
         return librarian_service.read(user_id=user.id, memory_id=memory_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.put("/entries/{memory_id}")
+def update_entry(
+    memory_id: str,
+    body: KnowledgeEntryUpdateBody,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    try:
+        detail = librarian_service.update_topic_content(
+            user_id=user.id,
+            memory_id=memory_id,
+            content=body.content,
+        )
+        entry = librarian_service.read(
+            user_id=user.id,
+            memory_id="builtin.inheritance_tools",
+        )
+        return {"updated": True, "detail": detail, "entry": entry}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.delete("/entries/{memory_id}")
+def delete_entry(
+    memory_id: str,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    try:
+        result = librarian_service.delete_topic(user_id=user.id, memory_id=memory_id)
+        result["entry"] = librarian_service.read(
+            user_id=user.id,
+            memory_id="builtin.inheritance_tools",
+        )
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 

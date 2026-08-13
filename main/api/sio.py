@@ -4,7 +4,7 @@ import threading
 from typing import Optional, Tuple
 
 import socketio
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from .auth import decode_access_token
 from .core.settings import settings
@@ -130,8 +130,8 @@ def is_agent_shared_secret(token: str) -> bool:
     return str(token or "").strip() == settings.agent_token
 
 
-def resolve_agent_user(token: str) -> Optional[Tuple[int, str]]:
-    """Validate a token as a user JWT and return ``(user_id, account)``.
+def resolve_user_token(token: str) -> Optional[Tuple[int, str]]:
+    """Validate a user JWT and return ``(user_id, account)``.
 
     The agent client sends the same user JWT it received from ``/api/auth/login``
     as its ``token``. We decode it here so the server can refuse registration
@@ -148,16 +148,32 @@ def resolve_agent_user(token: str) -> Optional[Tuple[int, str]]:
     if not payload:
         return None
     account = payload.get("sub")
-    if not account:
+    user_id = payload.get("user_id")
+    token_auth_version = payload.get("auth_version")
+    if not account or user_id is None or token_auth_version is None:
+        return None
+    try:
+        user_id = int(user_id)
+        token_auth_version = int(token_auth_version)
+    except (TypeError, ValueError):
         return None
     # Lazy import to avoid a circular dependency between sio and models.
     from .models import User
 
     with Session(engine) as session:
-        user = session.exec(select(User).where(User.account == account)).first()
-        if user is None:
+        user = session.get(User, user_id)
+        if (
+            user is None
+            or user.account != account
+            or int(user.auth_version) != token_auth_version
+        ):
             return None
         return int(user.id), str(user.account)
+
+
+def resolve_agent_user(token: str) -> Optional[Tuple[int, str]]:
+    """Compatibility alias for endpoint-agent authentication."""
+    return resolve_user_token(token)
 
 
 def is_agent_token_valid(token: str) -> bool:

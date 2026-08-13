@@ -19,6 +19,7 @@ from api.models import (
     AITaskJob,
     AIRuntimeStatus,
     AssistantAIConfig,
+    BotConnection,
     BotSessionRoute,
     BotUserCursor,
     ChatMessage,
@@ -164,6 +165,12 @@ async def delete_ai_config(
             BotUserCursor.ai_config_id == config_id,
         )
     ).all()
+    bot_connection_rows = session.exec(
+        select(BotConnection).where(
+            BotConnection.user_id == user.id,
+            BotConnection.ai_config_id == config_id,
+        )
+    ).all()
     ai_message_rows = session.exec(
         select(AIMessage).where(
             AIMessage.user_id == user.id,
@@ -178,6 +185,7 @@ async def delete_ai_config(
         *task_job_rows,
         *bot_route_rows,
         *bot_cursor_rows,
+        *bot_connection_rows,
         *ai_message_rows,
     ):
         session.delete(row)
@@ -524,13 +532,12 @@ async def list_ai_cards(
         current_or_recent_task = current_task or latest_completed_task
         current_task_title = str(current_task.get("title") or "") if current_task else ""
         current_task_status = str(current_task.get("effective_status") or "idle") if current_task else "idle"
-        feishu_status = _bot_status(cfg, "feishu")
-        qq_status = _bot_status(cfg, "qq")
         bot_channel = str(cfg.bot_channel or "feishu")
         # Surface every registered bot's parsed config slice so the
         # frontend reads ``card.bot_configs.<channel>.<field>`` instead of
         # the legacy flat columns.
         bot_configs_view = {bot.channel: bot.read_config(cfg) for bot in iter_bots()}
+        bot_statuses_view = {bot.channel: _bot_status(cfg, bot.channel) for bot in iter_bots()}
         active_bot = next((b for b in iter_bots() if b.channel == bot_channel), None)
         active_bot_enabled = bool(active_bot.read_config(cfg).get("enabled")) if active_bot else False
         _, _, effective_model = resolve_model_preset(user, cfg)
@@ -566,9 +573,9 @@ async def list_ai_cards(
                 # Per-channel config slices (replaces the flat feishu_*/qq_* columns).
                 "bot_configs": bot_configs_view,
                 # Per-channel runtime status (one entry per registered bot).
-                "bot_statuses": {"feishu": feishu_status, "qq": qq_status},
+                "bot_statuses": bot_statuses_view,
                 "bot_enabled": active_bot_enabled,
-                "bot_status": qq_status if bot_channel == "qq" else feishu_status,
+                "bot_status": bot_statuses_view.get(bot_channel, {"status": "disabled", "message": "未知机器人"}),
                 "switch_key": cfg.switch_key,
                 "mcp_tools": cfg.mcp_tools,
                 "system_auto_control": cfg.system_auto_control,

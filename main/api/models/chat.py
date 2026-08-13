@@ -108,6 +108,8 @@ class ChatSession(SQLModel, table=True):
     ai_kind: str = Field(default="assistant", index=True)
     session_id: str = Field(index=True)
     session_name: str
+    bot_connection_id: Optional[int] = Field(default=None, foreign_key="botconnection.id", index=True)
+    bot_contact_id: Optional[int] = Field(default=None, foreign_key="botcontact.id", index=True)
     # Per-conversation switch: when true, assistant replies in this conversation
     # are forwarded to the AI's bound bot default receiver. Defaults off; bot-
     # originated conversations (qq/feishu) reply through their own routes and do

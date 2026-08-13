@@ -44,9 +44,6 @@ class FeishuBot(BotAdapter):
     # ---- enablement --------------------------------------------------------
 
     def is_enabled(self, cfg: "AssistantAIConfig") -> bool:
-        channel = str(getattr(cfg, "bot_channel", "") or "feishu").strip().lower()
-        if channel != self.channel:
-            return False
         return bool(self.read_config(cfg).get("enabled"))
 
     def has_default_recipient(self, cfg: "AssistantAIConfig") -> bool:
@@ -64,9 +61,9 @@ class FeishuBot(BotAdapter):
         from .long_connection import start_feishu_long_connection_clients
         return start_feishu_long_connection_clients()
 
-    def get_long_connection_state(self, ai_config_id: int) -> Dict[str, str]:
+    def get_long_connection_state(self, ai_config_id: int, connection_ref: str = "") -> Dict[str, str]:
         from .long_connection import get_feishu_long_connection_state
-        return get_feishu_long_connection_state(ai_config_id)
+        return get_feishu_long_connection_state(ai_config_id, connection_ref)
 
     # ---- outbound messaging -----------------------------------------------
 
@@ -81,7 +78,10 @@ class FeishuBot(BotAdapter):
         to_type = raw.get("receive_id_type") or raw.get("to_type")
         if not to_type and raw.get("open_id"):
             to_type = "open_id"
-        return Recipient(to_id=str(to_id).strip(), to_type=str(to_type or "").strip())
+        return Recipient(
+            to_id=str(to_id).strip(), to_type=str(to_type or "").strip(),
+            connection_ref=str(raw.get("connection_ref") or ""),
+        )
 
     def deliver_text(
         self,
@@ -98,6 +98,7 @@ class FeishuBot(BotAdapter):
             text=text,
             receive_id=recipient.to_id,
             receive_id_type=recipient.to_type,
+            connection_ref=recipient.connection_ref,
         )
 
     def deliver_media(
@@ -120,6 +121,7 @@ class FeishuBot(BotAdapter):
                     text=media.text,
                     receive_id=recipient.to_id,
                     receive_id_type=recipient.to_type,
+                    connection_ref=recipient.connection_ref,
                 )
             )
         results.append(
@@ -133,6 +135,7 @@ class FeishuBot(BotAdapter):
                 receive_id=recipient.to_id,
                 receive_id_type=recipient.to_type,
                 duration=int(media.duration) if media.duration is not None else None,
+                connection_ref=recipient.connection_ref,
             )
         )
         if len(results) > 1:
@@ -174,6 +177,7 @@ class FeishuBot(BotAdapter):
                     text=chunk,
                     receive_id=receive_id,
                     receive_id_type=receive_id_type,
+                    connection_ref=str(getattr(route, "connection_ref", "") or ""),
                 )
             except Exception as exc:
                 logger.exception(f"send failed message_id={message.id}: {exc}")
@@ -248,8 +252,6 @@ class FeishuBot(BotAdapter):
     ) -> Dict[str, str]:
         from .. import status
 
-        if str(cfg.bot_channel or "feishu").strip().lower() != self.channel:
-            return status.disabled("当前机器人类型不是飞书")
         bot_cfg = self.read_config(cfg)
         if not bot_cfg.get("enabled"):
             return status.disabled("飞书机器人未启用")

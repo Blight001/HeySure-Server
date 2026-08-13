@@ -20,8 +20,8 @@ from ai_runtime.inference.core import _run_worker
 from api.services.chat.chat_persistence import _save_message
 from ._config import read_qq_config
 from .long_connection import get_qq_long_connection_state
-from .routes_store import external_mcp_route_response, qq_session_name, register_qq_session_route
-from .service import diagnose_qq_config, parse_qq_text_event, send_qq_text_message
+from .routes_store import external_mcp_route_response, qq_scope_keys, qq_session_name, register_qq_session_route, scope_qq_inbound, send_qq_text_safely as _send_qq_text
+from .service import diagnose_qq_config, parse_qq_text_event
 from connector_runtime.bots.session_cursor import get_active_session_id
 from connector_runtime.bots.commands import handle_bot_command
 import logging
@@ -94,37 +94,6 @@ def _build_qq_runtime_prompt(base_prompt: str, event: Dict[str, str]) -> str:
     )
 
 
-def _send_qq_text(
-    *,
-    user_id: int,
-    ai_config_id: int,
-    target_id: str,
-    target_type: str,
-    text: str,
-    msg_id: str = "",
-    event_id: str = "",
-    msg_seq: Optional[int] = None,
-) -> bool:
-    body = str(text or "").strip()
-    if not body:
-        return False
-    try:
-        send_qq_text_message(
-            user_id,
-            ai_config_id,
-            text=body,
-            target_id=target_id,
-            target_type=target_type,
-            msg_id=msg_id,
-            event_id=event_id,
-            msg_seq=msg_seq,
-        )
-        return True
-    except Exception as exc:
-        logger.exception(f"send failed config_id={ai_config_id}: {exc}")
-        return False
-
-
 def _send_qq_command_text(
     *,
     user_id: int,
@@ -134,6 +103,7 @@ def _send_qq_command_text(
     text: str,
     msg_id: str = "",
     event_id: str = "",
+    connection_ref: str = "",
 ) -> int:
     """Send a potentially long command response in ordered QQ chunks."""
     body = str(text or "").strip()
@@ -151,6 +121,7 @@ def _send_qq_command_text(
             msg_id=msg_id,
             event_id=event_id,
             msg_seq=index if msg_id else None,
+            connection_ref=connection_ref,
         ):
             break
         sent += 1
@@ -313,13 +284,11 @@ def handle_qq_event_payload(
     *,
     request: Optional[Request] = None,
     raw_body: Optional[bytes] = None,
+    connection_ref: str = "",
 ) -> Dict[str, Any]:
     with Session(engine) as session:
         cfg = get_ai_config_or_404(session, config_id)
-        if str(cfg.bot_channel or "feishu").strip().lower() != "qq":
-            raise HTTPException(status_code=400, detail="QQ bot is not the active channel for this AI")
-        if not read_qq_config(cfg).get("enabled"):
-            raise HTTPException(status_code=400, detail="QQ bot is disabled for this AI")
+        cfg, connection_ref = scope_qq_inbound(session, cfg, connection_ref, read_qq_config)
         op = int(payload.get("op") or 0)
         event_type = str(payload.get("t") or "").strip()
         _LAST_CALLBACKS[config_id] = {
@@ -358,14 +327,14 @@ def handle_qq_event_payload(
         qq_event_id = event.get("event_id") or ""
         ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
         session_key = f"{target_type}_{target_id}"
-        home_session_id = f"qq_{config_id}_{session_key}"
+        identity_key, home_session_id = qq_scope_keys(connection_ref, config_id, target_id, session_key)
         # Resolve which session in the shared pool this user's message lands in.
         # Defaults to the user's home session; follows the cursor when the AI
         # has switched/created another conversation for this identity.
         session_id = get_active_session_id(
             session, channel="qq", user_id=int(cfg.user_id),
             ai_config_id=int(cfg.id or config_id), ai_kind=ai_kind,
-            identity_key=target_id, default=home_session_id,
+            identity_key=identity_key, default=home_session_id,
         )
         existing_session = session.exec(
             select(ChatSession).where(
@@ -387,6 +356,7 @@ def handle_qq_event_payload(
             source_message_id=qq_message_id,
             source_event_id=qq_event_id,
             next_msg_seq=1,
+            connection_ref=connection_ref,
         )
 
         external_response = external_mcp_route_response(cfg)
@@ -404,7 +374,7 @@ def handle_qq_event_payload(
             user=user,
             cfg=cfg,
             ai_kind=ai_kind,
-            identity_key=target_id,
+            identity_key=identity_key,
             current_session_id=session_id,
             current_session_name=session_name,
             home_session_id=home_session_id,
@@ -418,6 +388,7 @@ def handle_qq_event_payload(
                 text=command_result.text,
                 msg_id=qq_message_id,
                 event_id=qq_event_id,
+                connection_ref=connection_ref,
             )
             register_qq_session_route(
                 session,
@@ -430,6 +401,7 @@ def handle_qq_event_payload(
                 source_message_id=qq_message_id,
                 source_event_id=qq_event_id,
                 next_msg_seq=max(1, sent + 1),
+                connection_ref=connection_ref,
             )
             return {
                 "op": 12,
@@ -502,6 +474,7 @@ def handle_qq_event_payload(
                 msg_id=qq_message_id,
                 event_id=qq_event_id,
                 msg_seq=1 if qq_message_id else None,
+                connection_ref=connection_ref,
             )
             register_qq_session_route(
                 session,
@@ -514,6 +487,7 @@ def handle_qq_event_payload(
                 source_message_id=qq_message_id,
                 source_event_id=qq_event_id,
                 next_msg_seq=2,
+                connection_ref=connection_ref,
             )
             worker_kwargs = {
                 "run_id": "",

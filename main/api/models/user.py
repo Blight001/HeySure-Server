@@ -25,6 +25,10 @@ class User(SQLModel, table=True):
     # registered user is bootstrapped to ``owner``; everyone else defaults
     # to ``member`` until an owner/admin promotes them.
     role: str = Field(default="member", index=True)
+    # Incrementing this value revokes every JWT issued for an earlier version.
+    # Password changes and explicit logout use it as a server-side session
+    # boundary; tokens without a matching version are rejected.
+    auth_version: int = Field(default=1)
     created_at: float = Field(default_factory=time.time)
 
     # 主脑 AI 配置

@@ -178,9 +178,14 @@ def reset_user_password(
     if actor.role != "owner" and target.role == "owner":
         raise HTTPException(status_code=403, detail="只有房主能重置房主的密码")
 
+    from api.services.access.session_security import revoke_user_sessions
+    from api.socket_events import disconnect_user_sockets
+
+    revoke_user_sessions(session, target)
     target.hashed_password = get_password_hash(new_password)
     session.add(target)
     session.commit()
+    disconnect_user_sockets(target.id)
     _record_audit(
         session,
         actor,

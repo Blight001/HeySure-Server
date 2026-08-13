@@ -260,6 +260,10 @@ class Settings(BaseSettings):
         default="",
         description="Optional Fernet key material for encrypted workflow inputs; falls back to JWT_SECRET.",
     )
+    bot_encryption_secret: str = Field(
+        default="",
+        description="Fernet key material for bot login credentials; falls back to JWT_SECRET.",
+    )
     workflow_max_concurrent_per_user: int = Field(default=10)
     workflow_max_concurrent_per_device: int = Field(default=1)
     workflow_confirmation_timeout_seconds: int = Field(default=30 * 60, ge=60, le=86400)
@@ -269,8 +273,10 @@ class Settings(BaseSettings):
     # ---- Auth / Socket.IO ----------------------------------------------------
 
     jwt_secret: str = Field(
-        default="heysure-ai-secret-key-change-this-in-production",
-        description="HS256 key. MUST be changed in production.",
+        ...,
+        alias="JWT_SECRET",
+        min_length=32,
+        description="Required HS256 signing key (at least 32 characters; no public defaults).",
     )
     agent_token: str = Field(
         default="",
@@ -392,11 +398,29 @@ class Settings(BaseSettings):
         "agent_socket_url",
         "timezone",
         "workflow_encryption_secret",
+        "bot_encryption_secret",
         mode="before",
     )
     @classmethod
     def _strip_str(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("jwt_secret", mode="before")
+    @classmethod
+    def _validate_jwt_secret(cls, value: object) -> object:
+        secret = value.strip() if isinstance(value, str) else value
+        if secret == "heysure-ai-secret-key-change-this-in-production":
+            raise ValueError("JWT_SECRET must not use the public development default")
+        return secret
+
+    @field_validator("internal_token", mode="after")
+    @classmethod
+    def _validate_internal_token(cls, value: str) -> str:
+        if value == "heysure-dev-internal-token-change-me":
+            raise ValueError("HEYSURE_INTERNAL_TOKEN must not use the public development default")
+        if value and len(value) < 32:
+            raise ValueError("HEYSURE_INTERNAL_TOKEN must contain at least 32 characters")
+        return value
 
     @property
     def database_dialect(self) -> str:

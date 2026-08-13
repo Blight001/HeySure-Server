@@ -17,6 +17,35 @@ from ._config import QQ_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
+
+def _first_recipient_value(raw: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = raw.get(key)
+        if value:
+            return value
+    return ""
+
+
+def _deliver_qq_notification(message, route, rendered_content: str, qq_cfg: Dict[str, Any]) -> None:
+    from .service import send_qq_markdown_message, send_qq_text_message
+
+    markdown_mode = str(qq_cfg.get("markdown_mode") or "native").strip().lower()
+    common = {
+        "text": rendered_content, "target_id": route.target_id,
+        "target_type": route.target_type or "c2c", "msg_id": route.source_message_id,
+        "event_id": route.source_event_id,
+        "msg_seq": max(1, int(route.next_msg_seq or 1)) if route.source_message_id else None,
+        "connection_ref": str(route.connection_ref or ""),
+    }
+    if markdown_mode == "off":
+        send_qq_text_message(int(message.user_id), int(message.ai_config_id or 0), **common)
+        return
+    send_qq_markdown_message(
+        int(message.user_id), int(message.ai_config_id or 0), **common,
+        markdown_mode=markdown_mode,
+        template_id=str(qq_cfg.get("markdown_template_id") or ""), fallback_plain=True,
+    )
+
 if TYPE_CHECKING:
     from sqlmodel import Session
 
@@ -38,9 +67,6 @@ class QQBot(BotAdapter):
     # ---- enablement --------------------------------------------------------
 
     def is_enabled(self, cfg: "AssistantAIConfig") -> bool:
-        channel = str(getattr(cfg, "bot_channel", "") or "feishu").strip().lower()
-        if channel != self.channel:
-            return False
         return bool(self.read_config(cfg).get("enabled"))
 
     def has_default_recipient(self, cfg: "AssistantAIConfig") -> bool:
@@ -52,9 +78,9 @@ class QQBot(BotAdapter):
         from .long_connection import start_qq_long_connection_clients
         return start_qq_long_connection_clients()
 
-    def get_long_connection_state(self, ai_config_id: int) -> Dict[str, str]:
+    def get_long_connection_state(self, ai_config_id: int, connection_ref: str = "") -> Dict[str, str]:
         from .long_connection import get_qq_long_connection_state
-        return get_qq_long_connection_state(ai_config_id)
+        return get_qq_long_connection_state(ai_config_id, connection_ref)
 
     # ---- outbound messaging -----------------------------------------------
 
@@ -63,14 +89,12 @@ class QQBot(BotAdapter):
 
         raw = raw or {}
         msg_seq = raw.get("msg_seq")
-        to_id = (
-            raw.get("target_id") or raw.get("to_id")
-            or raw.get("group_openid") or raw.get("openid")
-            or raw.get("receive_id") or raw.get("chat_id") or raw.get("open_id") or ""
+        to_id = _first_recipient_value(
+            raw, "target_id", "to_id", "group_openid", "openid",
+            "receive_id", "chat_id", "open_id",
         )
-        to_type = (
-            raw.get("target_type") or raw.get("qq_target_type")
-            or raw.get("to_type") or raw.get("receive_id_type") or ""
+        to_type = _first_recipient_value(
+            raw, "target_type", "qq_target_type", "to_type", "receive_id_type",
         )
         return Recipient(
             to_id=str(to_id).strip(),
@@ -78,6 +102,7 @@ class QQBot(BotAdapter):
             reply_message_id=str(raw.get("msg_id") or "").strip(),
             reply_event_id=str(raw.get("event_id") or "").strip(),
             msg_seq=int(msg_seq) if msg_seq is not None else None,
+            connection_ref=str(raw.get("connection_ref") or ""),
         )
 
     def deliver_text(
@@ -98,6 +123,7 @@ class QQBot(BotAdapter):
             msg_id=recipient.reply_message_id,
             event_id=recipient.reply_event_id,
             msg_seq=recipient.msg_seq,
+            connection_ref=recipient.connection_ref,
         )
 
     def deliver_media(
@@ -122,6 +148,7 @@ class QQBot(BotAdapter):
             msg_id=recipient.reply_message_id,
             event_id=recipient.reply_event_id,
             msg_seq=recipient.msg_seq,
+            connection_ref=recipient.connection_ref,
         )
 
     def normalize_text(self, text: str, *, strip_markdown: bool = True) -> str:
@@ -156,9 +183,10 @@ class QQBot(BotAdapter):
         rendered_content: str,
         route: Any,
     ) -> None:
-        from api.models import AssistantAIConfig
+        from api.models import AssistantAIConfig, BotConnection
+        from api.services.bot_directory import connection_config
+        from ._config import QQ_DEFAULTS
 
-        from .service import send_qq_markdown_message, send_qq_text_message
         from .stream_sender import is_stream_active
 
         # When a streaming session owns delivery for this conversation, the
@@ -169,38 +197,11 @@ class QQBot(BotAdapter):
             return
 
         cfg = session.get(AssistantAIConfig, int(message.ai_config_id or 0))
-        qq_cfg = self.read_config(cfg) if cfg else {}
-        markdown_mode = str(qq_cfg.get("markdown_mode") or "native").strip().lower()
-
-        # ``route`` is a QQRouteHandle (see routes_store). Its ``.row`` is the
-        # live BotSessionRoute we mutate to bump msg_seq atomically.
+        connection = session.get(BotConnection, route.row.connection_id) if route.row.connection_id else None
+        qq_cfg = connection_config(connection, QQ_DEFAULTS) if connection else (self.read_config(cfg) if cfg else {})
         msg_seq = max(1, int(route.next_msg_seq or 1))
         try:
-            if markdown_mode != "off":
-                send_qq_markdown_message(
-                    int(message.user_id),
-                    int(message.ai_config_id or 0),
-                    text=rendered_content,
-                    target_id=route.target_id,
-                    target_type=route.target_type or "c2c",
-                    msg_id=route.source_message_id,
-                    event_id=route.source_event_id,
-                    msg_seq=msg_seq if route.source_message_id else None,
-                    markdown_mode=markdown_mode,
-                    template_id=str(qq_cfg.get("markdown_template_id") or ""),
-                    fallback_plain=True,
-                )
-            else:
-                send_qq_text_message(
-                    int(message.user_id),
-                    int(message.ai_config_id or 0),
-                    text=rendered_content,
-                    target_id=route.target_id,
-                    target_type=route.target_type or "c2c",
-                    msg_id=route.source_message_id,
-                    event_id=route.source_event_id,
-                    msg_seq=msg_seq if route.source_message_id else None,
-                )
+            _deliver_qq_notification(message, route, rendered_content, qq_cfg)
             # Bump the per-conversation sequence so the next reply lands
             # in order even when QQ enforces strict msg_seq ordering.
             route.row.next_msg_seq = msg_seq + 1
@@ -243,8 +244,6 @@ class QQBot(BotAdapter):
     ) -> Dict[str, str]:
         from .. import status
 
-        if str(cfg.bot_channel or "feishu").strip().lower() != self.channel:
-            return status.disabled("当前机器人类型不是 QQ")
         bot_cfg = self.read_config(cfg)
         if not bot_cfg.get("enabled"):
             return status.disabled("QQ机器人未启用")

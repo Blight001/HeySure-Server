@@ -15,7 +15,7 @@ from api.chat_runtime.run_state import _RUN_THREADS
 from api.chat_runtime.chat_runtime_helpers import _resolve_ai_runtime
 from ai_runtime.inference.core import _run_worker
 from ._config import read_feishu_config
-from .routes_store import register_feishu_session_route
+from .routes_store import feishu_scope_keys, register_feishu_session_route, scope_feishu_inbound
 from .service import parse_feishu_text_event, send_feishu_text_message
 from connector_runtime.bots.session_cursor import get_active_session_id
 from connector_runtime.bots.commands import handle_bot_command
@@ -214,13 +214,13 @@ async def receive_feishu_event(config_id: int, request: Request):
     return result
 
 
-def handle_feishu_event_payload(config_id: int, payload: Dict[str, Any], verify_token: bool = True) -> Dict[str, Any]:
+def handle_feishu_event_payload(
+    config_id: int, payload: Dict[str, Any], verify_token: bool = True,
+    connection_ref: str = "",
+) -> Dict[str, Any]:
     with Session(engine) as session:
         cfg = get_ai_config_or_404(session, config_id)
-        if str(cfg.bot_channel or "feishu").strip().lower() != "feishu":
-            raise HTTPException(status_code=400, detail="Feishu bot is not the active channel for this AI")
-        if not read_feishu_config(cfg).get("enabled"):
-            raise HTTPException(status_code=400, detail="Feishu bot is disabled for this AI")
+        cfg, connection_ref = scope_feishu_inbound(session, cfg, connection_ref, read_feishu_config)
         if verify_token:
             _verify_token(cfg, payload)
 
@@ -237,9 +237,8 @@ def handle_feishu_event_payload(config_id: int, payload: Dict[str, Any], verify_
         feishu_message_id = event.get("message_id") or ""
         ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
         session_key = chat_id or open_id or "unknown"
-        home_session_id = f"feishu_{config_id}_{session_key}"
-        receive_id = chat_id or open_id
-        receive_id_type = "chat_id" if chat_id else "open_id"
+        receive_id = chat_id or open_id; receive_id_type = "chat_id" if chat_id else "open_id"
+        identity_key, home_session_id = feishu_scope_keys(connection_ref, config_id, receive_id, session_key)
         # Resolve which session in the shared pool this user's message lands in
         # (cursor-driven; defaults to the user's home session).
         session_id = get_active_session_id(
@@ -248,7 +247,7 @@ def handle_feishu_event_payload(config_id: int, payload: Dict[str, Any], verify_
             user_id=int(cfg.user_id),
             ai_config_id=int(cfg.id or config_id),
             ai_kind=ai_kind,
-            identity_key=receive_id,
+            identity_key=identity_key,
             default=home_session_id,
         )
         existing_session = session.exec(
@@ -271,6 +270,7 @@ def handle_feishu_event_payload(config_id: int, payload: Dict[str, Any], verify_
             session_id=session_id,
             receive_id=receive_id,
             receive_id_type=receive_id_type,
+            connection_ref=connection_ref,
         )
         visible_content = event["text"]
         model_content = visible_content
@@ -285,7 +285,7 @@ def handle_feishu_event_payload(config_id: int, payload: Dict[str, Any], verify_
             user=user,
             cfg=cfg,
             ai_kind=ai_kind,
-            identity_key=receive_id,
+            identity_key=identity_key,
             current_session_id=session_id,
             current_session_name=session_name,
             home_session_id=home_session_id,

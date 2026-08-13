@@ -6,21 +6,23 @@ from typing import Any, Dict, Optional, Tuple
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.models import AssistantAIConfig
-from ._config import read_qq_config
+from api.models import BotConnection
+from api.services.bot_directory import connection_config
+from ._config import QQ_DEFAULTS
 
 
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.Lock()
-_CLIENTS: Dict[int, Any] = {}
-_TASKS: Dict[int, asyncio.Task] = {}
-_LOOPS: Dict[int, asyncio.AbstractEventLoop] = {}
-_THREADS: Dict[int, threading.Thread] = {}
-_SIGNATURES: Dict[int, Tuple[str, str, bool]] = {}
-_STARTING_CONFIG_IDS: set[int] = set()
-_READY_CONFIG_IDS: set[int] = set()
-_LAST_ERRORS: Dict[int, str] = {}
+_CLIENTS: Dict[str, Any] = {}
+_TASKS: Dict[str, asyncio.Task] = {}
+_LOOPS: Dict[str, asyncio.AbstractEventLoop] = {}
+_THREADS: Dict[str, threading.Thread] = {}
+_SIGNATURES: Dict[str, Tuple[str, str, bool]] = {}
+_STARTING_CONFIG_IDS: set[str] = set()
+_READY_CONFIG_IDS: set[str] = set()
+_LAST_ERRORS: Dict[str, str] = {}
+_CONFIG_IDS: Dict[str, int] = {}
 
 
 def _build_message_payload(event_type: str, message: Any) -> Dict[str, Any]:
@@ -114,27 +116,27 @@ def _build_message_payload(event_type: str, message: Any) -> Dict[str, Any]:
     return payload
 
 
-def _mark_ready(config_id: int) -> None:
+def _mark_ready(runtime_key: str) -> None:
     with _LOCK:
-        _READY_CONFIG_IDS.add(int(config_id))
-        _STARTING_CONFIG_IDS.discard(int(config_id))
-        _LAST_ERRORS.pop(int(config_id), None)
+        _READY_CONFIG_IDS.add(runtime_key)
+        _STARTING_CONFIG_IDS.discard(runtime_key)
+        _LAST_ERRORS.pop(runtime_key, None)
 
 
-def _mark_error(config_id: int, exc: BaseException) -> None:
+def _mark_error(runtime_key: str, exc: BaseException) -> None:
     with _LOCK:
-        _LAST_ERRORS[int(config_id)] = str(exc)
-        _READY_CONFIG_IDS.discard(int(config_id))
-        _STARTING_CONFIG_IDS.discard(int(config_id))
+        _LAST_ERRORS[runtime_key] = str(exc)
+        _READY_CONFIG_IDS.discard(runtime_key)
+        _STARTING_CONFIG_IDS.discard(runtime_key)
 
 
-async def _dispatch_botpy_event(config_id: int, payload: Dict[str, Any]) -> None:
+async def _dispatch_botpy_event(config_id: int, connection_ref: str, payload: Dict[str, Any]) -> None:
     from .router import handle_qq_event_payload
 
-    await asyncio.to_thread(handle_qq_event_payload, int(config_id), payload)
+    await asyncio.to_thread(handle_qq_event_payload, int(config_id), payload, connection_ref=connection_ref)
 
 
-def _build_client(botpy, config_id: int, *, app_id: str, app_secret: str, is_sandbox: bool):
+def _build_client(botpy, config_id: int, connection_ref: str, *, app_id: str, app_secret: str, is_sandbox: bool):
     class QQLongConnectionClient(botpy.Client):
         def __init__(self):
             intents = botpy.Intents.default()
@@ -144,6 +146,7 @@ def _build_client(botpy, config_id: int, *, app_id: str, app_secret: str, is_san
                 bot_log=False,
             )
             self._config_id = int(config_id)
+            self._runtime_key = connection_ref
 
         async def on_ready(self):
             robot_name = ""
@@ -151,7 +154,7 @@ def _build_client(botpy, config_id: int, *, app_id: str, app_secret: str, is_san
                 robot_name = str(getattr(self.robot, "name", "") or "")
             except Exception:
                 robot_name = ""
-            _mark_ready(self._config_id)
+            _mark_ready(self._runtime_key)
             logger.info(
                 f"ready config_id={self._config_id}"
                 + (f" robot={robot_name}" if robot_name else "")
@@ -160,7 +163,7 @@ def _build_client(botpy, config_id: int, *, app_id: str, app_secret: str, is_san
         async def _dispatch(self, event_type: str, message: Any) -> None:
             payload = _build_message_payload(event_type, message)
             try:
-                await _dispatch_botpy_event(self._config_id, payload)
+                await _dispatch_botpy_event(self._config_id, self._runtime_key, payload)
             except Exception:
                 logger.exception(
                     f"event failed config_id={self._config_id} event_type={event_type}"
@@ -195,13 +198,13 @@ def _build_client(botpy, config_id: int, *, app_id: str, app_secret: str, is_san
     return QQLongConnectionClient()
 
 
-def _thread_main(config_id: int, app_id: str, app_secret: str, is_sandbox: bool, ready_event: threading.Event) -> None:
+def _thread_main(runtime_key: str, config_id: int, app_id: str, app_secret: str, is_sandbox: bool, ready_event: threading.Event) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         import botpy
     except Exception as exc:
-        _mark_error(config_id, exc)
+        _mark_error(runtime_key, exc)
         ready_event.set()
         logger.exception(f"botpy import failed config_id={config_id}")
         loop.close()
@@ -211,6 +214,7 @@ def _thread_main(config_id: int, app_id: str, app_secret: str, is_sandbox: bool,
         client = _build_client(
             botpy,
             config_id,
+            runtime_key,
             app_id=app_id,
             app_secret=app_secret,
             is_sandbox=is_sandbox,
@@ -226,15 +230,15 @@ def _thread_main(config_id: int, app_id: str, app_secret: str, is_sandbox: bool,
             except Exception as inner_exc:
                 exc = inner_exc
             with _LOCK:
-                if _TASKS.get(config_id) is fut:
-                    _TASKS.pop(config_id, None)
-                    _CLIENTS.pop(config_id, None)
-                    _LOOPS.pop(config_id, None)
-                    _THREADS.pop(config_id, None)
-                    _READY_CONFIG_IDS.discard(config_id)
-                    _STARTING_CONFIG_IDS.discard(config_id)
+                if _TASKS.get(runtime_key) is fut:
+                    _TASKS.pop(runtime_key, None)
+                    _CLIENTS.pop(runtime_key, None)
+                    _LOOPS.pop(runtime_key, None)
+                    _THREADS.pop(runtime_key, None)
+                    _READY_CONFIG_IDS.discard(runtime_key)
+                    _STARTING_CONFIG_IDS.discard(runtime_key)
                     if exc is not None:
-                        _LAST_ERRORS[config_id] = str(exc)
+                        _LAST_ERRORS[runtime_key] = str(exc)
             try:
                 loop.stop()
             except Exception:
@@ -242,14 +246,14 @@ def _thread_main(config_id: int, app_id: str, app_secret: str, is_sandbox: bool,
 
         task.add_done_callback(_on_done)
         with _LOCK:
-            _CLIENTS[config_id] = client
-            _TASKS[config_id] = task
-            _LOOPS[config_id] = loop
-            _THREADS[config_id] = threading.current_thread()
+            _CLIENTS[runtime_key] = client
+            _TASKS[runtime_key] = task
+            _LOOPS[runtime_key] = loop
+            _THREADS[runtime_key] = threading.current_thread()
         ready_event.set()
         loop.run_forever()
     except Exception as exc:
-        _mark_error(config_id, exc)
+        _mark_error(runtime_key, exc)
         ready_event.set()
         logger.exception(f"start failed config_id={config_id}")
     finally:
@@ -267,14 +271,15 @@ def _thread_main(config_id: int, app_id: str, app_secret: str, is_sandbox: bool,
             pass
 
 
-def _schedule_disconnect_locked(config_id: int) -> None:
-    task = _TASKS.pop(config_id, None)
-    loop = _LOOPS.pop(config_id, None)
-    _CLIENTS.pop(config_id, None)
-    _THREADS.pop(config_id, None)
-    _READY_CONFIG_IDS.discard(config_id)
-    _STARTING_CONFIG_IDS.discard(config_id)
-    _LAST_ERRORS.pop(config_id, None)
+def _schedule_disconnect_locked(runtime_key: str) -> None:
+    task = _TASKS.pop(runtime_key, None)
+    loop = _LOOPS.pop(runtime_key, None)
+    _CLIENTS.pop(runtime_key, None)
+    _THREADS.pop(runtime_key, None)
+    _READY_CONFIG_IDS.discard(runtime_key)
+    _STARTING_CONFIG_IDS.discard(runtime_key)
+    _LAST_ERRORS.pop(runtime_key, None)
+    _CONFIG_IDS.pop(runtime_key, None)
     if loop is None:
         return
     try:
@@ -294,51 +299,58 @@ def start_qq_long_connection_clients() -> int:
             _LAST_ERRORS[0] = f"botpy is not installed: {exc}"
         return 0
 
-    desired: Dict[int, Tuple[str, str, bool]] = {}
+    desired: Dict[str, Tuple[int, str, str, bool]] = {}
     with Session(engine) as session:
-        configs = session.exec(select(AssistantAIConfig)).all()
-    for cfg in configs:
-        config_id = int(cfg.id or 0)
-        bot_cfg = read_qq_config(cfg)
+        rows = session.exec(select(BotConnection).where(
+            BotConnection.channel == "qq", BotConnection.enabled.is_(True),
+            BotConnection.state != "deleted",
+        )).all()
+    for row in rows:
+        config_id = int(row.ai_config_id)
+        bot_cfg = connection_config(row, QQ_DEFAULTS)
         app_id = str(bot_cfg.get("app_id") or "").strip()
         app_secret = str(bot_cfg.get("app_secret") or "").strip()
         if (
             config_id
-            and str(cfg.bot_channel or "feishu").strip().lower() == "qq"
             and bot_cfg.get("enabled")
             and app_id
             and app_secret
         ):
-            desired[config_id] = (app_id, app_secret, bool(bot_cfg.get("sandbox")))
+            desired[row.connection_ref] = (
+                config_id, app_id, app_secret, bool(bot_cfg.get("sandbox"))
+            )
 
     if desired:
         logger.debug(f"desired_configs={sorted(desired.keys())}")
 
     with _LOCK:
         active_ids = set(_CLIENTS.keys()) | set(_STARTING_CONFIG_IDS)
-        for config_id in active_ids:
-            if desired.get(config_id) != _SIGNATURES.get(config_id):
-                _schedule_disconnect_locked(config_id)
+        for runtime_key in active_ids:
+            values = desired.get(runtime_key)
+            wanted = values[1:] if values else None
+            if wanted != _SIGNATURES.get(runtime_key):
+                _schedule_disconnect_locked(runtime_key)
 
     started = 0
-    for config_id, (app_id, app_secret, is_sandbox) in desired.items():
+    for runtime_key, (config_id, app_id, app_secret, is_sandbox) in desired.items():
         with _LOCK:
-            if config_id in _CLIENTS or config_id in _STARTING_CONFIG_IDS:
+            if runtime_key in _CLIENTS or runtime_key in _STARTING_CONFIG_IDS:
                 continue
-            _STARTING_CONFIG_IDS.add(config_id)
-            _SIGNATURES[config_id] = (app_id, app_secret, is_sandbox)
-            _LAST_ERRORS.pop(config_id, None)
+            _STARTING_CONFIG_IDS.add(runtime_key)
+            _SIGNATURES[runtime_key] = (app_id, app_secret, is_sandbox)
+            _CONFIG_IDS[runtime_key] = config_id
+            _LAST_ERRORS.pop(runtime_key, None)
 
         ready_event = threading.Event()
         thread = threading.Thread(
             target=_thread_main,
-            args=(config_id, app_id, app_secret, is_sandbox, ready_event),
-            name=f"qq-ws-{config_id}",
+            args=(runtime_key, config_id, app_id, app_secret, is_sandbox, ready_event),
+            name=f"qq-ws-{runtime_key}",
             daemon=True,
         )
         thread.start()
         with _LOCK:
-            _THREADS[config_id] = thread
+            _THREADS[runtime_key] = thread
         ready_event.wait(timeout=5)
         started += 1
     if started:
@@ -346,15 +358,16 @@ def start_qq_long_connection_clients() -> int:
     return started
 
 
-def get_qq_long_connection_state(config_id: int) -> Dict[str, str]:
+def get_qq_long_connection_state(config_id: int, connection_ref: str = "") -> Dict[str, str]:
     with _LOCK:
-        thread = _THREADS.get(int(config_id))
-        is_starting = int(config_id) in _STARTING_CONFIG_IDS
-        is_ready = int(config_id) in _READY_CONFIG_IDS
-        error = _LAST_ERRORS.get(int(config_id), "")
-        client = _CLIENTS.get(int(config_id))
-        task = _TASKS.get(int(config_id))
-    if is_ready and thread and thread.is_alive() and client is not None and task is not None:
+        refs = [connection_ref] if connection_ref else [ref for ref, cid in _CONFIG_IDS.items() if cid == config_id]
+        ready_ref = next((ref for ref in refs if ref in _READY_CONFIG_IDS), "")
+        thread = _THREADS.get(ready_ref)
+        is_starting = any(ref in _STARTING_CONFIG_IDS for ref in refs)
+        error = next((_LAST_ERRORS.get(ref, "") for ref in refs if _LAST_ERRORS.get(ref)), "")
+        client = _CLIENTS.get(ready_ref)
+        task = _TASKS.get(ready_ref)
+    if ready_ref and thread and thread.is_alive() and client is not None and task is not None:
         return {"status": "success", "message": "botpy 长连接运行中"}
     if is_starting:
         return {"status": "success", "message": "botpy 长连接启动中"}

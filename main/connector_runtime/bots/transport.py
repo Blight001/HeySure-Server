@@ -43,13 +43,13 @@ class TokenCache:
     """
 
     def __init__(self, *, refresh_skew: float = 120.0, min_ttl: int = 60) -> None:
-        self._cache: Dict[int, Dict[str, Any]] = {}
+        self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._refresh_skew = refresh_skew
         self._min_ttl = min_ttl
 
-    def get_or_fetch(self, config_id: int, fetch: Callable[[], "tuple[str, int]"]) -> str:
-        cid = int(config_id or 0)
+    def get_or_fetch(self, config_id: Any, fetch: Callable[[], "tuple[str, int]"]) -> str:
+        cid = str(config_id or "0")
         now = time.time()
         with self._lock:
             entry = self._cache.get(cid)
@@ -89,8 +89,6 @@ def load_active_config(
         ).first()
     if not cfg:
         raise HTTPException(status_code=404, detail="AI config not found")
-    if str(cfg.bot_channel or "feishu").strip().lower() != channel:
-        raise HTTPException(status_code=400, detail=f"{channel_label} bot is not the active channel for this AI")
     bot_cfg = read_config(cfg)
     if not bot_cfg.get("enabled"):
         raise HTTPException(status_code=400, detail=f"{channel_label} bot is not enabled for this AI")

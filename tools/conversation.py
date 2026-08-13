@@ -40,14 +40,15 @@ def _conversation_scope(args: Dict[str, Any], ai_config_id: Optional[int]) -> Di
 
 def _conversation_base_scope(args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     run_ctx = get_run_session_context() or {}
-    ai_kind = str(args.get("ai_kind") or run_ctx.get("ai_kind") or "assistant").strip() or "assistant"
-    scoped_ai_config_id = _coerce_int(args.get("ai_config_id"))
+    bot_scoped = run_ctx.get("bot_contact_id") is not None
+    ai_kind = str((run_ctx.get("ai_kind") if bot_scoped else args.get("ai_kind")) or run_ctx.get("ai_kind") or "assistant").strip() or "assistant"
+    scoped_ai_config_id = _coerce_int(run_ctx.get("ai_config_id") if bot_scoped else args.get("ai_config_id"))
     if scoped_ai_config_id is None:
         scoped_ai_config_id = _coerce_int(run_ctx.get("ai_config_id"))
     if scoped_ai_config_id is None:
         scoped_ai_config_id = ai_config_id
     return {
-        "session_id": str(args.get("session_id") or run_ctx.get("session_id") or "").strip(),
+        "session_id": str((run_ctx.get("session_id") if bot_scoped else args.get("session_id")) or run_ctx.get("session_id") or "").strip(),
         "ai_kind": ai_kind,
         "ai_config_id": scoped_ai_config_id,
     }
@@ -59,6 +60,9 @@ def _session_filter(stmt, user_id: int, ai_kind: str, ai_config_id: Optional[int
         stmt = stmt.where(ChatSession.ai_config_id == ai_config_id)
     else:
         stmt = stmt.where(ChatSession.ai_config_id.is_(None))
+    contact_id = (get_run_session_context() or {}).get("bot_contact_id")
+    if contact_id is not None:
+        stmt = stmt.where(ChatSession.bot_contact_id == int(contact_id))
     return stmt
 
 
@@ -405,14 +409,8 @@ def _compress_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Opt
 
 
 # ---------------------------------------------------------------------------
-# Unified "机器人对话区" — shared conversation pool + multi-session switching.
-#
-# One AI exposes a single shared pool spanning the web UI and all bot channels.
-# These tools operate on that whole pool with NO channel/identity isolation:
-# any caller may list and switch to any session belonging to the AI. A
-# per-identity cursor (BotUserCursor) only decides where the asking identity's
-# *next* inbound message lands, so concurrent external users don't clobber each
-# other's "current session".
+# Unified conversation tools with an owner view and isolated contact pools.
+# Bot-originated calls are scoped by bot_contact_id; web owner calls see all.
 # ---------------------------------------------------------------------------
 
 
@@ -439,7 +437,7 @@ def _current_identity(session, user_id: int, scope: Dict[str, Any]):
 
 
 def _list_conversations(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
-    """List every conversation in this AI's shared pool (web + all bot channels)."""
+    """List owner sessions or only the current external contact's sessions."""
     from connector_runtime.bots.session_cursor import get_active_session_id, list_ai_sessions
 
     scope = _conversation_base_scope(args, ai_config_id)
@@ -466,6 +464,7 @@ def _list_conversations(user_id: int, args: Dict[str, Any], ai_config_id: Option
             ai_kind=scope["ai_kind"],
             active_session_id=active,
             limit=limit,
+            bot_contact_id=(get_run_session_context() or {}).get("bot_contact_id"),
         )
         stats_stmt = _message_filter(
             select(
@@ -491,7 +490,7 @@ def _list_conversations(user_id: int, args: Dict[str, Any], ai_config_id: Option
         "count": len(rows),
         "active_session_id": active,
         "sessions": rows,
-        "note": "这是该 AI 的全部对话（网页 + 各机器人渠道，共享同一对话区）。",
+        "note": "机器人联系人只能看到自己的对话；网页所有者可查看该 AI 的全部对话。",
     }
 
 
@@ -499,6 +498,9 @@ def _resolve_target_session(session, user_id: int, scope: Dict[str, Any], args: 
     """Find the session to switch to by explicit id, else by name/query match."""
     target_id = str(args.get("session_id") or "").strip()
     base_stmt = _session_filter(select(ChatSession), user_id, scope["ai_kind"], scope["ai_config_id"])
+    contact_id = (get_run_session_context() or {}).get("bot_contact_id")
+    if contact_id is not None:
+        base_stmt = base_stmt.where(ChatSession.bot_contact_id == int(contact_id))
     if target_id:
         return session.exec(base_stmt.where(ChatSession.session_id == target_id)).first()
     query = str(args.get("name") or args.get("query") or "").strip().lower()
@@ -613,6 +615,8 @@ def _clone_bot_route(
             ai_config_id=int(ai_config_id) if ai_config_id is not None else None,
             ai_kind=str(ai_kind or "core"),
             session_id=to_session_id,
+            connection_id=source.connection_id,
+            contact_id=source.contact_id,
             target_json=str(source.target_json or ""),
             source_message_id="",
             source_event_id="",
@@ -666,6 +670,8 @@ def _new_conversation(user_id: int, args: Dict[str, Any], ai_config_id: Optional
             ai_kind=scope["ai_kind"],
             session_id=sid,
             session_name=session_name,
+            bot_connection_id=(get_run_session_context() or {}).get("bot_connection_id"),
+            bot_contact_id=(get_run_session_context() or {}).get("bot_contact_id"),
             created_at=now,
             updated_at=now,
         )

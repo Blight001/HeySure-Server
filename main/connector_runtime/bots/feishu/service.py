@@ -8,6 +8,9 @@ from fastapi import HTTPException
 
 from api.integrations.media_source import MediaSource, infer_media_kind, resolve_media_source
 from api.models import AssistantAIConfig
+from api.database import engine
+from api.services.bot_directory import config_view_for_connection, resolve_connection
+from sqlmodel import Session
 from ..text_format import strip_markdown_to_plain
 from ..transport import TokenCache, load_active_config, parse_json_response
 from ._config import read_feishu_config
@@ -32,7 +35,20 @@ def _validate_feishu_credentials(bot_cfg: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="Feishu 仅通知 URL 或 app_id/app_secret 未配置")
 
 
-def _load_feishu_config(user_id: int, ai_config_id: Optional[int]) -> AssistantAIConfig:
+def _load_feishu_config(user_id: int, ai_config_id: Optional[int], connection_ref: str = "") -> AssistantAIConfig:
+    if connection_ref and ai_config_id:
+        from ._config import FEISHU_DEFAULTS
+        with Session(engine) as session:
+            cfg = session.get(AssistantAIConfig, int(ai_config_id))
+            row = resolve_connection(
+                session, user_id=user_id, ai_config_id=int(ai_config_id),
+                channel="feishu", connection_ref=connection_ref,
+            )
+        if cfg is None or int(cfg.user_id) != int(user_id) or row is None:
+            raise HTTPException(status_code=404, detail="Feishu connection not found")
+        cfg = config_view_for_connection(cfg, row, FEISHU_DEFAULTS)
+        _validate_feishu_credentials(read_feishu_config(cfg))
+        return cfg
     return load_active_config(
         user_id,
         ai_config_id,
@@ -44,8 +60,8 @@ def _load_feishu_config(user_id: int, ai_config_id: Optional[int]) -> AssistantA
     )
 
 
-def get_tenant_access_token(user_id: int, ai_config_id: Optional[int]) -> str:
-    cfg = _load_feishu_config(user_id, ai_config_id)
+def get_tenant_access_token(user_id: int, ai_config_id: Optional[int], connection_ref: str = "") -> str:
+    cfg = _load_feishu_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_feishu_config(cfg)
 
     def _fetch() -> "tuple[str, int]":
@@ -62,7 +78,7 @@ def get_tenant_access_token(user_id: int, ai_config_id: Optional[int]) -> str:
             raise HTTPException(status_code=502, detail="Feishu token response missing tenant_access_token")
         return token, int(data.get("expire") or 7200)
 
-    return _TOKEN_CACHE.get_or_fetch(int(cfg.id or 0), _fetch)
+    return _TOKEN_CACHE.get_or_fetch(connection_ref or int(cfg.id or 0), _fetch)
 
 
 # --------------------------------------------------------------------------- #
@@ -114,8 +130,9 @@ def send_feishu_text_message(
     text: str,
     receive_id: str = "",
     receive_id_type: str = "",
+    connection_ref: str = "",
 ) -> Dict[str, Any]:
-    cfg = _load_feishu_config(user_id, ai_config_id)
+    cfg = _load_feishu_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_feishu_config(cfg)
     text = normalize_feishu_text(text, strip_markdown=False)
     target_id, target_type = _resolve_feishu_target(bot_cfg, receive_id, receive_id_type)
@@ -135,7 +152,7 @@ def send_feishu_text_message(
 
     _validate_feishu_target(target_id, target_type)
 
-    token = get_tenant_access_token(user_id, ai_config_id)
+    token = get_tenant_access_token(user_id, ai_config_id, connection_ref)
     res = requests.post(
         f"{FEISHU_OPEN_API_BASE}/im/v1/messages",
         params={"receive_id_type": target_type},
@@ -183,9 +200,9 @@ def _send_feishu_open_message(
     return _feishu_send_result(receive_id, receive_id_type, data)
 
 
-def upload_feishu_image(user_id: int, ai_config_id: Optional[int], source: MediaSource) -> str:
-    _load_feishu_config(user_id, ai_config_id)
-    token = get_tenant_access_token(user_id, ai_config_id)
+def upload_feishu_image(user_id: int, ai_config_id: Optional[int], source: MediaSource, connection_ref: str = "") -> str:
+    _load_feishu_config(user_id, ai_config_id, connection_ref)
+    token = get_tenant_access_token(user_id, ai_config_id, connection_ref)
     with open(source.path, "rb") as fh:
         res = requests.post(
             f"{FEISHU_OPEN_API_BASE}/im/v1/images",
@@ -209,9 +226,10 @@ def upload_feishu_file(
     *,
     file_type: str,
     duration: Optional[int] = None,
+    connection_ref: str = "",
 ) -> str:
-    _load_feishu_config(user_id, ai_config_id)
-    token = get_tenant_access_token(user_id, ai_config_id)
+    _load_feishu_config(user_id, ai_config_id, connection_ref)
+    token = get_tenant_access_token(user_id, ai_config_id, connection_ref)
     data = {"file_type": file_type, "file_name": source.filename}
     if duration is not None:
         data["duration"] = str(int(duration))
@@ -258,9 +276,11 @@ def send_feishu_media_message(
     file_name: str = "",
     receive_id: str = "",
     receive_id_type: str = "",
-    duration: Optional[int] = None,
+    **options,
 ) -> Dict[str, Any]:
-    cfg = _load_feishu_config(user_id, ai_config_id)
+    connection_ref = str(options.get("connection_ref") or "")
+    duration = options.get("duration")
+    cfg = _load_feishu_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_feishu_config(cfg)
     if not bot_cfg.get("app_id") or not bot_cfg.get("app_secret"):
         raise HTTPException(status_code=400, detail="Feishu media messages require App ID / App Secret")
@@ -274,9 +294,9 @@ def send_feishu_media_message(
     )
     try:
         kind = infer_media_kind(source, media_type)
-        token = get_tenant_access_token(user_id, ai_config_id)
+        token = get_tenant_access_token(user_id, ai_config_id, connection_ref)
         if kind == "image":
-            image_key = upload_feishu_image(user_id, ai_config_id, source)
+            image_key = upload_feishu_image(user_id, ai_config_id, source, connection_ref)
             return _send_feishu_open_message(
                 cfg,
                 token=token,
@@ -292,6 +312,7 @@ def send_feishu_media_message(
             source,
             file_type=_feishu_file_type(source),
             duration=duration,
+            connection_ref=connection_ref,
         )
         if kind != "video":
             return _send_feishu_open_message(

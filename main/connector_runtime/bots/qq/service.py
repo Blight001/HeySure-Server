@@ -9,6 +9,9 @@ from fastapi import HTTPException
 
 from api.integrations.media_source import MediaSource, infer_media_kind, resolve_media_source
 from api.models import AssistantAIConfig
+from api.database import engine
+from api.services.bot_directory import config_view_for_connection, resolve_connection
+from sqlmodel import Session
 from ..text_format import strip_markdown_to_plain
 from ..transport import TokenCache, load_active_config, parse_json_response
 from ._config import read_qq_config
@@ -54,7 +57,20 @@ def _validate_qq_credentials(bot_cfg: Dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail="QQ App ID / App Secret not configured")
 
 
-def _load_qq_config(user_id: int, ai_config_id: Optional[int]) -> AssistantAIConfig:
+def _load_qq_config(user_id: int, ai_config_id: Optional[int], connection_ref: str = "") -> AssistantAIConfig:
+    if connection_ref and ai_config_id:
+        from ._config import QQ_DEFAULTS
+        with Session(engine) as session:
+            cfg = session.get(AssistantAIConfig, int(ai_config_id))
+            row = resolve_connection(
+                session, user_id=user_id, ai_config_id=int(ai_config_id),
+                channel="qq", connection_ref=connection_ref,
+            )
+        if cfg is None or int(cfg.user_id) != int(user_id) or row is None:
+            raise HTTPException(status_code=404, detail="QQ connection not found")
+        cfg = config_view_for_connection(cfg, row, QQ_DEFAULTS)
+        _validate_qq_credentials(read_qq_config(cfg))
+        return cfg
     return load_active_config(
         user_id,
         ai_config_id,
@@ -66,8 +82,8 @@ def _load_qq_config(user_id: int, ai_config_id: Optional[int]) -> AssistantAICon
     )
 
 
-def get_qq_access_token(user_id: int, ai_config_id: Optional[int]) -> str:
-    cfg = _load_qq_config(user_id, ai_config_id)
+def get_qq_access_token(user_id: int, ai_config_id: Optional[int], connection_ref: str = "") -> str:
+    cfg = _load_qq_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_qq_config(cfg)
 
     def _fetch() -> "tuple[str, int]":
@@ -82,7 +98,7 @@ def get_qq_access_token(user_id: int, ai_config_id: Optional[int]) -> str:
             raise HTTPException(status_code=502, detail=f"QQ token failed: {data or res.text}")
         return str(data.get("access_token") or "").strip(), int(data.get("expires_in") or 7200)
 
-    return _TOKEN_CACHE.get_or_fetch(int(cfg.id or 0), _fetch)
+    return _TOKEN_CACHE.get_or_fetch(connection_ref or int(cfg.id or 0), _fetch)
 
 
 def _qq_api_base(cfg: AssistantAIConfig) -> str:
@@ -110,8 +126,8 @@ def _qq_headers(cfg: AssistantAIConfig, token: str) -> Dict[str, str]:
     }
 
 
-def _post_qq_message(cfg: AssistantAIConfig, *, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    token = get_qq_access_token(cfg.user_id, cfg.id)
+def _post_qq_message(cfg: AssistantAIConfig, *, endpoint: str, payload: Dict[str, Any], connection_ref: str = "") -> Dict[str, Any]:
+    token = get_qq_access_token(cfg.user_id, cfg.id, connection_ref)
     res = _qq_http_session().post(
         endpoint,
         headers=_qq_headers(cfg, token),
@@ -160,7 +176,7 @@ def _strip_passive_ids(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _post_with_passive_retry(
-    cfg: AssistantAIConfig, *, endpoint: str, payload: Dict[str, Any]
+    cfg: AssistantAIConfig, *, endpoint: str, payload: Dict[str, Any], connection_ref: str = ""
 ) -> Dict[str, Any]:
     """POST a message, retrying once as an active send if a passive id is stale.
 
@@ -168,11 +184,11 @@ def _post_with_passive_retry(
     is the most common rejection, so drop the passive ids and resend.
     """
     try:
-        return _post_qq_message(cfg, endpoint=endpoint, payload=payload)
+        return _post_qq_message(cfg, endpoint=endpoint, payload=payload, connection_ref=connection_ref)
     except HTTPException:
         if "msg_id" not in payload:
             raise
-        return _post_qq_message(cfg, endpoint=endpoint, payload=_strip_passive_ids(payload))
+        return _post_qq_message(cfg, endpoint=endpoint, payload=_strip_passive_ids(payload), connection_ref=connection_ref)
 
 
 def _qq_send_result(target_id: str, target_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -202,8 +218,9 @@ def upload_qq_media_file_info(
     target_id: str,
     target_type: str,
     media_type: str,
+    connection_ref: str = "",
 ) -> str:
-    cfg = _load_qq_config(user_id, ai_config_id)
+    cfg = _load_qq_config(user_id, ai_config_id, connection_ref)
     final_target_type = _normalize_target_type(target_type)
     if final_target_type not in {"c2c", "group"}:
         raise HTTPException(status_code=400, detail="QQ file messages are supported for c2c or group targets")
@@ -218,7 +235,7 @@ def upload_qq_media_file_info(
     else:
         with open(source.path, "rb") as fh:
             payload["file_data"] = base64.b64encode(fh.read()).decode("ascii")
-    token = get_qq_access_token(user_id, ai_config_id)
+    token = get_qq_access_token(user_id, ai_config_id, connection_ref)
     res = _qq_http_session().post(
         _qq_media_file_endpoint(cfg, final_target_type, target_id),
         headers=_qq_headers(cfg, token),
@@ -243,9 +260,11 @@ def send_qq_text_message(
     target_type: str = "",
     msg_id: str = "",
     event_id: str = "",
-    msg_seq: Optional[int] = None,
+    **options,
 ) -> Dict[str, Any]:
-    cfg = _load_qq_config(user_id, ai_config_id)
+    connection_ref = str(options.get("connection_ref") or "")
+    msg_seq = options.get("msg_seq")
+    cfg = _load_qq_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_qq_config(cfg)
     body = normalize_qq_text(text)
     if not body:
@@ -256,7 +275,7 @@ def send_qq_text_message(
     _apply_reply_context(payload, msg_id=msg_id, event_id=event_id, msg_seq=msg_seq)
 
     endpoint = _message_endpoint(cfg, final_target_type, final_target_id)
-    data = _post_with_passive_retry(cfg, endpoint=endpoint, payload=payload)
+    data = _post_with_passive_retry(cfg, endpoint=endpoint, payload=payload, connection_ref=connection_ref)
     return _qq_send_result(final_target_id, final_target_type, data)
 
 
@@ -313,7 +332,7 @@ def send_qq_markdown_message(
     msg_seq: Optional[int] = None,
     markdown_mode: str = "native",
     template_id: str = "",
-    fallback_plain: bool = True,
+    **options,
 ) -> Dict[str, Any]:
     """Send a ``msg_type=2`` markdown reply, auto-falling back to plain text.
 
@@ -322,7 +341,9 @@ def send_qq_markdown_message(
     body as a normal ``msg_type=0`` text message so delivery never silently
     fails.
     """
-    cfg = _load_qq_config(user_id, ai_config_id)
+    connection_ref = str(options.get("connection_ref") or "")
+    fallback_plain = bool(options.get("fallback_plain", True))
+    cfg = _load_qq_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_qq_config(cfg)
     content = _prepare_markdown_text(text)
     if not content:
@@ -337,13 +358,13 @@ def send_qq_markdown_message(
 
     endpoint = _message_endpoint(cfg, final_target_type, final_target_id)
     try:
-        data = _post_qq_message(cfg, endpoint=endpoint, payload=payload)
+        data = _post_qq_message(cfg, endpoint=endpoint, payload=payload, connection_ref=connection_ref)
     except HTTPException:
         # Stale passive ids are the most common rejection; retry as an
         # active markdown message before giving up on markdown entirely.
         if "msg_id" in payload or "event_id" in payload:
             try:
-                data = _post_qq_message(cfg, endpoint=endpoint, payload=_strip_passive_ids(payload))
+                data = _post_qq_message(cfg, endpoint=endpoint, payload=_strip_passive_ids(payload), connection_ref=connection_ref)
                 return _qq_send_result(final_target_id, final_target_type, data)
             except HTTPException:
                 pass
@@ -359,6 +380,7 @@ def send_qq_markdown_message(
             msg_id=msg_id,
             event_id=event_id,
             msg_seq=msg_seq,
+            connection_ref=connection_ref,
         )
     return _qq_send_result(final_target_id, final_target_type, data)
 
@@ -378,7 +400,7 @@ def post_qq_stream_packet(
     event_id: str = "",
     msg_seq: Optional[int] = None,
     markdown_mode: str = "native",
-    template_id: str = "",
+    **options,
 ) -> Dict[str, Any]:
     """POST one packet of a streaming markdown message.
 
@@ -398,7 +420,9 @@ def post_qq_stream_packet(
     stream ``id`` from the first packet. Raises ``HTTPException`` on rejection
     so the caller can fall back to a normal send.
     """
-    cfg = _load_qq_config(user_id, ai_config_id)
+    connection_ref = str(options.get("connection_ref") or "")
+    template_id = str(options.get("template_id") or "")
+    cfg = _load_qq_config(user_id, ai_config_id, connection_ref)
     final_target_type = _normalize_target_type(target_type or "c2c")
     content = _prepare_stream_markdown_text(text)
     if stream_state == 10 and content and not content.endswith("\n"):
@@ -421,13 +445,14 @@ def post_qq_stream_packet(
     }
     _apply_reply_context(payload, msg_id=msg_id, event_id=event_id, msg_seq=msg_seq)
     endpoint = _message_endpoint(cfg, final_target_type, str(target_id or "").strip())
-    return _post_qq_message(cfg, endpoint=endpoint, payload=payload)
+    kwargs: Dict[str, Any] = {"endpoint": endpoint, "payload": payload, **({"connection_ref": connection_ref} if connection_ref else {})}
+    return _post_qq_message(cfg, **kwargs)
 
 
-def diagnose_qq_config(user_id: int, ai_config_id: Optional[int]) -> Dict[str, Any]:
-    cfg = _load_qq_config(user_id, ai_config_id)
+def diagnose_qq_config(user_id: int, ai_config_id: Optional[int], connection_ref: str = "") -> Dict[str, Any]:
+    cfg = _load_qq_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_qq_config(cfg)
-    token = get_qq_access_token(user_id, ai_config_id)
+    token = get_qq_access_token(user_id, ai_config_id, connection_ref)
     return {
         "success": True,
         "ai_config_id": int(cfg.id or 0),
@@ -457,9 +482,11 @@ def send_qq_media_message(
     text: str = "",
     msg_id: str = "",
     event_id: str = "",
-    msg_seq: Optional[int] = None,
+    **options,
 ) -> Dict[str, Any]:
-    cfg = _load_qq_config(user_id, ai_config_id)
+    connection_ref = str(options.get("connection_ref") or "")
+    msg_seq = options.get("msg_seq")
+    cfg = _load_qq_config(user_id, ai_config_id, connection_ref)
     bot_cfg = read_qq_config(cfg)
     final_target_id, final_target_type = _resolve_qq_target(bot_cfg, target_id, target_type)
     if final_target_type not in {"c2c", "group"}:
@@ -478,6 +505,7 @@ def send_qq_media_message(
             target_id=final_target_id,
             target_type=final_target_type,
             media_type=media_type,
+            connection_ref=connection_ref,
         )
     finally:
         source.cleanup()
@@ -492,7 +520,7 @@ def send_qq_media_message(
     _apply_reply_context(payload, msg_id=msg_id, event_id=event_id, msg_seq=msg_seq)
 
     endpoint = _message_endpoint(cfg, final_target_type, final_target_id)
-    data = _post_with_passive_retry(cfg, endpoint=endpoint, payload=payload)
+    data = _post_with_passive_retry(cfg, endpoint=endpoint, payload=payload, connection_ref=connection_ref)
     return _qq_send_result(final_target_id, final_target_type, data)
 
 

@@ -15,14 +15,24 @@ Adding a new bot:
 """
 
 from .base import BotAdapter
-from .registry import all_channels, get, iter_active_for_config, iter_bots, register
+from .registry import (
+    all_channels,
+    backfill_legacy_connection_directories,
+    get,
+    iter_active_for_config,
+    iter_bots,
+    register,
+    sync_connection_directory,
+)
 
 
 __all__ = [
     "BotAdapter",
     "all_channels",
+    "backfill_legacy_connection_directories",
     "get",
     "iter_active_for_config",
     "iter_bots",
     "register",
+    "sync_connection_directory",
 ]

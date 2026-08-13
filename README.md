@@ -40,7 +40,8 @@ Common values:
 
 ```env
 DATABASE_URL=postgresql+psycopg://heysure:heysure@127.0.0.1:5432/heysure
-HEYSURE_INTERNAL_TOKEN=heysure-dev-internal-token-change-me
+JWT_SECRET=
+HEYSURE_INTERNAL_TOKEN=
 MCP_RUNTIME_URL=http://127.0.0.1:3001
 CONNECTOR_RUNTIME_URL=http://127.0.0.1:3002
 AI_RUNTIME_URL=http://127.0.0.1:3003
@@ -51,8 +52,9 @@ Important variables:
 
 - `DATABASE_URL`: required PostgreSQL connection string. Startup fails if it is
   missing or points to another database.
-- `HEYSURE_INTERNAL_TOKEN`: bearer token used when the gateway calls internal
-  `/internal/*` endpoints.
+- `JWT_SECRET`: required JWT signing secret with at least 32 characters.
+- `HEYSURE_INTERNAL_TOKEN`: required bearer token with at least 32 characters
+  used when the gateway calls internal `/internal/*` endpoints.
 - `MCP_RUNTIME_URL`: MCP runtime address, usually `http://127.0.0.1:3001`.
 - `CONNECTOR_RUNTIME_URL`: connector runtime address, usually
   `http://127.0.0.1:3002`.
@@ -62,6 +64,9 @@ Important variables:
   consumed by `ai_runtime`.
 
 Full configuration lives in `main/api/core/settings.py`.
+Generate each secret independently with
+`python -c "import secrets; print(secrets.token_urlsafe(48))"`; never reuse a
+value published in documentation or source control.
 
 ## Windows launcher
 

@@ -13,4 +13,5 @@ os.environ.setdefault(
 )
 os.environ.setdefault("HEYSURE_DB_AUTO_MIGRATE", "0")
 os.environ.setdefault("HEYSURE_DB_CONNECT_TIMEOUT_SECONDS", "1")
-os.environ.setdefault("HEYSURE_INTERNAL_TOKEN", "test-internal-token")
+os.environ.setdefault("HEYSURE_INTERNAL_TOKEN", "test-internal-token-at-least-thirty-two-characters")
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-at-least-thirty-two-characters")

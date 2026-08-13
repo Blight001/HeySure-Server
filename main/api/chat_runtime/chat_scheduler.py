@@ -25,6 +25,38 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _task_run_session_id(job: AITaskJob) -> str:
+    """Return the current occurrence session, allocating one when needed.
+
+    Supervision and manual resume keep the generation matching ``runs_done``
+    so they continue the same occurrence. Loop renewal increments
+    ``runs_done``; the next dispatch therefore receives a fresh generation.
+    """
+    try:
+        payload = json.loads(job.task_payload) if job.task_payload else {}
+    except Exception:
+        payload = {}
+    schedule = payload.get("schedule") if isinstance(payload, dict) else {}
+    try:
+        runs_done = (
+            max(0, int(schedule.get("runs_done") or 0))
+            if isinstance(schedule, dict)
+            else 0
+        )
+    except (TypeError, ValueError):
+        runs_done = 0
+    prefix = f"session_task_{job.job_id}"
+    occurrence_session = f"{prefix}_g{runs_done + 1}"
+    current = str(job.session_id or "").strip()
+    if current == occurrence_session:
+        return current
+    # Compatibility for an occurrence that started before per-run sessions
+    # were restored.  After its first renewal runs_done > 0, so it rotates.
+    if current == prefix and runs_done == 0:
+        return current
+    return occurrence_session
+
+
 def _start_task_run(
     session: Session,
     cfg: AssistantAIConfig,
@@ -32,11 +64,9 @@ def _start_task_run(
     task_prompt: str,
     trigger_type: str,
 ) -> Optional[str]:
-    session_prefix = f"session_task_{job.job_id}"
-    # One conversation per task. The 传宗接代/代际 lineage (per-run
-    # ``_g{n}`` generation sessions) was removed: every run of the job — first
-    # dispatch, supervision, or loop — reuses this single task session.
-    session_id = session_prefix
+    # Each completed recurring occurrence gets a fresh conversation. Follow-up
+    # runs inside the same occurrence (supervision/resume) reuse job.session_id.
+    session_id = _task_run_session_id(job)
     job.session_id = session_id
     sname = f"任务: {job.title}"
     chat_session = session.exec(
