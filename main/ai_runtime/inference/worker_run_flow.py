@@ -211,6 +211,7 @@ class WorkerRunMachine:
                 base_url=self.setup.base_url,
                 api_key=self.setup.api_key,
                 headers=self.capabilities.headers,
+                reasoning_effort=self.capabilities.reasoning_effort,
                 should_stop=self.should_stop,
                 stop_run=self.stop_run,
                 set_live_phase=self.set_live_phase,

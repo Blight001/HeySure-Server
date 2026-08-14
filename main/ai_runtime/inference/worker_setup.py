@@ -58,6 +58,7 @@ class WorkerCapabilities:
     exposed_tool_allowlist: frozenset[str]
     provider: str
     tool_protocol: str
+    reasoning_effort: str = ""
 
 
 def prepare_worker(session: Session, request: WorkerRequest) -> WorkerSetup:
@@ -220,6 +221,7 @@ def prepare_capabilities(
         exposed_tool_allowlist=frozenset(exposed),
         provider=provider,
         tool_protocol=str(preset.get("tool_protocol") or "auto"),
+        reasoning_effort=str(getattr(setup.config, "reasoning_effort", "") or ""),
     )
 
 

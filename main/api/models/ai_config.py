@@ -21,6 +21,10 @@ class AssistantAIConfig(SQLModel, table=True):
     base_url: str = Field(default="")
     model: str = Field(default="")
     model_preset_id: str = Field(default="", index=True)
+    # Empty means provider/CLI default. Explicit levels are intentionally a
+    # small cross-provider intersection supported by Grok, Codex and
+    # OpenAI-compatible reasoning endpoints (including DeepSeek gateways).
+    reasoning_effort: str = Field(default="")
     # ``external_mcp`` members are controlled by a remote MCP client instead
     # of being sent to the built-in model runtime.
     execution_mode: str = Field(default="internal_model", index=True)
@@ -81,6 +85,7 @@ class AssistantAIConfigCreate(SQLModel):
     base_url: Optional[str] = ""
     model: Optional[str] = ""
     model_preset_id: Optional[str] = ""
+    reasoning_effort: Optional[Literal["", "low", "medium", "high"]] = ""
     execution_mode: Optional[Literal["internal_model", "external_mcp"]] = "internal_model"
     prompt: Optional[str] = ""
     strip_markdown_symbols: Optional[bool] = False
@@ -118,6 +123,7 @@ class AssistantAIConfigUpdate(SQLModel):
     base_url: Optional[str] = None
     model: Optional[str] = None
     model_preset_id: Optional[str] = None
+    reasoning_effort: Optional[Literal["", "low", "medium", "high"]] = None
     execution_mode: Optional[Literal["internal_model", "external_mcp"]] = None
     prompt: Optional[str] = None
     strip_markdown_symbols: Optional[bool] = None

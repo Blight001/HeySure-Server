@@ -5,7 +5,7 @@ import pytest
 from ai_runtime.inference import model_gateway
 
 
-def _request(provider="openai", tools=None):
+def _request(provider="openai", tools=None, reasoning_effort=""):
     return model_gateway.ModelTurnRequest(
         run_id="run-a",
         provider=provider,
@@ -16,6 +16,7 @@ def _request(provider="openai", tools=None):
         provider_tools=tools or [],
         native_name_map={"workspace_read": "workspace.read"},
         headers={"Authorization": "Bearer key"},
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -68,6 +69,17 @@ def test_openai_retries_without_parallel_tools_when_provider_rejects(monkeypatch
     assert payloads[0]["parallel_tool_calls"] is True
     assert "parallel_tool_calls" not in payloads[1]
     assert first.closed is True
+
+
+def test_openai_reasoning_effort_is_sent_only_when_explicit():
+    assert "reasoning_effort" not in model_gateway._openai_payload(_request())
+    payload = model_gateway._openai_payload(_request(reasoning_effort="high"))
+    assert payload["reasoning_effort"] == "high"
+
+
+def test_openai_reasoning_effort_rejects_unknown_value():
+    payload = model_gateway._openai_payload(_request(reasoning_effort="maximum"))
+    assert "reasoning_effort" not in payload
 
 
 def test_upstream_error_uses_structured_error_fields():

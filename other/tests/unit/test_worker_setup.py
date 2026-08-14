@@ -85,11 +85,14 @@ def test_prepare_worker_rejects_missing_user():
         worker_setup.prepare_worker(FakeSession(None), _request("session-a"))
 
 
-def _setup(*, task_runtime=False, allowed=None, history=None):
+def _setup(*, task_runtime=False, allowed=None, history=None, reasoning_effort=""):
     return worker_setup.WorkerSetup(
         user=SimpleNamespace(),
         max_steps=40,
-        config=SimpleNamespace(mcp_enabled=True),
+        config=SimpleNamespace(
+            mcp_enabled=True,
+            reasoning_effort=reasoning_effort,
+        ),
         api_key="secret",
         base_url="https://api.anthropic.com",
         model="model-a",
@@ -141,6 +144,7 @@ def test_prepare_capabilities_restores_current_tools_and_applies_preset(monkeypa
     )
     assert result.provider == "openai_compat"
     assert result.tool_protocol == "markup"
+    assert result.reasoning_effort == ""
 
 
 def test_prepare_capabilities_changes_revision_after_conversation_summary(monkeypatch):
@@ -163,6 +167,21 @@ def test_prepare_capabilities_changes_revision_after_conversation_summary(monkey
 
     assert result.headers["X-HeySure-Context-Revision"] != "0"
     assert result.headers["X-HeySure-Context-Revision"] == "summary-91"
+
+
+def test_prepare_capabilities_carries_ai_reasoning_effort(monkeypatch):
+    request = _request("session-a")
+    setup = _setup(reasoning_effort="medium")
+    monkeypatch.setattr(
+        worker_setup.mcp_session_context,
+        "described_tool_versions",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(worker_setup, "resolve_session_preset_entry", lambda *args: None)
+
+    result = worker_setup.prepare_capabilities(FakeSession(setup.user), request, setup)
+
+    assert result.reasoning_effort == "medium"
 
 
 def test_prepare_capabilities_preexposes_required_task_tools(monkeypatch):

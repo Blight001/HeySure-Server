@@ -23,6 +23,7 @@ class ModelTurnRequest:
     provider_tools: List[Dict]
     native_name_map: Dict[str, str]
     headers: Dict[str, str]
+    reasoning_effort: str = ""
 
 
 def run_model_turn(request: ModelTurnRequest):
@@ -63,6 +64,9 @@ def _openai_payload(request) -> dict:
             "tool_choice": "auto",
             "parallel_tool_calls": True,
         })
+    effort = str(request.reasoning_effort or "").strip().lower()
+    if effort in {"low", "medium", "high"}:
+        payload["reasoning_effort"] = effort
     return payload
 
 

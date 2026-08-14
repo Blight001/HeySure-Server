@@ -52,6 +52,7 @@ class WorkerTurnContext:
     set_run_error: Callable[[str], None]
     clear_live_text: Callable[[], None]
     reset_live_usage: Callable[[], None]
+    reasoning_effort: str = ""
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ def run_worker_turn(
             provider_tools=exposure.provider_tools,
             native_name_map=exposure.native_name_map,
             headers=context.headers,
+            reasoning_effort=context.reasoning_effort,
         ))
     except Exception as exc:
         return _handle_error(context, request, state, exc)
