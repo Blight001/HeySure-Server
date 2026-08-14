@@ -6,9 +6,9 @@ Endpoints (all under ``/internal``, gated by ``INTERNAL_TOKEN`` Bearer):
 - ``POST /internal/mcp/call``   — invoke a tool by name (body carries user_id, ai_config_id, arguments)
 - ``POST /internal/mcp/reload`` — hot-reload tool modules
 
-Auth/permission filtering belongs to the api-gateway side. This service
-trusts its callers — they must already be authenticated by their own
-ingress layer.
+The runtime re-resolves AI-scoped eligibility immediately before execution;
+the internal bearer token authenticates the caller but is not an authorization
+substitute for the acting AI config.
 """
 
 from __future__ import annotations
@@ -110,6 +110,10 @@ def create_app() -> FastAPI:
             )
         if not registry.has(req.tool):
             raise HTTPException(status_code=404, detail=f"Unknown tool: {req.tool}")
+        if req.ai_config_id is not None:
+            from api.services.mcp.capability_view import ensure_tool_eligible
+
+            ensure_tool_eligible(req.user_id, req.ai_config_id, req.tool)
         # Re-establish the caller's run session context so tools that rely on
         # get_run_session_context() (conversation.*, communication.*) work in
         # the split (remote HTTP) deployment, then restore the previous value.

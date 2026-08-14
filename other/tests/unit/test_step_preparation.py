@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from ai_runtime.inference import step_preparation
+from ai_runtime.inference import phase_context, step_preparation
 
 
 def _message_context(ai_config_id=3):
@@ -101,7 +101,7 @@ def test_inactive_mcp_exposes_no_provider_tools():
     assert exposure.native_name_map == {}
 
 
-def test_task_preplan_text_protocol_uses_narrow_prompt_only_surface():
+def test_task_preplan_keeps_already_exposed_tools_and_adds_guidance():
     allowed = frozenset({
         "todo.manage",
         "mcp.describe+tool",
@@ -123,8 +123,34 @@ def test_task_preplan_text_protocol_uses_narrow_prompt_only_surface():
 
     assert "todo.manage" in exposure.current_tools
     assert "knowledge.search" in exposure.current_tools
-    assert "workspace.write" not in exposure.current_tools
+    assert "workspace.write" in exposure.current_tools
     assert exposure.provider_tools == []
+
+
+def test_awaiting_finish_does_not_hide_exposed_tools():
+    allowed = frozenset({"mcp.describe+tool", "todo.manage", "workspace.write"})
+
+    exposure = step_preparation.select_tool_exposure(
+        step_preparation.ToolExposureRequest(
+            mcp_active=True,
+            exposed_tools=allowed,
+            allowed_tools=allowed,
+            task_runtime=True,
+            plan_active=True,
+            awaiting_finish=True,
+            tool_protocol="text",
+        )
+    )
+
+    assert exposure.current_tools == allowed
+
+
+def test_plan_notice_does_not_force_todo_after_knowledge_search():
+    notice = phase_context.render_plan_required_notice()
+
+    assert "检索不会把下一步强制为 todo.manage" in notice
+    assert "知识检索完成后可直接执行简单任务" in notice
+    assert "当前阶段可用工具" not in notice
 
 
 def test_native_exposure_builds_provider_payload(monkeypatch):

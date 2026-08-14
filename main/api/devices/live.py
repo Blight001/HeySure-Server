@@ -74,6 +74,12 @@ def connected_agent_rows_for_user(user_id: int):
         _apply_endpoint_bindings(rows, uid)
     except Exception:
         logger.exception("failed to apply endpoint bindings user=%s", uid)
+    try:
+        from api.devices.device_metadata_view import apply_capability_metadata_for_user
+
+        rows = apply_capability_metadata_for_user(rows, uid)
+    except Exception:
+        logger.exception("failed to apply device capability metadata user=%s", uid)
     return rows
 
 

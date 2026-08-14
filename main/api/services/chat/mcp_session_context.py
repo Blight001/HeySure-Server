@@ -94,6 +94,34 @@ def remember_described_tools(
     session.commit()
 
 
+def prune_described_tools(
+    session: Session,
+    *,
+    user_id: int,
+    ai_config_id: int | None,
+    ai_kind: str,
+    session_id: str,
+    eligible_versions: Dict[str, str],
+) -> None:
+    """Drop revoked or schema-stale entries from the durable exposure cache."""
+    row = session.exec(_session_stmt(user_id, ai_config_id, ai_kind, session_id)).first()
+    if row is None:
+        return
+    state = _decode_state(row.described_tools_json)
+    retained = {
+        name: item
+        for name, item in state.items()
+        if name in eligible_versions
+        and str(item.get("schema_version") or "").strip() == eligible_versions[name]
+    }
+    if retained == state:
+        return
+    row.described_tools_json = json.dumps(retained, ensure_ascii=False, separators=(",", ":"))
+    row.updated_at = time.time()
+    session.add(row)
+    session.commit()
+
+
 def parse_mcp_tool_bubble(content: str) -> Dict[str, Any] | None:
     """Parse the stable UI bubble without modifying the persisted original."""
     text = str(content or "")

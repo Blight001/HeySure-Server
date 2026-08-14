@@ -12,9 +12,14 @@ class AgentRegistrationPayload(BaseModel):
     name: Optional[str] = None
     platform: Optional[str] = None
     version: Optional[str] = None
+    device_type: Optional[str] = Field(default=None, alias="deviceType")
     token: Optional[str] = None
     user_id: Optional[int] = Field(default=None, alias="userId")
-    capabilities: List[str] = Field(default_factory=list)
+    capabilities: List[str] = Field(default_factory=list, max_length=256)
+    tool_defs: List[Dict[str, Any]] = Field(default_factory=list, alias="toolDefs", max_length=256)
+    ai_description: Optional[str] = Field(default=None, alias="aiDescription", max_length=2000)
+    catalog_generation: Optional[int] = Field(default=None, alias="catalogGeneration", ge=0)
+    catalog_protocol_version: int = Field(default=1, alias="catalogProtocolVersion", ge=1, le=100)
     dynamic_tools: List[Dict[str, Any]] = Field(default_factory=list, alias="dynamicTools")
 
 

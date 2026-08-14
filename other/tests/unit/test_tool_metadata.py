@@ -71,10 +71,42 @@ def test_described_tools_expose_only_allowed_names_and_persist(monkeypatch):
 
     assert renamed == ""
     assert exposed == {"workspace.read"}
-    assert [item["name"] for item in observed["described"]] == [
-        "workspace.read",
-        "workspace.write",
-    ]
+    assert [item["name"] for item in observed["described"]] == ["workspace.read"]
+
+
+def test_v2_describe_envelope_exposes_resolved_tools(monkeypatch, caplog):
+    caplog.set_level("INFO", logger=tool_metadata.__name__)
+    exposed = set()
+    observed = {}
+    monkeypatch.setattr(
+        tool_metadata.mcp_session_context,
+        "remember_described_tools",
+        lambda session, **kwargs: observed.update(kwargs),
+    )
+
+    tool_metadata.apply_tool_metadata(
+        _context(exposed),
+        "mcp.describe+tool",
+        {
+            "result": {
+                "schema_version": 2,
+                "request": {"requested_count": 1, "resolved_count": 1},
+                "tools": [{"name": "workspace.read", "schemaVersion": "v2"}],
+            }
+        },
+        False,
+    )
+
+    assert exposed == {"workspace.read"}
+    assert observed["described"][0]["schemaVersion"] == "v2"
+    record = next(
+        record for record in caplog.records
+        if record.getMessage() == "mcp_describe_exposure_applied"
+    )
+    assert record.describe_returned_count == 1
+    assert record.describe_eligible_count == 1
+    assert record.exposed_added_count == 1
+    assert record.exposure_missing_count == 0
 
 
 def test_failed_tool_has_no_metadata_side_effect(monkeypatch):

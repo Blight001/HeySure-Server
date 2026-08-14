@@ -237,6 +237,20 @@ def _connector_checks(user_id: int) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Capability surface（统一工具视图 / describe exposure / 设备目录）
+# ---------------------------------------------------------------------------
+
+def _capability_checks(user_id: int) -> List[Dict[str, Any]]:
+    from api.services.mcp import capability_selftest
+
+    return [
+        _check("capability_views", "AI 工具视图一致性", lambda: capability_selftest.scoped_views_check(user_id)),
+        _check("capability_exposure", "Describe 暴露状态", lambda: capability_selftest.described_exposure_check(user_id)),
+        _check("device_catalogs", "在线设备工具目录", lambda: capability_selftest.device_catalogs_check(user_id)),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # 文件存储（KnowledgeBase）
 # ---------------------------------------------------------------------------
 
@@ -285,6 +299,7 @@ async def diagnostics_selftest(user: User = Depends(require_admin_user)) -> Dict
         {"module": "database", "label": "数据库", "checks": _database_checks()},
         {"module": "mcp", "label": "MCP", "checks": await _mcp_checks(user.id)},
         {"module": "connector", "label": "连接器（端侧 / 机器人）", "checks": _connector_checks(user.id)},
+        {"module": "capability", "label": "工具能力视图", "checks": _capability_checks(user.id)},
         {"module": "storage", "label": "文件存储 (KnowledgeBase)", "checks": _storage_checks(user.id)},
     ]
     total = 0

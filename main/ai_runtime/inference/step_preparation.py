@@ -151,13 +151,14 @@ def select_tool_exposure(request: ToolExposureRequest) -> ToolExposure:
     current = set(request.exposed_tools) & allowed
     current.update(set(MCP_INTROSPECTION_TOOLS) & allowed)
     if request.task_runtime and not request.plan_active:
-        current = (
+        current.update((
             {"todo.manage"}
             | set(MCP_INTROSPECTION_TOOLS)
             | _PRE_PLAN_KNOWLEDGE_TOOLS
-        ) & allowed
-    elif request.task_runtime and request.awaiting_finish:
-        current = set(MCP_INTROSPECTION_TOOLS) & allowed
+        ) & allowed)
+    # ``awaiting_finish`` is workflow state, not an authorization boundary.
+    # The explicit plan state machine decides whether another tool call may run;
+    # hiding schemas here would make the model infer a false permission change.
     if request.tool_protocol == "text":
         return ToolExposure(frozenset(current), [], {})
     provider_tools, native_map = build_native_tools_payload(current)

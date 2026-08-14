@@ -177,6 +177,7 @@ class DeviceMemberBindingRequest(BaseModel):
 class DeviceDisplayRequest(BaseModel):
     remark: str = ""
     icon: str = ""
+    aiDescriptionOverride: str = ""
 
 
 @router.post("/bind")
@@ -355,10 +356,17 @@ async def update_device_display(
     if device_type in ("workshop", "toolbox"):
         raise HTTPException(status_code=400, detail="系统内置设备不支持自定义显示")
 
-    from api.devices.presence import device_remark_value, effective_device_icon, normalize_device_icon
+    from api.devices.catalog import normalize_ai_description
+    from api.devices.presence import (
+        device_remark_value,
+        effective_ai_description,
+        effective_device_icon,
+        normalize_device_icon,
+    )
 
     row.remark = device_remark_value(payload.remark)
     row.icon_override = normalize_device_icon(payload.icon)
+    row.ai_description_override = normalize_ai_description(payload.aiDescriptionOverride)
     row.updated_at = time.time()
     session.add(row)
     session.commit()
@@ -369,6 +377,12 @@ async def update_device_display(
         "remark": row.remark,
         "icon": effective_device_icon(row),
         "iconOverride": row.icon_override,
+        "reportedAiDescription": row.reported_ai_description,
+        "aiDescriptionOverride": row.ai_description_override,
+        "effectiveAiDescription": effective_ai_description(row),
+        "catalogGeneration": row.catalog_generation,
+        "catalogHash": row.catalog_hash,
+        "catalogProtocolVersion": row.catalog_protocol_version,
     }
 
 

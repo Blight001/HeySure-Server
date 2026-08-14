@@ -38,9 +38,41 @@ def apply_tool_metadata(
     if tool != "mcp.describe+tool":
         return renamed
     items, names = described_tool_entries(tool_result)
-    context.exposed_tools.update(
-        name for name in names if name and name in context.allowed_tools
+    allowed_items = [
+        item
+        for item, name in zip(items, names)
+        if name and name in context.allowed_tools
+    ]
+    expected_names = {
+        str(item.get("name") or "").strip()
+        for item in allowed_items
+        if str(item.get("name") or "").strip()
+    }
+    exposed_before = len(context.exposed_tools)
+    context.exposed_tools.update(expected_names)
+    missing_count = len(expected_names - context.exposed_tools)
+    logger.info(
+        "mcp_describe_exposure_applied",
+        extra={
+            "event": "mcp_describe_exposure_applied",
+            "user_id": context.user_id,
+            "ai_config_id": context.ai_config_id,
+            "describe_returned_count": len(names),
+            "describe_eligible_count": len(expected_names),
+            "exposed_added_count": len(context.exposed_tools) - exposed_before,
+            "exposure_missing_count": missing_count,
+        },
     )
+    if missing_count:
+        logger.error(
+            "mcp_describe_exposure_invariant_failed",
+            extra={
+                "event": "mcp_describe_exposure_invariant_failed",
+                "user_id": context.user_id,
+                "ai_config_id": context.ai_config_id,
+                "exposure_missing_count": missing_count,
+            },
+        )
     try:
         mcp_session_context.remember_described_tools(
             context.session,
@@ -49,7 +81,7 @@ def apply_tool_metadata(
             ai_kind=context.ai_kind,
             session_id=context.session_id,
             session_name=context.session_name,
-            described=items,
+            described=allowed_items,
         )
     except Exception:
         logger.exception("persist described MCP tools failed")

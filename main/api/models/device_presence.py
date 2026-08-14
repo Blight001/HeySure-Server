@@ -18,13 +18,14 @@ then fails gracefully.
 import time
 from typing import Optional
 
+from sqlalchemy import BigInteger, Column, Text
 from sqlmodel import Field, SQLModel
 
 
 class DevicePresence(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(default=0, index=True)
-    device_id: str = Field(index=True)
+    device_id: str = Field(index=True, unique=True)
     ai_config_id: Optional[int] = Field(default=None, index=True)
     # "desktop" | "browser"
     device_type: str = Field(default="")
@@ -42,6 +43,15 @@ class DevicePresence(SQLModel, table=True):
     # remain user-owned and override only the UI projection.
     remark: str = Field(default="")
     icon_override: str = Field(default="")
+    # AI-facing purpose metadata is deliberately separate from the UI remark.
+    # Device-reported text is untrusted and normalized at registration time;
+    # the operator-owned override takes precedence in prompt projections.
+    reported_ai_description: str = Field(
+        default="", sa_column=Column(Text, nullable=False, server_default="")
+    )
+    ai_description_override: str = Field(
+        default="", sa_column=Column(Text, nullable=False, server_default="")
+    )
     # JSON array of the agent's (type-filtered) endpoint tool names.
     capabilities_json: str = Field(default="[]")
     # JSON object mapping each reported tool name to its self-described
@@ -50,5 +60,11 @@ class DevicePresence(SQLModel, table=True):
     # the server never hardcodes per-tool schemas. May be ``{}`` for legacy
     # agents that only report names — those fall back to a generic schema.
     tool_defs_json: str = Field(default="{}")
+    # One validated catalog generation is swapped into this row atomically.
+    catalog_generation: int = Field(
+        default=0, sa_column=Column(BigInteger, nullable=False, server_default="0")
+    )
+    catalog_hash: str = Field(default="", max_length=64)
+    catalog_protocol_version: int = Field(default=1)
     online: bool = Field(default=True, index=True)
     updated_at: float = Field(default_factory=time.time)

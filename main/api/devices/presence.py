@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from ..database import engine
 from ..models import DevicePresence
+from .device_prompt import device_prompt_metadata, effective_ai_description, recompute_catalog_hash
 from .binding_routing import online_devices_for_config
 
 # Transport-layer capabilities a device advertises to unlock a *remote-connection*
@@ -151,6 +152,10 @@ def capabilities_for_device(user_id, device_id) -> Optional[Set[str]]:
         return mcp_capabilities(_decode(row)) if row else None
 
 
+def _include_display_device(device_id: str, existing: dict, wanted: Set[str]) -> bool:
+    return bool(device_id) and device_id not in existing and (not wanted or device_id in wanted)
+
+
 def display_overrides_for_user(user_id, device_ids: Optional[Set[str]] = None) -> Dict[str, dict]:
     """User-owned UI customizations keyed by ``device_id``.
 
@@ -170,9 +175,7 @@ def display_overrides_for_user(user_id, device_ids: Optional[Set[str]] = None) -
         ).all()
         for row in rows:
             device_id = str(row.device_id or "").strip()
-            if not device_id or device_id in out:
-                continue
-            if wanted and device_id not in wanted:
+            if not _include_display_device(device_id, out, wanted):
                 continue
             out[device_id] = {
                 "remark": device_remark_value(getattr(row, "remark", "")),
@@ -200,35 +203,15 @@ def apply_display_overrides(row: dict, overrides: Dict[str, dict]) -> dict:
 def upsert_presence(
     user_id, device_id, ai_config_id, device_type, capabilities, online: bool = True, tool_defs=None,
     name=None, platform=None, icon=None,
-) -> None:
-    aid = str(device_id or "").strip()
-    if not aid:
-        return
-    caps = sorted({str(c).strip() for c in (capabilities or []) if str(c).strip()})
-    defs = tool_defs if isinstance(tool_defs, dict) else {}
-    uid = _int(user_id)
-    with Session(engine) as session:
-        rows = _load_presence_rows(session, aid)
-        row = rows[0] if rows else None
-        for stale in rows[1:]:
-            session.delete(stale)
-        if not row:
-            row = DevicePresence(device_id=aid)
-            session.add(row)
-        row.user_id = uid or row.user_id or 0
-        row.ai_config_id = _int(ai_config_id)
-        row.device_type = str(device_type or "").strip()
-        row.capabilities_json = json.dumps(caps, ensure_ascii=False)
-        row.tool_defs_json = json.dumps(defs, ensure_ascii=False)
-        row.online = bool(online)
-        if name is not None:
-            row.name = str(name or "").strip()
-        if platform is not None:
-            row.platform = str(platform or "").strip()
-        if icon is not None:
-            row.icon = normalize_device_icon(icon)
-        row.updated_at = time.time()
-        session.commit()
+) -> dict:
+    from .presence_catalog_store import PresenceCatalogUpdate, swap_presence_catalog
+
+    return swap_presence_catalog(PresenceCatalogUpdate(
+        user_id=_int(user_id), device_id=str(device_id or ""), ai_config_id=_int(ai_config_id),
+        device_type=str(device_type or ""), capabilities=tuple(capabilities or ()),
+        tool_defs=tool_defs if isinstance(tool_defs, dict) else {}, online=online,
+        name=name, platform=platform, icon=icon,
+    ))
 
 
 def set_offline(device_id) -> None:
@@ -494,9 +477,52 @@ def online_agent_snapshot_for_user(user_id, device_id) -> Optional[dict]:
             "isBrowserExtension": device_type == "browser",
             "isAndroid": device_type == "android",
             "capabilities": sorted(mcp_capabilities(_decode(row))),
+            "reportedAiDescription": str(getattr(row, "reported_ai_description", "") or ""),
+            "aiDescriptionOverride": str(getattr(row, "ai_description_override", "") or ""),
+            "effectiveAiDescription": effective_ai_description(row),
+            "catalogGeneration": int(getattr(row, "catalog_generation", 0) or 0),
+            "catalogHash": str(getattr(row, "catalog_hash", "") or ""),
+            "catalogProtocolVersion": int(getattr(row, "catalog_protocol_version", 1) or 1),
             "online": True,
             "dispatchable": True,
         }
+
+
+def _text_attr(row: DevicePresence, name: str) -> str:
+    return str(getattr(row, name, "") or "").strip()
+
+
+def _include_inventory_device(device_id: str, device_type: str, seen: Set[str], exclude: Set[str]) -> bool:
+    return bool(device_id) and device_id not in seen and device_id not in exclude and device_type not in {
+        "workshop", "toolbox",
+    }
+
+
+def _offline_device_projection(row: DevicePresence, device_id: str, device_type: str) -> dict:
+    is_online = bool(row.online)
+    return {
+        "id": device_id,
+        "name": _text_attr(row, "name") or device_id,
+        "platform": _text_attr(row, "platform"),
+        "aiConfigId": row.ai_config_id,
+        "deviceType": device_type,
+        "icon": effective_device_icon(row),
+        "iconOverride": _text_attr(row, "icon_override"),
+        "remark": device_remark_value(getattr(row, "remark", "")),
+        "isWindowsDesktop": device_type == "desktop",
+        "isBrowserExtension": device_type == "browser",
+        "isAndroid": device_type == "android",
+        "capabilities": sorted(mcp_capabilities(_decode(row))),
+        "version": "",
+        "lifecycle": "registered" if is_online else "offline",
+        "online": is_online,
+        "dispatchable": is_online,
+        "connectedAt": None,
+        "lastTaskId": None,
+        "lastTaskStatus": None,
+        "lastTaskAt": None,
+        "lastError": None,
+    }
 
 
 def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict]:
@@ -519,37 +545,12 @@ def offline_devices_for_user(user_id, exclude_device_ids: Set[str]) -> List[dict
         ).all()
         seen: Set[str] = set()
         for row in rows:
-            device_id = str(row.device_id or "").strip()
-            if not device_id or device_id in seen or device_id in exclude:
+            device_id = _text_attr(row, "device_id")
+            device_type = _text_attr(row, "device_type")
+            if not _include_inventory_device(device_id, device_type, seen, exclude):
                 continue
             seen.add(device_id)
-            device_type = str(row.device_type or "").strip()
-            if device_type in ("workshop", "toolbox"):
-                continue  # built-ins are synthesized live, never persisted offline rows
-            is_online = bool(row.online)
-            out.append({
-                "id": device_id,
-                "name": str(row.name or "").strip() or device_id,
-                "platform": str(row.platform or "").strip(),
-                "aiConfigId": row.ai_config_id,
-                "deviceType": device_type,
-                "icon": effective_device_icon(row),
-                "iconOverride": str(getattr(row, "icon_override", "") or "").strip(),
-                "remark": device_remark_value(getattr(row, "remark", "")),
-                "isWindowsDesktop": device_type == "desktop",
-                "isBrowserExtension": device_type == "browser",
-                "isAndroid": device_type == "android",
-                "capabilities": sorted(mcp_capabilities(_decode(row))),
-                "version": "",
-                "lifecycle": "registered" if is_online else "offline",
-                "online": is_online,
-                "dispatchable": is_online,
-                "connectedAt": None,
-                "lastTaskId": None,
-                "lastTaskStatus": None,
-                "lastTaskAt": None,
-                "lastError": None,
-            })
+            out.append(_offline_device_projection(row, device_id, device_type))
     return out
 
 

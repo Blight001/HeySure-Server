@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from gateway.routers import diagnostics
@@ -48,3 +49,27 @@ def test_probe_model_rejects_incomplete_config():
     result = diagnostics._probe_model("Empty", "", "", "", "hello")
     assert result["ok"] is False
     assert "配置不完整" in result["detail"]
+
+
+def test_selftest_includes_capability_group(monkeypatch):
+    monkeypatch.setattr(diagnostics, "_process_checks", lambda: [])
+    monkeypatch.setattr(diagnostics, "_database_checks", lambda: [])
+    monkeypatch.setattr(diagnostics, "_mcp_checks", lambda _user_id: _async_value([]))
+    monkeypatch.setattr(diagnostics, "_connector_checks", lambda _user_id: [])
+    monkeypatch.setattr(
+        diagnostics,
+        "_capability_checks",
+        lambda _user_id: [{"id": "capability_views", "ok": True}],
+    )
+    monkeypatch.setattr(diagnostics, "_storage_checks", lambda _user_id: [])
+
+    result = asyncio.run(
+        diagnostics.diagnostics_selftest(user=type("User", (), {"id": 9})())
+    )
+
+    assert result["ok"] is True
+    assert next(group for group in result["groups"] if group["module"] == "capability")["checks"][0]["ok"] is True
+
+
+async def _async_value(value):
+    return value

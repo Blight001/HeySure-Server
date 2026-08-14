@@ -51,7 +51,7 @@ DEFAULT_COMPRESSION_PROMPT = """你正在为一段即将压缩的长对话制作
 {history}"""
 DEFAULT_TASK_PLAN_FLOW_PROMPT = """本任务默认直接执行，不强制创建计划。若任务步骤较多、依赖较多、风险较高或不确定性较强，再自行调用 todo.manage(action=create) 制定分阶段计划。
 
-**重要规则（创建计划前必做）**：当你判断这是一个**实际的多阶段操作任务**时，在调用 todo.manage(action=create) 之前，必须先调用 **knowledge.search**（或已绑定图书馆时用 librarian.consult）。knowledge.search 语义召回图书馆里沉淀的**主题思想（传承思想）**，包括可复用的操作 SOP、SKILL 包和过往经验总结。以任务标题、目标或关键动作构造 query，参考检索结果再决定是否制定计划、如何拆分阶段、定义每个阶段的 goal 与 done_signal，从而复用有效知识、避免重复探索。
+**复杂任务的计划准备**：当你判断这是一个**实际的多阶段操作任务**并决定创建计划时，在调用 todo.manage(action=create) 之前先调用 **knowledge.search**（或已绑定图书馆时用 librarian.consult）。knowledge.search 语义召回图书馆里沉淀的**主题思想（传承思想）**，包括可复用的操作 SOP、SKILL 包和过往经验总结。以任务标题、目标或关键动作构造 query，参考检索结果再决定如何拆分阶段、定义每个阶段的 goal 与 done_signal，从而复用有效知识、避免重复探索。知识检索完成后，简单任务可直接继续执行，不要求创建计划。
 
 1) 计划用于复杂长任务：把总体目标拆成有序的多个阶段，每个阶段写清目标(goal)与结束标志(done_signal)，并在 actions 里列出该阶段的子行动。
 2) 创建计划后，系统会主动下发「当前阶段」让你执行，无需自行查询进度。达成结束标志后调用 todo.manage(action=edit, status=completed) 更新本阶段；未达成则 status=failed。系统会精简上一阶段上下文并自动下发下一阶段。
@@ -65,7 +65,7 @@ DEFAULT_MODEL_PRESETS = """[{"id":"deepseek-chat","name":"DeepSeek Chat","api_ke
 
 DEFAULT_MCP_NAMESPACE_HINTS = """{"mcp":"MCP 自省入口。使用 mcp.describe+tool 发现工具并读取参数 schema。","member":"AI 数字成员管理。member.manage 查询、创建、编辑成员及其任务与设备绑定，需要绑定图书馆；成员删除只能由人在控制台确认。","todo":"统一计划管理。todo.manage(action=create/get/edit/delete) 创建、查看、推进或删除计划；edit 更新当前阶段状态，最后阶段更新后系统自动收尾。","workspace":"工作区。workspace.run+command 执行命令和文本文件操作；查看工作区图片必须调用 workspace.file+manage(action=view_image)，控制台列出路径不会把图片送入模型；该工具也可注册可安全发送的 file_ref；联网查询用 workspace.search。","device_mcp":"设备清单、设备 MCP 使用范围与动态工具管理（图书馆工具，需绑定图书馆）。","conversation":"会话管理。","knowledge":"knowledge.search 检索知识；knowledge.manage 管理图书馆内容（需绑定图书馆）。","ai":"AI 间通信。","user":"用户通知。","web":"联网搜索。","memory":"长期记忆。","project":"项目管理。"}"""
 
-DEFAULT_MCP_DYNAMIC_RULE = """工具目录由运行时按当前 AI 的真实权限动态注入系统提示，并显示在前置 Prompt 预览中；不要把工具说明附加到用户消息。已暴露参数 schema 的工具应直接调用；只有目标工具未暴露 schema 或参数确实不明确时，才用 mcp.describe+tool（支持 tool 单个、tools 批量或 query 关键词搜索）发现工具或补充 schema。不要在任务开始时枚举、摸底全部 MCP；被加载的目标工具会在随后轮次直接可调用。
+DEFAULT_MCP_DYNAMIC_RULE = """工具目录由运行时按当前 AI 的真实权限动态注入系统提示，并显示在前置 Prompt 预览中；不要把工具说明附加到用户消息。已暴露参数 schema 的工具应直接调用；只有目标工具未暴露 schema 或参数确实不明确时，才用 mcp.describe+tool（支持 tool 单个、tools 批量或 query 关键词搜索）发现工具或补充 schema。不要在任务开始时枚举、摸底全部 MCP；describe 成功返回的目标工具会在随后轮次直接可调用，无需为了启用工具而创建 Todo。
 
 **反幻觉执行规则（最高优先级）**：凡用户请求包含查看、读取、搜索、创建、修改、删除、运行、点击、打开、发送、检查、确认状态等可由 MCP 完成的动作，你的下一步必须是输出 `<mcp-call>` 调用真实工具；不得只用普通文本编造执行过程或结果。没有成功的工具返回，就只能说“尚未执行/无法确认”，并继续调用合适工具或明确说明阻塞原因。
 

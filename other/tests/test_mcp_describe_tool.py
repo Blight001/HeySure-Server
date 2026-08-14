@@ -64,7 +64,7 @@ def test_describe_tool_accepts_copied_catalog_line():
     assert result["errors"] == []
 
 
-def test_describe_tool_does_not_require_execution_permission(monkeypatch):
+def test_describe_tool_requires_current_ai_eligibility(monkeypatch):
     import tools.introspection as introspection
 
     class _Exec:
@@ -89,13 +89,63 @@ def test_describe_tool_does_not_require_execution_permission(monkeypatch):
 
     monkeypatch.setattr(introspection, "Session", _Session)
 
+    with pytest.raises(HTTPException) as raised:
+        _mcp_describe_tool(
+            user_id=1,
+            args={"tool": "workspace.search"},
+            ai_config_id=123,
+        )
+
+    assert raised.value.status_code == 404
+    assert "not available" in str(raised.value.detail)
+
+
+def test_describe_v2_reports_unambiguous_counts_and_next_turn(monkeypatch):
+    import tools.introspection as introspection
+
+    monkeypatch.setattr(
+        introspection,
+        "_allowed_tool_names",
+        lambda _user_id, _ai_config_id: {"mcp.describe+tool", "workspace.search"},
+    )
+
     result = _mcp_describe_tool(
         user_id=1,
-        args={"tool": "workspace.search"},
+        args={"tools": ["workspace.search", "missing.tool"]},
         ai_config_id=123,
     )
 
-    assert result["name"] == "workspace.search"
+    assert result["schema_version"] == 2
+    assert result["request"] == {
+        "mode": "batch",
+        "requested_count": 2,
+        "resolved_count": 1,
+        "unresolved": ["missing.tool"],
+    }
+    assert result["count"] == 1
+    assert result["count_semantics"] == "resolved_requested_tools"
+    assert result["availability"]["eligible_total"] == 2
+    assert result["exposure"]["callable_next_turn"] == ["workspace.search"]
+    assert "Todo" in result["hint"]
+
+
+def test_describe_query_only_searches_current_ai_eligible_tools(monkeypatch):
+    import tools.introspection as introspection
+
+    monkeypatch.setattr(
+        introspection,
+        "_allowed_tool_names",
+        lambda _user_id, _ai_config_id: {"mcp.describe+tool", "workspace.search"},
+    )
+
+    result = _mcp_describe_tool(
+        user_id=1,
+        args={"query": "联网搜索"},
+        ai_config_id=123,
+    )
+
+    assert [item["name"] for item in result["tools"]] == ["workspace.search"]
+    assert result["availability"]["eligible_total"] == 2
 
 
 def test_describe_tool_accepts_browser_dot_alias_for_endpoint_tool(monkeypatch):
@@ -169,7 +219,7 @@ def test_describe_tool_includes_knowledge_manage(monkeypatch):
     assert len(result.get("schemaVersion") or "") == 16
 
 
-def test_describe_tool_unknown_single_tool_is_not_permission_error():
+def test_describe_tool_unknown_single_tool_uses_non_enumerating_error():
     try:
         _mcp_describe_tool(
             user_id=1,
@@ -178,7 +228,6 @@ def test_describe_tool_unknown_single_tool_is_not_permission_error():
         )
     except HTTPException as exc:
         assert exc.status_code == 404
-        assert str(exc.detail).startswith("Unknown MCP tool:")
-        assert "not allowed" not in str(exc.detail).lower()
+        assert str(exc.detail).startswith("MCP tool is not available:")
     else:
         raise AssertionError("expected HTTPException")

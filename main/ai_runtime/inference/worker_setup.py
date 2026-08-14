@@ -251,12 +251,24 @@ def _restored_described_tools(session, request, setup):
         from tools.introspection import current_tool_schema_versions
 
         current = current_tool_schema_versions(request.user_id, cached.keys())
-        return {
+        restored = {
             name
             for name, version in cached.items()
             if current.get(name) == version
             and name in setup.effective_tool_allowlist
         }
+        try:
+            mcp_session_context.prune_described_tools(
+                session,
+                user_id=request.user_id,
+                ai_config_id=request.ai_config_id,
+                ai_kind=request.ai_kind,
+                session_id=request.session_id,
+                eligible_versions={name: current[name] for name in restored},
+            )
+        except Exception:
+            logger.exception("prune described MCP tools failed")
+        return restored
     except Exception:
         logger.exception("restore described MCP tools failed")
         return set()

@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from pydantic import ValidationError
 
 from api.database import engine
+from api.devices.catalog import DeviceCatalogError, PreparedDeviceCatalog, prepare_device_catalog
 from api.devices.bindings import get_bindings
 from api.devices.live import emit_agent_list_for_user
 from api.models import AssistantAIConfig
@@ -30,6 +31,7 @@ class Registration:
     account: Optional[str]
     ai_config_id: Optional[int]
     ai_config_ids: Tuple[int, ...]
+    catalog: Optional[PreparedDeviceCatalog] = None
 
 
 def _ai_belongs_to_user(ai_config_id: object, user_id: int) -> bool:
@@ -121,7 +123,40 @@ def _store_live_agent(ctx: Registration) -> None:
     }
 
 
-def _record_presence(ctx: Registration) -> Dict[Optional[int], bool]:
+def _prepare_callable_catalog(ctx: Registration):
+    from connector_runtime.dispatch.desktop_device_tools import (
+        agent_endpoint_tool_defs,
+        agent_endpoint_tools,
+        device_type_of,
+    )
+
+    agent = {**ctx.info, "id": ctx.device_id, "userId": ctx.user_id}
+    device_type = device_type_of(agent)
+    if not device_type:
+        raise DeviceCatalogError("DEVICE_TYPE_UNSUPPORTED", "device type could not be determined")
+    agent["deviceType"] = device_type
+    capabilities = sorted(agent_endpoint_tools(agent))
+    definitions = agent_endpoint_tool_defs(agent)
+    catalog = prepare_device_catalog({
+        "capabilities": capabilities,
+        "toolDefs": [{"name": name, **spec} for name, spec in definitions.items()],
+        "aiDescription": ctx.info.get("aiDescription"),
+        "catalogGeneration": ctx.info.get("catalogGeneration"),
+        "catalogProtocolVersion": ctx.info.get("catalogProtocolVersion", 1),
+    })
+    return agent, device_type, capabilities, catalog
+
+
+def _publish_committed_catalog(ctx: Registration, catalog: PreparedDeviceCatalog, committed: dict) -> None:
+    ctx.info["capabilities"] = list(catalog.capabilities)
+    ctx.info["toolDefs"] = list(catalog.tool_defs)
+    ctx.info["aiDescription"] = catalog.reported_ai_description
+    ctx.info["catalogGeneration"] = committed["catalog_generation"]
+    ctx.info["catalogHash"] = committed["catalog_hash"]
+    ctx.info["catalogProtocolVersion"] = committed["catalog_protocol_version"]
+
+
+def _record_presence(ctx: Registration) -> tuple[Dict[Optional[int], bool], dict]:
     from api.devices.mcp_permissions import (
         get_scope,
         reconcile_saved_scope_for_capability_change,
@@ -129,20 +164,12 @@ def _record_presence(ctx: Registration) -> Dict[Optional[int], bool]:
         saved_scope_was_full,
         set_scope,
     )
-    from api.devices.presence import capabilities_for_device, upsert_presence
-    from connector_runtime.dispatch.desktop_device_tools import (
-        agent_endpoint_tool_defs,
-        agent_endpoint_tools,
-        device_type_of,
-    )
-
-    agent = agents[ctx.sid]
-    device_type = device_type_of(agent)
-    if not device_type:
-        return {}
-    agent["deviceType"] = device_type
-    capabilities = sorted(agent_endpoint_tools(agent))
+    from api.devices.presence import capabilities_for_device
+    from api.devices.presence_catalog_store import PresenceCatalogUpdate, swap_presence_catalog
+    agent, device_type, capabilities, accepted_catalog = _prepare_callable_catalog(ctx)
+    ctx.catalog = accepted_catalog
     previous_full: Dict[Optional[int], bool] = {}
+    expanded_scopes: Dict[Optional[int], set[str]] = {}
     if ctx.user_id is not None:
         previous = capabilities_for_device(ctx.user_id, ctx.device_id)
         default_saved = get_scope(
@@ -157,22 +184,43 @@ def _record_presence(ctx: Registration) -> Dict[Optional[int], bool]:
             if saved is not None:
                 expanded = reconcile_saved_scope_for_capability_change(saved, set(capabilities), previous)
                 if expanded != saved:
-                    set_scope(
-                        ctx.user_id, ctx.device_id, expanded,
-                        ai_config_id=config_id, device_type=device_type,
-                    )
-    upsert_presence(
-        ctx.user_id, ctx.device_id, ctx.ai_config_id, device_type, capabilities,
-        online=True, tool_defs=agent_endpoint_tool_defs(agent),
-        name=agent.get("name"), platform=agent.get("platform"), icon=agent.get("icon") or "",
-    )
+                    expanded_scopes[config_id] = expanded
+    committed = swap_presence_catalog(PresenceCatalogUpdate(
+        user_id=ctx.user_id,
+        device_id=ctx.device_id,
+        ai_config_id=ctx.ai_config_id,
+        device_type=device_type,
+        capabilities=accepted_catalog.capabilities,
+        tool_defs=accepted_catalog.tool_defs_map,
+        name=agent.get("name"),
+        platform=agent.get("platform"),
+        icon=agent.get("icon") or "",
+        reported_ai_description=accepted_catalog.reported_ai_description,
+        catalog_hash=accepted_catalog.catalog_hash,
+        requested_catalog_generation=accepted_catalog.requested_generation,
+        catalog_protocol_version=accepted_catalog.protocol_version,
+    ))
+    _publish_committed_catalog(ctx, accepted_catalog, committed)
     if ctx.user_id is not None:
-        for config_id in (None, *ctx.ai_config_ids):
-            reconcile_scope_with_capabilities(
-                ctx.user_id, ctx.device_id, capabilities,
-                ai_config_id=config_id, device_type=device_type,
-            )
-    return previous_full
+        try:
+            for config_id, expanded in expanded_scopes.items():
+                set_scope(
+                    ctx.user_id, ctx.device_id, expanded,
+                    ai_config_id=config_id, device_type=device_type,
+                )
+            for config_id in (None, *ctx.ai_config_ids):
+                reconcile_scope_with_capabilities(
+                    ctx.user_id, ctx.device_id, capabilities,
+                    ai_config_id=config_id, device_type=device_type,
+                )
+        except Exception as exc:
+            from api.devices.presence import set_offline
+
+            set_offline(ctx.device_id)
+            raise DeviceCatalogError(
+                "DEVICE_SCOPE_RECONCILE_FAILED", "device permissions could not be reconciled"
+            ) from exc
+    return previous_full, committed
 
 
 async def _push_dynamic_tools(ctx: Registration, previous_full: Dict[Optional[int], bool]) -> None:
@@ -277,19 +325,42 @@ async def handle_agent_register(sid: str, raw_info: object) -> None:
     ctx = await _registration(sid, info)
     if ctx is None:
         return
-    _store_live_agent(ctx)
-    logger.info("Agent registered: %s user=%s ai=%s", ctx.device_id, ctx.user_id, ctx.ai_config_id)
     try:
-        previous_full = _record_presence(ctx)
+        # Validate the complete incoming generation before any live registry or
+        # persisted state is mutated. _record_presence validates the
+        # device-type-filtered callable generation once more before swapping it.
+        prepare_device_catalog(info)
+        previous_full, committed = _record_presence(ctx)
+    except DeviceCatalogError as exc:
+        logger.info("Agent catalog rejected: device=%s code=%s", ctx.device_id, exc.code)
+        await sio.emit(
+            "device:register_rejected",
+            {"reason": str(exc), "error_code": exc.code},
+            to=sid,
+        )
+        return
     except Exception:
-        previous_full = {}
         logger.exception("Failed to record endpoint agent presence: %s", ctx.device_id)
+        await sio.emit(
+            "device:register_rejected",
+            {"reason": "failed to persist device catalog", "error_code": "DEVICE_CATALOG_PERSIST_FAILED"},
+            to=sid,
+        )
+        return
+    _store_live_agent(ctx)
+    logger.info(
+        "Agent registered: %s user=%s ai=%s catalog_generation=%s",
+        ctx.device_id, ctx.user_id, ctx.ai_config_id, committed["catalog_generation"],
+    )
     await sio.emit(
         "device:registered",
         {
             "id": ctx.device_id,
             "aiConfigId": ctx.ai_config_id,
             "boundAiConfigIds": list(ctx.ai_config_ids),
+            "catalogGeneration": committed["catalog_generation"],
+            "catalogHash": committed["catalog_hash"],
+            "catalogProtocolVersion": committed["catalog_protocol_version"],
         },
         to=sid,
     )
