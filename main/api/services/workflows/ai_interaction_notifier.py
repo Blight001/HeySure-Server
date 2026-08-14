@@ -44,7 +44,45 @@ def _notice_content(session: Session, run: WorkflowRun, item: WorkflowConfirmati
     return "\n".join(lines)
 
 
-def _ensure_session(session: Session, item: WorkflowConfirmation, config: AssistantAIConfig) -> ChatSession:
+def _origin_session(
+    session: Session,
+    item: WorkflowConfirmation,
+    run: WorkflowRun,
+) -> Optional[ChatSession]:
+    try:
+        variables = json.loads(run.variables_json or "{}")
+    except Exception:
+        return None
+    origin = variables.get("_chat_origin") if isinstance(variables, dict) else None
+    origin_run_id = str(origin.get("run_id") or "").strip() if isinstance(origin, dict) else ""
+    origin_session_id = str(origin.get("session_id") or "").strip() if isinstance(origin, dict) else ""
+    if not origin_run_id or not origin_session_id:
+        return None
+    origin_run = session.exec(select(ChatRun).where(
+        ChatRun.run_id == origin_run_id,
+        ChatRun.user_id == item.requested_user_id,
+        ChatRun.ai_config_id == item.ai_config_id,
+        ChatRun.session_id == origin_session_id,
+    )).first()
+    if not origin_run:
+        return None
+    return session.exec(select(ChatSession).where(
+        ChatSession.user_id == item.requested_user_id,
+        ChatSession.ai_config_id == item.ai_config_id,
+        ChatSession.ai_kind == origin_run.ai_kind,
+        ChatSession.session_id == origin_session_id,
+    )).first()
+
+
+def _ensure_session(
+    session: Session,
+    item: WorkflowConfirmation,
+    config: AssistantAIConfig,
+    run: WorkflowRun,
+) -> ChatSession:
+    origin = _origin_session(session, item, run)
+    if origin:
+        return origin
     session_id = f"workflow_interaction_{item.run_id}"
     kind = _ai_kind(config)
     row = session.exec(select(ChatSession).where(
@@ -84,7 +122,7 @@ def _enqueue_notice(session: Session, item: WorkflowConfirmation) -> bool:
     run = session.get(WorkflowRun, item.run_id)
     if not config or not run:
         return False
-    chat = _ensure_session(session, item, config)
+    chat = _ensure_session(session, item, config, run)
     content = _notice_content(session, run, item)
     if item.notified_at is None:
         session.add(ChatMessage(

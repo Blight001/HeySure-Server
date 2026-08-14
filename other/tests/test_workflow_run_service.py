@@ -319,6 +319,76 @@ def test_ai_interaction_enqueues_a_durable_ai_turn(monkeypatch):
         assert confirmation.notification_run_id == queued.run_id
 
 
+def test_ai_interaction_reuses_origin_chat_without_competing_run(monkeypatch):
+    definition = {
+        "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "review",
+        "steps": {
+            "review": {
+                "type": "ai", "prompt": "核对发布结果", "saveAs": "review",
+                "timeoutSeconds": 30, "next": "finish", "onError": "fail",
+            },
+            "finish": {"type": "end"},
+        },
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 3}, "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        session.add(ChatSession(
+            user_id=user.id, ai_config_id=9, ai_kind="core",
+            session_id="origin-session", session_name="原始对话",
+        ))
+        session.add(ChatRun(
+            run_id="origin-chat-run", user_id=user.id, ai_config_id=9, ai_kind="core",
+            session_id="origin-session", session_name="原始对话", status="running",
+        ))
+        run = create_run(
+            session, user_id=user.id, card_id=card.id, device_id="device", input_value={},
+            actor=RunActorContext(
+                actor_type="ai", actor_id="9",
+                initial_variables={
+                    "_chat_origin": {"run_id": "origin-chat-run", "session_id": "origin-session"}
+                },
+            ),
+        )
+        advance_interactive_run(session, run.id)
+        workflow_run_id = run.id
+    monkeypatch.setattr("api.services.workflows.ai_interaction_notifier.engine", engine)
+
+    assert process_pending_ai_interactions() == 0
+    with Session(engine) as session:
+        notice = session.exec(select(ChatMessage).where(
+            ChatMessage.tags.like("workflow_interaction:%")
+        )).one()
+        confirmation = session.exec(select(WorkflowConfirmation).where(
+            WorkflowConfirmation.run_id == workflow_run_id,
+        )).one()
+        runs = session.exec(select(ChatRun).where(ChatRun.session_id == "origin-session")).all()
+        assert notice.session_id == "origin-session"
+        assert [item.run_id for item in runs] == ["origin-chat-run"]
+        assert confirmation.notification_run_id == ""
+        origin_run = runs[0]
+        origin_run.status = "completed"
+        session.add(origin_run)
+        session.commit()
+
+    assert process_pending_ai_interactions() == 1
+    with Session(engine) as session:
+        runs = session.exec(select(ChatRun).where(
+            ChatRun.session_id == "origin-session",
+        ).order_by(ChatRun.created_at)).all()
+        confirmation = session.exec(select(WorkflowConfirmation).where(
+            WorkflowConfirmation.run_id == workflow_run_id,
+        )).one()
+        assert len(runs) == 2
+        assert runs[1].status == "queued"
+        assert runs[1].session_name == "原始对话"
+        assert confirmation.notification_run_id == runs[1].run_id
+        assert not session.exec(select(ChatSession).where(
+            ChatSession.session_id == f"workflow_interaction_{workflow_run_id}"
+        )).first()
+
+
 def test_original_chat_wait_returns_only_after_workflow_terminal(monkeypatch):
     definition = {
         "schemaVersion": 1, "inputSchema": {"type": "object"}, "startStepId": "finish",
