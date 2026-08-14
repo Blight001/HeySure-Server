@@ -155,6 +155,24 @@ def device_type_of(agent: Optional[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
+def _builtin_library_tools(agent: Dict[str, Any], device_type: str) -> Set[str]:
+    """Governance tools accepted only from the server-owned library device."""
+    if device_type != "workshop":
+        return set()
+    if str(agent.get("source") or "").strip().lower() != "builtin":
+        return set()
+    try:
+        from library.engine import is_builtin_workshop_device_id
+        from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
+
+        if is_builtin_workshop_device_id(agent.get("id")):
+            reported = {str(cap or "").strip() for cap in agent.get("capabilities") or []}
+            return set(LIBRARY_BOUND_TOOLS) & reported
+    except Exception:
+        pass
+    return set()
+
+
 def _agent_capabilities(agent: Dict[str, Any], device_type: str) -> Set[str]:
     """Tool names that ``agent`` reports, owned by its actual device type.
 
@@ -200,7 +218,7 @@ def agent_endpoint_tools(agent: Optional[Dict[str, Any]]) -> Set[str]:
     atype = device_type_of(agent)
     if not atype or not isinstance(agent, dict):
         return set()
-    return _agent_capabilities(agent, atype)
+    return _agent_capabilities(agent, atype) | _builtin_library_tools(agent, atype)
 
 
 def agent_endpoint_tool_defs(agent: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
