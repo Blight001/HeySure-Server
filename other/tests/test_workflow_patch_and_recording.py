@@ -83,6 +83,34 @@ def test_partial_patch_creates_new_version_without_replacing_other_fields():
             )
 
 
+def test_patch_add_creates_missing_schema_parents_without_replacing_whole_schema():
+    with Session(_database()) as session:
+        user = _user(session)
+        card = create_card(session, user.id, CardCreate(name="Patch input", definition=_definition()))
+
+        result = patch_card_definition(
+            session, card=card, user_id=user.id, base_version_id=card.latest_version_id,
+            operations=[{
+                "op": "add", "path": "/inputSchema/properties/prompt",
+                "value": {"type": "string", "title": "提示词"},
+            }],
+        )
+
+        assert result["version"]["definition"]["inputSchema"]["properties"]["prompt"] == {
+            "type": "string", "title": "提示词",
+        }
+
+
+def test_patch_rejects_definition_prefix_with_allowed_root_guidance():
+    with pytest.raises(WorkflowValidationError) as raised:
+        from api.services.workflows.patch_service import _segments
+        _segments("/definition/inputSchema/properties/prompt")
+
+    message = " ".join(raised.value.errors)
+    assert "omit the /definition prefix" in message
+    assert "/inputSchema" in message and "/steps" in message and "/output" in message
+
+
 def test_patch_dry_run_is_validated_without_committing_or_creating_a_version():
     with Session(_database()) as session:
         user = _user(session)

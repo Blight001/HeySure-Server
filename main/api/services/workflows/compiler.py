@@ -98,24 +98,39 @@ def _tool_name(step: Any) -> str:
     return str(step.get("toolRef", {}).get("name") or "") if isinstance(step, dict) else ""
 
 
-def _reset_step_errors(step: Any) -> List[str]:
+def _step_diagnostic(step_id: str, step: Any) -> str:
     if not isinstance(step, dict):
-        return ["resetStepId must reference an existing step"]
+        return f"step {step_id or '(empty)'} (missing)"
+    tool = _tool_name(step) or "missing toolRef.name"
+    arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
+    action = str(arguments.get("action") or "missing")
+    return f"step {step_id or '(empty)'} ({tool}, action={action})"
+
+
+def _reset_step_errors(step_id: str, step: Any) -> List[str]:
+    if not isinstance(step, dict):
+        return [f"resetStepId must reference an existing step; got {_step_diagnostic(step_id, step)}"]
     action = str(step.get("arguments", {}).get("action") or "")
     errors = []
     if not _tool_name(step).endswith("browser+tab") or action not in {"reload", "replace"}:
-        errors.append("reset step must call browser+tab with action reload or replace")
+        message = (
+            "reset step must call browser+tab with action reload or replace; "
+            f"got {_step_diagnostic(step_id, step)}"
+        )
+        if _tool_name(step).endswith("browser+tab") and action == "navigate":
+            message += "; suggested fix: change action to replace and keep arguments.url"
+        errors.append(message)
     if action == "replace" and not str(step.get("arguments", {}).get("url") or "").strip():
-        errors.append("replace reset step requires arguments.url")
+        errors.append(f"reset step {_step_diagnostic(step_id, step)} requires arguments.url")
     return errors
 
 
-def _ready_step_errors(step: Any) -> List[str]:
+def _ready_step_errors(step_id: str, step: Any) -> List[str]:
     if not isinstance(step, dict):
-        return ["readyStepId must reference an existing step"]
+        return [f"readyStepId must reference an existing step; got {_step_diagnostic(step_id, step)}"]
     if _tool_name(step).endswith("browser+wait") or _tool_name(step).endswith("browser+observe"):
         return []
-    return ["ready step must call browser+wait or browser+observe"]
+    return [f"ready step {_step_diagnostic(step_id, step)} must call browser+wait or browser+observe"]
 
 
 def _follows_next_chain(steps: Dict[str, Any], source: str, target: str) -> bool:
@@ -156,8 +171,8 @@ def _initial_environment_errors(definition: Dict[str, Any]) -> List[str]:
         errors.append("description is required")
     reset_id = str(contract.get("resetStepId") or "")
     ready_id = str(contract.get("readyStepId") or "")
-    errors.extend(_reset_step_errors(steps.get(reset_id)))
-    errors.extend(_ready_step_errors(steps.get(ready_id)))
+    errors.extend(_reset_step_errors(reset_id, steps.get(reset_id)))
+    errors.extend(_ready_step_errors(ready_id, steps.get(ready_id)))
     errors.extend(_initial_topology_errors(definition, steps, reset_id, ready_id))
     return [INITIAL_ENVIRONMENT_REQUIREMENTS, *errors] if errors else []
 

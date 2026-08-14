@@ -662,6 +662,14 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
     raise HTTPException(status_code=400, detail="unsupported run action")
 
 
+def _created_card_reference(card: WorkflowCard, version: Optional[WorkflowCardVersion]) -> Dict[str, str]:
+    return {
+        "card_id": card.id,
+        "version_id": card.latest_version_id,
+        "definition_digest": version.definition_digest if version else "",
+    }
+
+
 def _manage_recording(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     action = str(args.get("action") or "").strip().lower()
     with Session(engine) as session:
@@ -676,7 +684,11 @@ def _manage_recording(user_id: int, args: Dict[str, Any], ai_config_id: Optional
                 device_ids=args.get("device_ids") if isinstance(args.get("device_ids"), list) else [],
             )
             payload = recording_payload(session, row)
-            payload["guidance"] = "录制已开启；继续正常调用工具，完成后调用 record_stop。"
+            payload["guidance"] = (
+                "录制已开启；继续正常调用工具，完成后调用 record_stop。浏览器流程的首屏重置应使用 "
+                "browser+tab reload/replace；若误用带 url 的 navigate，停止录制时会自动归一化为 replace。"
+                "browser+wait 无参数时默认仅等待 1000ms，需要更长等待请显式传 ms。"
+            )
             return payload
         row = active_recording(session, user_id, ai_config_id, lock=action in {"record_stop", "record_cancel"})
         if action == "record_status":
@@ -693,7 +705,10 @@ def _manage_recording(user_id: int, args: Dict[str, Any], ai_config_id: Optional
         ]
         if not calls:
             raise HTTPException(status_code=422, detail="recording has no successful device calls")
-        definition = definition_from_trace(calls, name=stopped.name, description=stopped.description)
+        definition = definition_from_trace(
+            calls, name=stopped.name, description=stopped.description,
+            compact=bool(args.get("compact_recording", True)),
+        )
         owner_id = None if _public_card_creator(session, user_id, ai_config_id) else ai_config_id
         body = CardCreate(
             name=str(args.get("name") or stopped.name or "录制生成卡片"),
@@ -707,6 +722,8 @@ def _manage_recording(user_id: int, args: Dict[str, Any], ai_config_id: Optional
         )
         card = create_card(session, user_id, body)
         payload["created_card"] = card_payload(card)
+        created_version = session.get(WorkflowCardVersion, card.latest_version_id)
+        payload.update(_created_card_reference(card, created_version))
         return payload
 
 
@@ -812,7 +829,15 @@ AUTOMATION_MANAGE_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "op": {"type": "string", "enum": ["add", "replace", "remove", "test"]},
-                    "path": {"type": "string", "description": "例如 /steps/open_page/arguments/url 或 /steps/new_step。"},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "definition 内的绝对 JSON Pointer，但不要带 /definition 前缀。允许的顶层路径："
+                            "/name、/description、/inputSchema、/startStepId、/steps、/limits、/output、"
+                            "/requiredCapabilities、/compatibility。例如 /inputSchema/properties/prompt、"
+                            "/steps/open_page/arguments/url 或 /steps/new_step。add 会创建缺失的中间对象。"
+                        ),
+                    },
                     "value": {},
                 },
                 "required": ["op", "path"],
@@ -863,6 +888,14 @@ AUTOMATION_MANAGE_SCHEMA = {
             "description": (
                 "action=record_stop 时设为 true：把录制中真实成功的调用编译、验证并保存为不可变卡片版本。"
                 "这是创建完整自动化卡片的默认推荐方案。"
+            ),
+        },
+        "compact_recording": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "action=record_stop(create_card=true) 时是否精简录制，默认 true：合并同一设备连续的 observe，"
+                "保留最后一次供后续 ref/语义解析使用；设为 false 可完整保留成功调用。"
             ),
         },
         "device_id": {

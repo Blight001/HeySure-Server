@@ -239,6 +239,26 @@ def test_browser_trace_declares_reload_initial_environment_contract():
     assert compile_definition(definition)["warnings"] == []
 
 
+def test_browser_trace_normalizes_initial_navigate_into_reusable_replace_reset():
+    definition = definition_from_trace([
+        {
+            "tool": "aifree.browser+tab",
+            "arguments": {"action": "navigate", "url": "https://example.com/editor"},
+        },
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 1500}},
+    ], name="Recorded navigation")
+
+    reset_id = definition["compatibility"]["initialEnvironment"]["resetStepId"]
+    assert reset_id == "aifree_browser_tab_replace"
+    assert definition["steps"][reset_id]["arguments"] == {
+        "action": "replace", "url": "https://example.com/editor",
+    }
+    assert {
+        "code": "NORMALIZED_INITIAL_BROWSER_NAVIGATE_TO_REPLACE", "sourceSequence": 1,
+    } in definition["recordingWarnings"]
+    assert compile_definition(definition)["warnings"] == []
+
+
 def test_browser_trace_stabilizes_unique_semantic_ref_from_fresh_observation():
     definition = definition_from_trace([
         {"tool": "aifree.browser+tab", "device_id": "browser-a", "arguments": {"action": "reload"}},
@@ -349,6 +369,47 @@ def test_browser_trace_discards_redundant_empty_observation_without_changing_rea
     assert compile_definition(definition)["warnings"] == []
 
 
+def test_browser_trace_compacts_consecutive_successful_observes_and_keeps_latest_for_ref():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 100}},
+        {"tool": "aifree.browser+observe", "arguments": {"keyword": "输入"}, "result": {
+            "items": [{"id": "e1", "kind": "interactive", "tag": "input", "text": "旧输入框"}],
+        }},
+        {"tool": "aifree.browser+observe", "arguments": {"filter": "input"}, "result": {
+            "items": [{"id": "e2", "kind": "interactive", "tag": "input", "placeholder": "请输入正文"}],
+        }},
+        {"tool": "aifree.browser+action", "arguments": {"action": "click", "ref": "e2"}},
+    ], name="Compact observes")
+
+    observes = [
+        step for step in definition["steps"].values()
+        if step.get("toolRef", {}).get("name") == "aifree.browser+observe"
+    ]
+    assert len(observes) == 1
+    assert observes[0]["arguments"] == {"filter": "input"}
+    assert {
+        "code": "DROPPED_REDUNDANT_BROWSER_OBSERVATION", "sourceSequence": 3,
+    } in definition["recordingWarnings"]
+    click = definition["steps"]["aifree_browser_action_click"]
+    assert click["targetResolver"]["text"] == "请输入正文"
+
+
+def test_browser_trace_can_preserve_consecutive_observes_when_compaction_is_disabled():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {}},
+        {"tool": "aifree.browser+observe", "arguments": {"keyword": "first"}},
+        {"tool": "aifree.browser+observe", "arguments": {"keyword": "second"}},
+    ], name="Keep observes", compact=False)
+
+    observe_ids = [
+        step_id for step_id, step in definition["steps"].items()
+        if step.get("toolRef", {}).get("name") == "aifree.browser+observe"
+    ]
+    assert observe_ids == ["aifree_browser_observe", "aifree_browser_observe_2"]
+
+
 def test_browser_trace_does_not_duplicate_existing_acquire_and_refreshes_after_release():
     definition = definition_from_trace([
         {"tool": "aifree.browser+control", "arguments": {"action": "acquire"}},
@@ -430,6 +491,24 @@ def test_browser_initial_environment_requires_reload_before_ready_step():
     message = " ".join(raised.value.errors)
     assert "initialEnvironment requires all three fields" in message
     assert "reset step must call browser+tab" in message
+
+
+def test_browser_initial_environment_error_identifies_navigate_reset_and_fix():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 500}},
+    ], name="Precise reset error")
+    reset_id = definition["compatibility"]["initialEnvironment"]["resetStepId"]
+    definition["steps"][reset_id]["arguments"] = {
+        "action": "navigate", "url": "https://example.com",
+    }
+
+    with pytest.raises(WorkflowValidationError) as raised:
+        compile_definition(definition)
+
+    message = " ".join(raised.value.errors)
+    assert f"step {reset_id} (aifree.browser+tab, action=navigate)" in message
+    assert "change action to replace and keep arguments.url" in message
 
 
 def test_ai_review_step_is_compiled_as_a_result_producer():

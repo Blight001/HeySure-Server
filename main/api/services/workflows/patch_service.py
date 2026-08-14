@@ -20,6 +20,7 @@ PATCHABLE_ROOTS = {
     "name", "description", "inputSchema", "startStepId", "steps", "limits",
     "output", "requiredCapabilities", "compatibility",
 }
+PATCHABLE_ROOTS_HINT = ", ".join(f"/{item}" for item in sorted(PATCHABLE_ROOTS))
 
 
 def _card_for_change(session: Session, card: WorkflowCard, *, dry_run: bool) -> WorkflowCard:
@@ -43,12 +44,16 @@ def _segments(path: object) -> List[str]:
     if not value.startswith("/"):
         raise WorkflowValidationError(["patch path must be an absolute JSON pointer"])
     parts = [item.replace("~1", "/").replace("~0", "~") for item in value[1:].split("/")]
-    if not parts or parts[0] not in PATCHABLE_ROOTS or any(part in {"__proto__", "constructor", "prototype"} for part in parts):
-        raise WorkflowValidationError([f"patch path is not allowed: {value}"])
+    forbidden = any(part in {"__proto__", "constructor", "prototype"} for part in parts)
+    if not parts or parts[0] not in PATCHABLE_ROOTS or forbidden:
+        prefix_hint = "; omit the /definition prefix" if parts and parts[0] == "definition" else ""
+        raise WorkflowValidationError([
+            f"patch path is not allowed: {value}{prefix_hint}; allowed top-level paths: {PATCHABLE_ROOTS_HINT}"
+        ])
     return parts
 
 
-def _parent(document: Any, parts: List[str]) -> tuple[Any, str]:
+def _parent(document: Any, parts: List[str], *, create_missing: bool = False) -> tuple[Any, str]:
     current = document
     for part in parts[:-1]:
         if isinstance(current, list):
@@ -56,7 +61,11 @@ def _parent(document: Any, parts: List[str]) -> tuple[Any, str]:
                 current = current[int(part)]
             except (ValueError, IndexError):
                 raise WorkflowValidationError([f"patch path does not exist: /{'/'.join(parts)}"])
-        elif isinstance(current, dict) and part in current:
+        elif isinstance(current, dict):
+            if part not in current and create_missing:
+                current[part] = {}
+            if part not in current:
+                raise WorkflowValidationError([f"patch path does not exist: /{'/'.join(parts)}"])
             current = current[part]
         else:
             raise WorkflowValidationError([f"patch path does not exist: /{'/'.join(parts)}"])
@@ -72,7 +81,7 @@ def _read(document: Any, parts: List[str]) -> Any:
 
 
 def _write(document: Any, parts: List[str], value: Any, *, replace: bool) -> None:
-    parent, key = _parent(document, parts)
+    parent, key = _parent(document, parts, create_missing=not replace)
     if isinstance(parent, list):
         if key == "-" and not replace:
             parent.append(deepcopy(value))

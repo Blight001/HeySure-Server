@@ -94,6 +94,50 @@ def _drop_redundant_empty_observes(
     return retained, warnings
 
 
+def _normalize_initial_navigation(
+    calls: list[Dict[str, Any]],
+) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+    first_tab = next((index for index, call in enumerate(calls) if _suffix(call) == "tab"), None)
+    if first_tab is None:
+        return calls, []
+    call = calls[first_tab]
+    arguments = _arguments(call)
+    has_ready = any(
+        _device_key(candidate) == _device_key(call) and _suffix(candidate) in {"wait", "observe"}
+        for candidate in calls[first_tab + 1:]
+    )
+    if str(arguments.get("action") or "").lower() != "navigate" or not str(arguments.get("url") or "").strip() or not has_ready:
+        return calls, []
+    call["arguments"] = {**arguments, "action": "replace"}
+    return calls, [{
+        "code": "NORMALIZED_INITIAL_BROWSER_NAVIGATE_TO_REPLACE",
+        "sourceSequence": first_tab + 1,
+    }]
+
+
+def _compact_consecutive_observes(
+    calls: list[Dict[str, Any]],
+) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+    retained: list[Dict[str, Any]] = []
+    source_sequences: list[int] = []
+    warnings: list[Dict[str, Any]] = []
+    for sequence, call in enumerate(calls, start=1):
+        if (
+            retained and _suffix(call) == "observe" and _suffix(retained[-1]) == "observe"
+            and _device_key(call) == _device_key(retained[-1])
+        ):
+            warnings.append({
+                "code": "DROPPED_REDUNDANT_BROWSER_OBSERVATION",
+                "sourceSequence": source_sequences[-1],
+            })
+            retained[-1] = call
+            source_sequences[-1] = sequence
+            continue
+        retained.append(call)
+        source_sequences.append(sequence)
+    return retained, warnings
+
+
 def _control_call(write_call: Dict[str, Any]) -> Dict[str, Any]:
     prefix = _tool(write_call).rsplit("browser+", 1)[0]
     call: Dict[str, Any] = {
@@ -124,11 +168,16 @@ def _insert_acquires(calls: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
 
 
 def prepare_browser_calls(
-    source_calls: list[Dict[str, Any]],
+    source_calls: list[Dict[str, Any]], *, compact: bool = True,
 ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
-    """Copy calls, discard only redundant empty observes, and add takeover."""
+    """Copy calls, normalize a reusable initial page, compact observes, and add takeover."""
     calls = [deepcopy(call) for call in source_calls]
-    retained, warnings = _drop_redundant_empty_observes(calls)
+    normalized, warnings = _normalize_initial_navigation(calls)
+    retained, empty_warnings = _drop_redundant_empty_observes(normalized)
+    warnings.extend(empty_warnings)
+    if compact:
+        retained, compact_warnings = _compact_consecutive_observes(retained)
+        warnings.extend(compact_warnings)
     return _insert_acquires(retained), warnings
 
 

@@ -11,6 +11,7 @@ from tools.automation import (
     _pending_ai_review_guidance,
     _updated_tags,
     _edit_card,
+    _created_card_reference,
 )
 import pytest
 from fastapi import HTTPException
@@ -92,6 +93,21 @@ def test_automation_schema_prefers_recording_and_scopes_manual_edits_to_patches(
     assert "结构性重构" in AUTOMATION_MANAGE_SCHEMA["properties"]["action"]["description"]
     assert "元数据仍使用 edit" in definition_description
     assert "不创建版本" in AUTOMATION_MANAGE_SCHEMA["properties"]["dry_run"]["description"]
+    assert AUTOMATION_MANAGE_SCHEMA["properties"]["compact_recording"]["default"] is True
+    path_description = AUTOMATION_MANAGE_SCHEMA["properties"]["operations"]["items"]["properties"]["path"]["description"]
+    assert "不要带 /definition 前缀" in path_description
+    assert "/inputSchema/properties/prompt" in path_description
+
+
+def test_record_stop_created_card_reference_is_immediately_actionable():
+    card = SimpleNamespace(id="wcard-1", latest_version_id="version-2")
+    version = SimpleNamespace(definition_digest="sha256:definition")
+
+    assert _created_card_reference(card, version) == {
+        "card_id": "wcard-1",
+        "version_id": "version-2",
+        "definition_digest": "sha256:definition",
+    }
 
 
 def test_automation_description_teaches_ai_all_supported_node_shapes():

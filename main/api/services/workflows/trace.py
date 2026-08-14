@@ -150,9 +150,11 @@ def _trace_steps(
     return steps
 
 
-def definition_from_trace(calls: list[Dict[str, Any]], *, name: str, description: str = "") -> Dict[str, Any]:
+def definition_from_trace(
+    calls: list[Dict[str, Any]], *, name: str, description: str = "", compact: bool = True,
+) -> Dict[str, Any]:
     _validate_calls(calls)
-    calls, detached_warnings = prepare_browser_calls(calls)
+    calls, detached_warnings = prepare_browser_calls(calls, compact=compact)
     properties: Dict[str, Any] = {}
     required: list[str] = []
     step_ids = _semantic_step_ids(calls)
