@@ -86,3 +86,32 @@ def test_screenshot_bubble_url_round_trips():
     assert tool_persistence.extract_screenshot_bubble_url(content) == (
         "https://example.test/screenshot.png"
     )
+
+
+def test_save_tool_bubble_preserves_result_envelope_for_recording(monkeypatch):
+    observed = {}
+    fake_session = SimpleNamespace()
+    envelope = {
+        "success": False,
+        "errorCode": "BROWSER_TAKEOVER_REQUIRED",
+        "result": {"suggestedAction": "acquire"},
+    }
+
+    monkeypatch.setattr(tool_persistence, "_save_message", lambda *_args: SimpleNamespace(
+        id=None, content="", user_id=9, ai_config_id=3,
+    ))
+    monkeypatch.setattr(tool_persistence, "tool_device_identity", lambda *_args: ("", ""))
+    monkeypatch.setattr(
+        "api.services.workflows.recording_service.record_completed_tool_call",
+        lambda _session, call: observed.setdefault("call", call),
+    )
+
+    tool_persistence.save_tool_bubble(tool_persistence.ToolBubbleRequest(
+        session=fake_session, user_id=9, ai_config_id=3, ai_kind="assistant",
+        session_id="session-a", session_name="Task", model="model-a",
+        tool="browser.replace", arguments={}, result_text="takeover required",
+        tool_result=envelope,
+    ))
+
+    assert observed["call"].success is True
+    assert observed["call"].result == envelope

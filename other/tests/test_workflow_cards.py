@@ -216,11 +216,13 @@ def test_trace_to_draft_parameterizes_sensitive_values():
         [{"tool": "browser.login", "arguments": {"account": "demo", "password": "plain-secret"}}],
         name="Login",
     )
-    args = definition["steps"]["call_1"]["arguments"]
+    args = definition["steps"]["browser_login"]["arguments"]
     assert args["account"] == "demo"
     assert args["password"] == "${input.step_1_password}"
     assert "plain-secret" not in str(definition)
-    assert compile_definition(definition)["definition"]["startStepId"] == "call_1"
+    assert definition["steps"]["browser_login"]["saveAs"] == "browser_login_result"
+    assert definition["output"] == {"lastResult": "${steps.browser_login_result.result}"}
+    assert compile_definition(definition)["definition"]["startStepId"] == "browser_login"
 
 
 def test_browser_trace_declares_reload_initial_environment_contract():
@@ -230,8 +232,49 @@ def test_browser_trace_declares_reload_initial_environment_contract():
         {"tool": "aifree.browser+observe", "arguments": {}},
     ], name="Stable browser flow")
     contract = definition["compatibility"]["initialEnvironment"]
-    assert contract["resetStepId"] == "call_1"
-    assert contract["readyStepId"] == "call_2"
+    assert contract["resetStepId"] == "aifree_browser_tab_reload"
+    assert contract["readyStepId"] == "aifree_browser_wait"
+    assert compile_definition(definition)["warnings"] == []
+
+
+def test_trace_semantic_ids_include_action_and_suffix_duplicates():
+    definition = definition_from_trace([
+        {"tool": "workspace.run+command", "arguments": {"action": "execute"}},
+        {"tool": "workspace.run+command", "arguments": {"action": "execute"}},
+        {"tool": "123.custom/tool", "arguments": {"action": "do thing"}},
+    ], name="Semantic ids")
+
+    assert list(definition["steps"]) == [
+        "workspace_run_command_execute",
+        "workspace_run_command_execute_2",
+        "tool_123_custom_tool_do_thing",
+        "finish",
+    ]
+    first = definition["steps"]["workspace_run_command_execute"]
+    second = definition["steps"]["workspace_run_command_execute_2"]
+    assert first["next"] == "workspace_run_command_execute_2"
+    assert second["saveAs"] == "workspace_run_command_execute_2_result"
+    assert definition["output"] == {"lastResult": "${steps.tool_123_custom_tool_do_thing_result.result}"}
+    assert compile_definition(definition)["warnings"] == []
+
+
+def test_trace_semantic_ids_remain_safe_when_names_are_long_or_reserved():
+    long_tool = "9." + ("tool-name+" * 12)
+    definition = definition_from_trace([
+        {"tool": long_tool, "arguments": {"action": "execute"}},
+        {"tool": long_tool, "arguments": {"action": "execute"}},
+        {"tool": "finish", "arguments": {}},
+    ], name="Safe semantic ids")
+
+    step_ids = list(definition["steps"])
+    assert step_ids[-2:] == ["finish_2", "finish"]
+    assert step_ids[1].endswith("_2")
+    assert all(len(step_id) <= 57 for step_id in step_ids[:-1])
+    assert all(
+        len(step["saveAs"]) <= 64
+        for step in definition["steps"].values()
+        if step["type"] == "mcp"
+    )
     assert compile_definition(definition)["warnings"] == []
 
 
@@ -248,7 +291,7 @@ def test_browser_initial_environment_requires_reload_before_ready_step():
         {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
         {"tool": "aifree.browser+wait", "arguments": {"ms": 500}},
     ], name="Stable browser flow")
-    definition["compatibility"]["initialEnvironment"]["resetStepId"] = "call_2"
+    definition["compatibility"]["initialEnvironment"]["resetStepId"] = "aifree_browser_wait"
     with pytest.raises(WorkflowValidationError) as raised:
         compile_definition(definition)
     assert any("reset step must call browser+tab" in item for item in raised.value.errors)

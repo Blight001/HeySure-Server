@@ -88,6 +88,10 @@ def test_automation_schema_prefers_recording_and_scopes_manual_edits_to_patches(
     assert "不要默认使用 create/from_trace" in action_description
     assert "小细节" in patch_description
     assert "不要凭空手写复杂流程" in definition_description
+    assert "replace_definition" in AUTOMATION_MANAGE_SCHEMA["properties"]["action"]["enum"]
+    assert "结构性重构" in AUTOMATION_MANAGE_SCHEMA["properties"]["action"]["description"]
+    assert "元数据仍使用 edit" in definition_description
+    assert "不创建版本" in AUTOMATION_MANAGE_SCHEMA["properties"]["dry_run"]["description"]
 
 
 def test_automation_description_teaches_ai_all_supported_node_shapes():

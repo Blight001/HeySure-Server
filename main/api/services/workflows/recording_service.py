@@ -15,6 +15,11 @@ from api.models import WorkflowRecording, WorkflowRecordingEvent
 
 SENSITIVE_KEYS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey"}
 MAX_RECORDED_BYTES = 64 * 1024
+_FAILURE_STATUSES = {"cancelled", "denied", "error", "failed", "failure", "timeout"}
+_FAILURE_CODE_MARKERS = (
+    "CANCELLED", "CLOSED", "DENIED", "ERROR", "FAILED", "INVALID",
+    "NOT_FOUND", "REJECTED", "REQUIRED", "TIMEOUT", "UNAVAILABLE",
+)
 
 
 class RecordedToolCall(NamedTuple):
@@ -26,6 +31,60 @@ class RecordedToolCall(NamedTuple):
     success: bool
     error: str
     device_id: str
+
+
+class RecordedOutcome(NamedTuple):
+    transport_success: bool
+    business_success: bool
+    recordable: bool
+    error: str
+
+
+def _generic_code_failed(value: Dict[str, Any], code: str) -> bool:
+    return bool(code) and (
+        value.get("error") not in (None, "")
+        or any(marker in code.upper() for marker in _FAILURE_CODE_MARKERS)
+    )
+
+
+def _direct_failure(value: Dict[str, Any]) -> tuple[str, str] | None:
+    success_false = value.get("success") is False or value.get("ok") is False
+    status = str(value.get("status") or "").strip().lower()
+    status_failed = status in _FAILURE_STATUSES
+    error_code = value.get("errorCode") or value.get("error_code")
+    has_error_code = error_code not in (None, "", 0, "0")
+    generic_code = str(value.get("code") or "").strip()
+    if not (success_false or status_failed or has_error_code or _generic_code_failed(value, generic_code)):
+        return None
+    code = str(error_code or generic_code or "TOOL_REPORTED_FAILURE")[:120]
+    message = str(
+        value.get("error")
+        or value.get("message")
+        or value.get("detail")
+        or "tool reported failure"
+    )[:2000]
+    return code, message
+
+
+def _failure_marker(value: Any, depth: int = 0) -> tuple[str, str] | None:
+    """Find an explicit failure only in the result-envelope chain."""
+    if depth > 3 or not isinstance(value, dict):
+        return None
+    failure = _direct_failure(value)
+    if failure:
+        return failure
+    return _failure_marker(value.get("result"), depth + 1)
+
+
+def classify_recorded_tool_call(call: RecordedToolCall) -> RecordedOutcome:
+    """Separate dispatch success from whether a call is safe to replay."""
+    if not call.success:
+        return RecordedOutcome(False, False, False, str(call.error or "tool call failed")[:4000])
+    failure = _failure_marker(call.result)
+    if failure is None:
+        return RecordedOutcome(True, True, True, "")
+    code, message = failure
+    return RecordedOutcome(True, False, False, f"{code}: {message}"[:4000])
 
 
 def _dump(value: Any) -> str:
@@ -167,6 +226,7 @@ def record_completed_tool_call(
             row.default_device_id = call.device_id
     row.event_count += 1
     row.updated_at = time.time()
+    outcome = classify_recorded_tool_call(call)
     event = WorkflowRecordingEvent(
         id=f"wrecevt_{uuid.uuid4().hex}",
         recording_id=row.id,
@@ -175,8 +235,8 @@ def record_completed_tool_call(
         device_id=str(call.device_id or ""),
         arguments_json=_dump(_redact(call.arguments)),
         result_json=_dump(_redact(call.result)),
-        success=bool(call.success),
-        error=str(call.error or "")[:4000],
+        success=outcome.recordable,
+        error=outcome.error,
     )
     session.add(row)
     session.add(event)

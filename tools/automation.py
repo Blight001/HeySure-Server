@@ -42,6 +42,7 @@ from api.services.workflows.schemas import CardCreate, CardUpdate
 from api.services.workflows.secrets import decrypt_json
 from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.patch_service import patch_card_definition
+from api.services.workflows.definition_replace_service import replace_card_definition
 from api.services.workflows.recording_service import (
     active_recording,
     recording_payload,
@@ -265,6 +266,17 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
                 user_id=user_id,
                 base_version_id=str(args.get("base_version_id") or ""),
                 operations=args.get("operations") if isinstance(args.get("operations"), list) else [],
+            )
+        if action == "replace_definition":
+            if "definition" not in args:
+                raise WorkflowValidationError(["replace_definition requires definition"])
+            return replace_card_definition(
+                session,
+                card=card,
+                user_id=user_id,
+                base_version_id=str(args.get("base_version_id") or ""),
+                definition=args.get("definition"),
+                dry_run=bool(args.get("dry_run")),
             )
         if action == "delete":
             delete_card(session, card)
@@ -697,7 +709,7 @@ def _automation_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     _require_enabled(run=action in {"start", "run", "resume", "respond", "debug_start", "debug_step", "debug_continue", "debug_restart"})
     try:
         if action in {
-            "list", "get", "create", "from_trace", "edit", "update", "patch",
+            "list", "get", "create", "from_trace", "edit", "update", "patch", "replace_definition",
             "delete", "validate", "versions", "get_version",
         }:
             return _manage_card(user_id, args, ai_config_id)
@@ -724,14 +736,15 @@ AUTOMATION_MANAGE_SCHEMA = {
         "设备绑定和调用顺序，比 AI 凭空手写 definition 更稳定。标准流程是 record_start → 在真实环境中"
         "逐步调用工具完成任务 → record_stop(create_card=true) → validate → debug_start/debug_step 验证。"
         "录制生成后若只有参数模板、变量路径、等待时间等小细节需要调整，使用 patch + "
-        "base_version_id 做最小局部修改。不要为了小改动重新手写或整体替换卡片。仅在无法进入真实环境录制、"
-        "或用户明确提供了完整且已审核的结构化定义时，才使用 create/from_trace。"
+        "base_version_id 做最小局部修改。不要为了小改动整体替换卡片；只有基于已审核定义进行结构性重构时，"
+        "才使用 replace_definition 并先 dry_run。仅在无法进入真实环境录制、或用户明确提供了完整且已审核的"
+        "结构化定义时，才使用 create/from_trace。卡片元数据使用 edit。"
     ),
     "properties": {
         "action": {
             "type": "string",
             "enum": [
-                "list", "get", "create", "from_trace", "edit", "patch", "delete",
+                "list", "get", "create", "from_trace", "edit", "patch", "replace_definition", "delete",
                 "validate", "versions", "get_version", "start",
                 "list_runs", "status", "pause", "resume", "cancel", "respond",
                 "record_start", "record_status", "record_stop", "record_cancel",
@@ -743,7 +756,7 @@ AUTOMATION_MANAGE_SCHEMA = {
                 "不要默认使用 create/from_trace 手写完整流程；"
                 "不要重复轮询 status；status 查看已有运行且会返回 pending_ai_review；"
                 "respond 仅处理分配给当前 AI 的 waiting_ai 审核交互；"
-                "pause/resume 暂停恢复；已有卡片优先用 patch 局部修改；"
+                "pause/resume 暂停恢复；已有卡片的小改动用 patch，结构性重构用 replace_definition；"
                 "debug_start 从任意步骤暂停创建调试运行，debug_step 单步，debug_continue 连续运行。"
             ),
         },
@@ -751,7 +764,7 @@ AUTOMATION_MANAGE_SCHEMA = {
         "version_id": {"type": "string"},
         "base_version_id": {
             "type": "string",
-            "description": "action=patch 必填，必须等于最新版本 ID，用于防止 AI 覆盖其他人的新修改。",
+            "description": "action=patch/replace_definition 必填，必须等于最新版本 ID，用于防止 AI 覆盖其他人的新修改。",
         },
         "operations": {
             "type": "array", "minItems": 1, "maxItems": 100,
@@ -790,8 +803,16 @@ AUTOMATION_MANAGE_SCHEMA = {
         "definition": {
             "type": "object",
             "description": (
-                "仅供 create 使用的完整定义。不要凭空手写复杂流程；优先实战录制生成，再用 patch 修正小细节。"
+                "供 create 或 replace_definition 使用的完整定义。不要凭空手写复杂流程；优先实战录制生成，"
+                "小细节用 patch；基于已审核版本做结构性重构时用 replace_definition。元数据仍使用 edit。"
                 + AUTOMATION_DEFINITION_GUIDANCE
+            ),
+        },
+        "dry_run": {
+            "type": "boolean",
+            "description": (
+                "仅用于 replace_definition；true 时执行完整编译、设备契约校验并返回结构化 diff，"
+                "但不修改卡片、不提交事务、不创建版本。确认后设为 false 才创建不可变新版本。"
             ),
         },
         "calls": {

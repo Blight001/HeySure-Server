@@ -387,7 +387,10 @@ def save_tool_bubble(request: ToolBubbleRequest) -> None:
         from api.services.workflows.recording_service import RecordedToolCall, record_completed_tool_call
 
         envelope = request.tool_result or {}
-        recorded_result = envelope.get("result", envelope) if isinstance(envelope, dict) else envelope
+        # Preserve the complete result envelope. Recording classification needs
+        # top-level business markers such as success=false/errorCode even when
+        # the useful payload is nested under ``result``.
+        recorded_result = envelope
         record_completed_tool_call(request.session, RecordedToolCall(
             user_id=request.user_id, ai_config_id=request.ai_config_id,
             tool=request.tool, arguments=request.arguments, result=recorded_result,
