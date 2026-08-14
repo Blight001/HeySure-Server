@@ -225,9 +225,15 @@ def _device_snapshot(session: Session, user_id: int, device_id: str) -> Tuple[De
         DevicePresence.device_id == device_id,
     )).first()
     if not device:
-        raise WorkflowValidationError([f"save device is not owned by the current user: {device_id}"])
+        raise WorkflowValidationError([
+            f"contract device is not connected or not owned by the current user: {device_id}; "
+            "connect the bound device so toolRef.schemaDigest can be resolved and verified automatically"
+        ])
     if not device.online:
-        raise WorkflowValidationError([f"save device is offline: {device_id}"])
+        raise WorkflowValidationError([
+            f"contract device is offline: {device_id}; bring it online so toolRef.schemaDigest "
+            "can be resolved and verified automatically"
+        ])
     return device, tool_defs_for_agent(user_id, device_id)
 
 
@@ -262,7 +268,10 @@ def _frozen_step_contract(
     supplied = str(ref.get("schemaDigest") or "").strip()
     if snapshot is None:
         if not supplied:
-            errors.append(f"step {step_id}: saving requires a bound device or toolRef.schemaDigest")
+            errors.append(
+                f"step {step_id}: schemaDigest cannot be resolved; bind an online contract device "
+                "so toolRef.schemaDigest can be filled and verified automatically"
+            )
             return None
         return {
             "namespace": "device", "name": name, "deviceId": target_id,

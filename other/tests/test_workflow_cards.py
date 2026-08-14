@@ -234,7 +234,137 @@ def test_browser_trace_declares_reload_initial_environment_contract():
     contract = definition["compatibility"]["initialEnvironment"]
     assert contract["resetStepId"] == "aifree_browser_tab_reload"
     assert contract["readyStepId"] == "aifree_browser_wait"
+    assert definition["startStepId"] == "aifree_browser_control_acquire"
+    assert definition["steps"]["aifree_browser_control_acquire"]["next"] == "aifree_browser_tab_reload"
     assert compile_definition(definition)["warnings"] == []
+
+
+def test_browser_trace_stabilizes_unique_semantic_ref_from_fresh_observation():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "device_id": "browser-a", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "device_id": "browser-a", "arguments": {"ms": 200}},
+        {
+            "tool": "aifree.browser+observe", "device_id": "browser-a", "arguments": {},
+            "result": {"items": [
+                {"id": "e14", "kind": "interactive", "tag": "button", "text": "暂存"},
+                {"id": "e15", "kind": "interactive", "tag": "button", "text": "发布"},
+            ]},
+        },
+        {
+            "tool": "aifree.browser+action", "device_id": "browser-a",
+            "arguments": {"action": "click", "ref": "e15"},
+        },
+    ], name="Stable recorded click")
+
+    click = definition["steps"]["aifree_browser_action_click"]
+    assert click["arguments"] == {"action": "click"}
+    assert click["targetResolver"] == {
+        "items": "${steps.aifree_browser_observe_result.result.items}",
+        "text": "发布", "fields": ["text"], "exact": True,
+        "kind": "interactive", "tag": "button",
+    }
+    assert not any(
+        warning["code"] == "UNSTABLE_BROWSER_REF"
+        for warning in definition.get("recordingWarnings", [])
+    )
+    assert compile_definition(definition)["warnings"] == []
+
+
+@pytest.mark.parametrize(
+    "recorded_result, expected_items_ref",
+    [
+        (
+            {"result": {"items": [{"id": "e1", "kind": "interactive", "text": "提交"}]}},
+            "${steps.aifree_browser_observe_result.result.result.items}",
+        ),
+        (
+            {"result": {"result": {"items": [
+                {"id": "e1", "kind": "interactive", "text": "提交"},
+            ]}}},
+            "${steps.aifree_browser_observe_result.result.result.result.items}",
+        ),
+    ],
+)
+def test_browser_trace_resolver_preserves_recorded_result_envelope_depth(
+    recorded_result, expected_items_ref,
+):
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 100}},
+        {"tool": "aifree.browser+observe", "arguments": {}, "result": recorded_result},
+        {"tool": "aifree.browser+action", "arguments": {"action": "click", "ref": "e1"}},
+    ], name="Nested observation envelope")
+
+    resolver = definition["steps"]["aifree_browser_action_click"]["targetResolver"]
+    assert resolver["items"] == expected_items_ref
+    assert compile_definition(definition)["warnings"] == []
+
+
+def test_browser_trace_keeps_ambiguous_ref_and_marks_it_unstable():
+    calls = [
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+observe", "arguments": {}, "result": {"items": [
+            {"id": "e1", "kind": "interactive", "text": "发布"},
+            {"id": "e2", "kind": "interactive", "text": "发布"},
+        ]}},
+        {"tool": "aifree.browser+action", "arguments": {"action": "click", "ref": "e2"}},
+    ]
+
+    definition = definition_from_trace(calls, name="Ambiguous recorded click")
+    click = definition["steps"]["aifree_browser_action_click"]
+
+    assert click["arguments"]["ref"] == "e2"
+    assert "targetResolver" not in click
+    assert {"code": "UNSTABLE_BROWSER_REF", "stepId": "aifree_browser_action_click"} in (
+        definition["recordingWarnings"]
+    )
+    assert calls[-1]["arguments"]["ref"] == "e2"
+
+
+def test_browser_trace_marks_explicitly_empty_observation():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+observe", "arguments": {}, "result": {"items": []}},
+    ], name="Empty observation")
+
+    assert {"code": "EMPTY_BROWSER_OBSERVATION", "stepId": "aifree_browser_observe"} in (
+        definition["recordingWarnings"]
+    )
+    assert compile_definition(definition)["warnings"] == []
+
+
+def test_browser_trace_discards_redundant_empty_observation_without_changing_ready_step():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 100}},
+        {"tool": "aifree.browser+observe", "arguments": {}, "result": {"items": []}},
+        {"tool": "aifree.browser+action", "arguments": {"action": "press_key", "key": "Escape"}},
+    ], name="Drop redundant empty observation")
+
+    assert "aifree_browser_observe" not in definition["steps"]
+    assert definition["compatibility"]["initialEnvironment"]["readyStepId"] == "aifree_browser_wait"
+    assert {"code": "DROPPED_EMPTY_BROWSER_OBSERVATION", "sourceSequence": 3} in (
+        definition["recordingWarnings"]
+    )
+    assert compile_definition(definition)["warnings"] == []
+
+
+def test_browser_trace_does_not_duplicate_existing_acquire_and_refreshes_after_release():
+    definition = definition_from_trace([
+        {"tool": "aifree.browser+control", "arguments": {"action": "acquire"}},
+        {"tool": "aifree.browser+tab", "arguments": {"action": "reload"}},
+        {"tool": "aifree.browser+wait", "arguments": {"ms": 100}},
+        {"tool": "aifree.browser+control", "arguments": {"action": "release"}},
+        {"tool": "aifree.browser+action", "arguments": {"action": "press_key", "key": "Escape"}},
+    ], name="Acquire lifecycle")
+
+    acquire_steps = [
+        step for step in definition["steps"].values()
+        if step.get("toolRef", {}).get("name") == "aifree.browser+control"
+        and step.get("arguments", {}).get("action") == "acquire"
+    ]
+    assert len(acquire_steps) == 2
+    assert "aifree_browser_control_acquire_2" in definition["steps"]
 
 
 def test_trace_semantic_ids_include_action_and_suffix_duplicates():
@@ -283,7 +413,10 @@ def test_browser_workflow_without_initial_environment_contract_is_rejected():
     definition["steps"]["read_first"]["toolRef"]["name"] = "aifree.browser+observe"
     with pytest.raises(WorkflowValidationError) as raised:
         compile_definition(definition)
-    assert any("initialEnvironment" in item for item in raised.value.errors)
+    message = " ".join(raised.value.errors)
+    assert "initialEnvironment requires all three fields" in message
+    assert "browser+tab reload/replace" in message
+    assert "browser+wait/observe" in message
 
 
 def test_browser_initial_environment_requires_reload_before_ready_step():
@@ -294,7 +427,9 @@ def test_browser_initial_environment_requires_reload_before_ready_step():
     definition["compatibility"]["initialEnvironment"]["resetStepId"] = "aifree_browser_wait"
     with pytest.raises(WorkflowValidationError) as raised:
         compile_definition(definition)
-    assert any("reset step must call browser+tab" in item for item in raised.value.errors)
+    message = " ".join(raised.value.errors)
+    assert "initialEnvironment requires all three fields" in message
+    assert "reset step must call browser+tab" in message
 
 
 def test_ai_review_step_is_compiled_as_a_result_producer():

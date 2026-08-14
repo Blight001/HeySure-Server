@@ -15,6 +15,7 @@ from api.services.workflows.card_service import create_card
 from api.services.workflows.compiler import WorkflowValidationError
 from api.services.workflows.patch_service import patch_card_definition
 from api.services.workflows.definition_replace_service import replace_card_definition
+from api.services.workflows.definition_change_service import definition_diff
 from api.services.workflows.recording_service import (
     RecordedToolCall,
     classify_recorded_tool_call,
@@ -69,6 +70,9 @@ def test_partial_patch_creates_new_version_without_replacing_other_fields():
         )
 
         assert result["changed_paths"] == ["/steps/finish/output/value"]
+        assert result["operation_status"] == "applied"
+        assert result["committed"] is True
+        assert result["version_created"] is True
         assert result["version"]["version_number"] == 2
         assert result["version"]["definition"]["inputSchema"] == {"type": "object"}
         assert result["version"]["definition"]["steps"]["finish"]["output"]["value"] == 2
@@ -77,6 +81,76 @@ def test_partial_patch_creates_new_version_without_replacing_other_fields():
                 session, card=card, user_id=user.id, base_version_id=base,
                 operations=[{"op": "replace", "path": "/steps/finish/output/value", "value": 3}],
             )
+
+
+def test_patch_dry_run_is_validated_without_committing_or_creating_a_version():
+    with Session(_database()) as session:
+        user = _user(session)
+        card = create_card(session, user.id, CardCreate(name="Patch preview", definition=_definition()))
+        base = card.latest_version_id
+
+        result = patch_card_definition(
+            session, card=card, user_id=user.id, base_version_id=base,
+            operations=[{"op": "replace", "path": "/steps/finish/output/value", "value": 9}],
+            dry_run=True,
+        )
+
+        session.refresh(card)
+        versions = session.exec(
+            select(WorkflowCardVersion).where(WorkflowCardVersion.card_id == card.id)
+        ).all()
+        assert result["operation_status"] == "validated"
+        assert result["applied"] is False
+        assert result["committed"] is False
+        assert result["version_created"] is False
+        assert result["version"] is None
+        assert result["diff"]["changed_paths"] == ["/steps/finish/output/value"]
+        assert card.latest_version_id == base
+        assert len(versions) == 1
+
+
+def test_definition_diff_summarizes_added_removed_and_rewired_steps():
+    with Session(_database()) as session:
+        user = _user(session)
+        original = {
+            "schemaVersion": 1, "startStepId": "first",
+            "steps": {
+                "first": {"type": "delay", "delaySeconds": 1, "next": "old"},
+                "old": {"type": "end"},
+            },
+            "limits": {"timeoutSeconds": 30, "maxTransitions": 3}, "output": {},
+        }
+        card = create_card(session, user.id, CardCreate(name="Readable diff", definition=original))
+        replacement = {
+            "schemaVersion": 1, "startStepId": "first",
+            "steps": {
+                "first": {"type": "delay", "delaySeconds": 2, "next": "new"},
+                "new": {"type": "end"},
+            },
+            "limits": {"timeoutSeconds": 30, "maxTransitions": 3}, "output": {},
+        }
+
+        result = replace_card_definition(
+            session, card=card, user_id=user.id, base_version_id=card.latest_version_id,
+            definition=replacement, dry_run=True,
+        )
+
+        by_step = {item["step_id"]: item for item in result["diff"]["step_changes"]}
+        assert by_step["old"]["change"] == "removed"
+        assert by_step["new"]["change"] == "added"
+        assert by_step["first"]["fields"] == ["delaySeconds", "next"]
+        assert "next: old → new" in by_step["first"]["summary"]
+
+
+def test_definition_diff_reports_nested_argument_fields_without_echoing_values():
+    before = {"steps": {"publish": {"type": "mcp", "arguments": {"title": "old"}, "next": "end"}}}
+    after = {"steps": {"publish": {"type": "mcp", "arguments": {"title": "new"}, "next": "review"}}}
+
+    change = definition_diff(before, after)["step_changes"][0]
+
+    assert change["fields"] == ["arguments.title", "next"]
+    assert "arguments.title 已变更" in change["summary"]
+    assert "old" not in change["summary"] and "new" not in change["summary"]
 
 
 def test_replace_definition_dry_run_validates_and_does_not_create_version():

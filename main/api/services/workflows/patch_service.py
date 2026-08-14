@@ -6,12 +6,13 @@ from copy import deepcopy
 import json
 from typing import Any, Dict, Iterable, List
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from api.models import WorkflowCard, WorkflowCardVersion
 
 from .card_service import update_card, version_payload
 from .compiler import WorkflowValidationError
+from .definition_change_service import change_status, definition_diff, prepare_definition_change
 from .schemas import CardUpdate
 
 
@@ -19,6 +20,14 @@ PATCHABLE_ROOTS = {
     "name", "description", "inputSchema", "startStepId", "steps", "limits",
     "output", "requiredCapabilities", "compatibility",
 }
+
+
+def _card_for_change(session: Session, card: WorkflowCard, *, dry_run: bool) -> WorkflowCard:
+    if dry_run:
+        return card
+    return session.exec(
+        select(WorkflowCard).where(WorkflowCard.id == card.id).with_for_update()
+    ).one()
 
 
 def _load(raw: str) -> Dict[str, Any]:
@@ -116,8 +125,10 @@ def patch_card_definition(
     user_id: int,
     base_version_id: str,
     operations: Iterable[Dict[str, Any]],
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     ops = list(operations)
+    card = _card_for_change(session, card, dry_run=dry_run)
     if not base_version_id or card.latest_version_id != base_version_id:
         raise WorkflowValidationError(["card changed since base_version_id; reload before applying a patch"])
     if not 1 <= len(ops) <= 100:
@@ -135,6 +146,28 @@ def patch_card_definition(
         device_ids = []
     if not isinstance(device_ids, list):
         device_ids = []
+    prepared = prepare_definition_change(
+        session, user_id=user_id, definition=definition, inherited_device_ids=device_ids,
+    )
+    diff = definition_diff(
+        _load(version.definition_json), prepared["definition"],
+        before_digest=version.definition_digest,
+    )
+    result = {
+        "card_id": card.id,
+        "base_version_id": base_version_id,
+        "version": None,
+        "changed_paths": changed_paths,
+        "validation": {
+            "valid": True,
+            "digest": prepared["digest"],
+            "warnings": prepared["warnings"],
+        },
+        "diff": diff,
+        **change_status(dry_run=dry_run),
+    }
+    if dry_run:
+        return result
     updated = update_card(
         session,
         card,
@@ -146,9 +179,6 @@ def patch_card_definition(
         user_id=user_id,
     )
     created = session.get(WorkflowCardVersion, updated.latest_version_id)
-    return {
-        "card_id": updated.id,
-        "base_version_id": base_version_id,
-        "version": version_payload(created, include_definition=True) if created else None,
-        "changed_paths": changed_paths,
-    }
+    result["version"] = version_payload(created, include_definition=True) if created else None
+    result.update(change_status(dry_run=False, version_created=created is not None))
+    return result

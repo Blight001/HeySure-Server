@@ -27,6 +27,12 @@ MAX_DEPTH = 16
 SENSITIVE_FIELD_NAMES = {
     "authorization", "cookie", "password", "secret", "token", "api_key", "apikey",
 }
+INITIAL_ENVIRONMENT_REQUIREMENTS = (
+    "browser workflow compatibility.initialEnvironment requires all three fields: "
+    "description (non-empty), resetStepId (an existing browser+tab reload/replace step; "
+    "replace also requires arguments.url), and readyStepId (an existing browser+wait/observe step). "
+    "The startStepId chain must reach resetStepId, and resetStepId must reach readyStepId before normal actions"
+)
 
 
 class WorkflowValidationError(ValueError):
@@ -142,9 +148,9 @@ def _initial_environment_errors(definition: Dict[str, Any]) -> List[str]:
     compatibility = definition.get("compatibility", {})
     contract = compatibility.get("initialEnvironment") if isinstance(compatibility, dict) else None
     if contract is None:
-        return ["browser workflow must declare description, resetStepId and readyStepId"]
+        return [INITIAL_ENVIRONMENT_REQUIREMENTS]
     if not isinstance(contract, dict):
-        return ["must be an object"]
+        return [INITIAL_ENVIRONMENT_REQUIREMENTS, "initialEnvironment must be an object"]
     errors = []
     if not str(contract.get("description") or "").strip():
         errors.append("description is required")
@@ -153,7 +159,7 @@ def _initial_environment_errors(definition: Dict[str, Any]) -> List[str]:
     errors.extend(_reset_step_errors(steps.get(reset_id)))
     errors.extend(_ready_step_errors(steps.get(ready_id)))
     errors.extend(_initial_topology_errors(definition, steps, reset_id, ready_id))
-    return errors
+    return [INITIAL_ENVIRONMENT_REQUIREMENTS, *errors] if errors else []
 
 
 def _validate_expression(expression: Any, path: str, errors: List[str], depth: int = 0) -> None:

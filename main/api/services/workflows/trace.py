@@ -1,9 +1,12 @@
 """Safe conversion of explicit structured MCP calls into a review-only draft."""
 
+from __future__ import annotations
+
 import re
 from typing import Any, Dict
 
 from .compiler import WorkflowValidationError
+from .recording_trace_browser import prepare_browser_calls, stabilize_browser_refs
 
 
 SENSITIVE_KEYS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey"}
@@ -119,6 +122,7 @@ def _trace_steps(
     calls: list[Dict[str, Any]],
     step_ids: list[str],
     save_names: list[str],
+    target_resolvers: Dict[int, Dict[str, Any]],
     properties: Dict[str, Any],
     required: list[str],
 ) -> Dict[str, Any]:
@@ -140,17 +144,21 @@ def _trace_steps(
             "next": next_step,
             "onError": "fail",
         }
+        if index - 1 in target_resolvers:
+            steps[step_id]["targetResolver"] = target_resolvers[index - 1]
     steps["finish"] = {"type": "end"}
     return steps
 
 
 def definition_from_trace(calls: list[Dict[str, Any]], *, name: str, description: str = "") -> Dict[str, Any]:
     _validate_calls(calls)
+    calls, detached_warnings = prepare_browser_calls(calls)
     properties: Dict[str, Any] = {}
     required: list[str] = []
     step_ids = _semantic_step_ids(calls)
     save_names = [f"{step_id}_result" for step_id in step_ids]
-    steps = _trace_steps(calls, step_ids, save_names, properties, required)
+    target_resolvers = stabilize_browser_refs(calls, save_names)
+    steps = _trace_steps(calls, step_ids, save_names, target_resolvers, properties, required)
     definition = {
         "schemaVersion": 1,
         "name": name,
@@ -166,6 +174,13 @@ def definition_from_trace(calls: list[Dict[str, Any]], *, name: str, description
         "steps": steps,
         "output": {"lastResult": f"${{steps.{save_names[-1]}.result}}"},
     }
+    recording_warnings = detached_warnings + [
+        {"code": code, "stepId": step_ids[index]}
+        for index, call in enumerate(calls)
+        for code in call.get("_recordingWarnings", [])
+    ]
+    if recording_warnings:
+        definition["recordingWarnings"] = recording_warnings
     compatibility = _initial_environment(calls, step_ids)
     if compatibility:
         definition["compatibility"] = compatibility

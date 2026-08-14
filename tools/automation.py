@@ -43,6 +43,7 @@ from api.services.workflows.secrets import decrypt_json
 from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.patch_service import patch_card_definition
 from api.services.workflows.definition_replace_service import replace_card_definition
+from api.services.workflows.payload_selection import select_card_payload
 from api.services.workflows.recording_service import (
     active_recording,
     recording_payload,
@@ -82,6 +83,10 @@ AUTOMATION_DEFINITION_GUIDANCE = (
     "可用 onError 指向拒绝或失败分支；⑤ end：{type:'end'}，可选 output。"
     "参数和输出可用 ${input.<字段>}、${steps.<saveAs>.result.<字段>}、"
     "${steps.<saveAs>.error.<字段>} 模板；input 字段必须先在 inputSchema.properties 声明。"
+    "浏览器工作流必须声明 compatibility.initialEnvironment 的 description、resetStepId、readyStepId；"
+    "reset 必须是 browser+tab reload/replace（replace 还需 url），ready 必须是 browser+wait/observe，"
+    "且 start→reset→ready 必须在初始化 next 链上。绑定契约设备在线时，服务端自动回填并校验 schemaDigest；"
+    "不要手工猜测摘要，设备离线时应先让设备上线。"
     "所有跳转目标必须存在，流程不得成环，且每条可达路径最终必须到达 end。"
 )
 
@@ -256,7 +261,7 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             payload = card_payload(card)
             if args.get("version_id"):
                 payload["version"] = version_payload(_version(session, card, str(args["version_id"])), include_definition=True)
-            return payload
+            return select_card_payload(payload, args)
         if action in {"edit", "update"}:
             return _edit_card(session, card, args, user_id)
         if action == "patch":
@@ -266,6 +271,7 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
                 user_id=user_id,
                 base_version_id=str(args.get("base_version_id") or ""),
                 operations=args.get("operations") if isinstance(args.get("operations"), list) else [],
+                dry_run=bool(args.get("dry_run")),
             )
         if action == "replace_definition":
             if "definition" not in args:
@@ -762,6 +768,36 @@ AUTOMATION_MANAGE_SCHEMA = {
         },
         "card_id": {"type": "string"},
         "version_id": {"type": "string"},
+        "fields": {
+            "type": "object",
+            "additionalProperties": False,
+            "description": (
+                "仅用于 action=get 的结构化返回字段过滤；省略时保持原完整返回。card 选择卡片顶层字段，"
+                "definition 选择 definition 顶层字段，version 选择指定版本的顶层字段。步骤选择启用时，"
+                "card 必须包含 definition 或 version，对应 definition 字段必须包含 steps。"
+            ),
+            "properties": {
+                "card": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
+                "definition": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
+                "version": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
+            },
+        },
+        "step_ids": {
+            "type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 100,
+            "description": "action=get 时按给定顺序只返回指定步骤；与 tail、步骤分页参数互斥。",
+        },
+        "step_offset": {
+            "type": "integer", "minimum": 0, "maximum": 10000,
+            "description": "action=get 的步骤分页偏移，默认 0；与 step_ids、tail 互斥。",
+        },
+        "step_limit": {
+            "type": "integer", "minimum": 1, "maximum": 100,
+            "description": "action=get 的步骤分页数量，默认 20；与 step_ids、tail 互斥。",
+        },
+        "tail": {
+            "type": "integer", "minimum": 1, "maximum": 100,
+            "description": "action=get 时只返回 definition 最后 N 个步骤；与 step_ids、步骤分页参数互斥。",
+        },
         "base_version_id": {
             "type": "string",
             "description": "action=patch/replace_definition 必填，必须等于最新版本 ID，用于防止 AI 覆盖其他人的新修改。",
@@ -811,8 +847,9 @@ AUTOMATION_MANAGE_SCHEMA = {
         "dry_run": {
             "type": "boolean",
             "description": (
-                "仅用于 replace_definition；true 时执行完整编译、设备契约校验并返回结构化 diff，"
-                "但不修改卡片、不提交事务、不创建版本。确认后设为 false 才创建不可变新版本。"
+                "用于 patch/replace_definition；true 时执行完整编译、设备契约校验并返回路径级和步骤级 diff，"
+                "但不修改卡片、不提交事务、不创建版本。响应会明确 applied/committed/version_created；"
+                "确认后设为 false 才原子创建不可变新版本。"
             ),
         },
         "calls": {

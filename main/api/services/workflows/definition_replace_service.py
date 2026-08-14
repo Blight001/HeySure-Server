@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from api.models import WorkflowCard, WorkflowCardVersion
 
-from .card_service import _snapshot_contracts, update_card, version_payload
-from .compiler import WorkflowValidationError, compile_definition, definition_digest
+from .card_service import update_card, version_payload
+from .compiler import WorkflowValidationError
+from .definition_change_service import change_status, definition_diff, prepare_definition_change
 from .schemas import CardUpdate
-
-
-MAX_DIFF_PATHS = 1000
 
 
 def _load(raw: str, fallback: Any) -> Any:
@@ -23,81 +20,6 @@ def _load(raw: str, fallback: Any) -> Any:
         return json.loads(raw or "")
     except Exception:
         return fallback
-
-
-def _pointer(path: str, key: object) -> str:
-    escaped = str(key).replace("~", "~0").replace("/", "~1")
-    return f"{path}/{escaped}"
-
-
-def _diff_paths(before: Any, after: Any) -> Dict[str, Any]:
-    added: List[str] = []
-    removed: List[str] = []
-    changed: List[str] = []
-    total = 0
-
-    def append(target: List[str], path: str) -> None:
-        nonlocal total
-        total += 1
-        if sum(map(len, (added, removed, changed))) < MAX_DIFF_PATHS:
-            target.append(path or "/")
-
-    def walk(left: Any, right: Any, path: str = "") -> None:
-        if isinstance(left, dict) and isinstance(right, dict):
-            for key in sorted(left.keys() - right.keys()):
-                append(removed, _pointer(path, key))
-            for key in sorted(right.keys() - left.keys()):
-                append(added, _pointer(path, key))
-            for key in sorted(left.keys() & right.keys()):
-                walk(left[key], right[key], _pointer(path, key))
-            return
-        if isinstance(left, list) and isinstance(right, list):
-            if left != right:
-                append(changed, path)
-            return
-        if left != right:
-            append(changed, path)
-
-    walk(before, after)
-    return {
-        "added_paths": added,
-        "removed_paths": removed,
-        "changed_paths": changed,
-        "change_count": total,
-        "truncated": total > MAX_DIFF_PATHS,
-    }
-
-
-def _prepare_definition(
-    session: Session,
-    *,
-    user_id: int,
-    definition: Dict[str, Any],
-    inherited_device_ids: List[str],
-) -> Dict[str, Any]:
-    candidate = deepcopy(definition)
-    candidate.setdefault("schemaVersion", 1)
-    compiled = compile_definition(candidate)
-    normalized = compiled["definition"]
-    contracts, bound_ids = _snapshot_contracts(
-        session, user_id, normalized, device_ids=inherited_device_ids,
-    )
-    selected_default = str(normalized.get("defaultDeviceId") or "").strip()
-    if not selected_default and bound_ids:
-        selected_default = bound_ids[0]
-    if selected_default and selected_default not in bound_ids:
-        raise WorkflowValidationError(["default device must be one of the selected contract device IDs"])
-    if selected_default:
-        normalized["defaultDeviceId"] = selected_default
-    normalized["contractDeviceIds"] = bound_ids
-    return {
-        "definition": normalized,
-        "contracts": contracts,
-        "device_ids": bound_ids,
-        "default_device_id": selected_default,
-        "digest": definition_digest(normalized),
-        "warnings": compiled["warnings"],
-    }
 
 
 def replace_card_definition(
@@ -110,6 +32,10 @@ def replace_card_definition(
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Validate a complete definition and optionally save it as the next version."""
+    if not dry_run:
+        card = session.exec(
+            select(WorkflowCard).where(WorkflowCard.id == card.id).with_for_update()
+        ).one()
     if not base_version_id or card.latest_version_id != base_version_id:
         raise WorkflowValidationError([
             "card changed since base_version_id; reload before replacing the definition"
@@ -122,22 +48,19 @@ def replace_card_definition(
     inherited_ids = _load(base.contract_device_ids_json, [])
     if not isinstance(inherited_ids, list):
         inherited_ids = []
-    prepared = _prepare_definition(
+    prepared = prepare_definition_change(
         session,
         user_id=user_id,
         definition=definition,
         inherited_device_ids=inherited_ids,
     )
     before = _load(base.definition_json, {})
-    diff = _diff_paths(before, prepared["definition"])
-    diff.update({
-        "before_digest": base.definition_digest or definition_digest(before),
-        "after_digest": prepared["digest"],
-    })
+    diff = definition_diff(
+        before, prepared["definition"], before_digest=base.definition_digest,
+    )
     result = {
         "card_id": card.id,
         "base_version_id": base_version_id,
-        "dry_run": bool(dry_run),
         "validation": {
             "valid": True,
             "digest": prepared["digest"],
@@ -145,6 +68,7 @@ def replace_card_definition(
         },
         "diff": diff,
         "version": None,
+        **change_status(dry_run=dry_run),
     }
     if dry_run:
         return result
@@ -160,4 +84,5 @@ def replace_card_definition(
     )
     created = session.get(WorkflowCardVersion, updated.latest_version_id)
     result["version"] = version_payload(created, include_definition=True) if created else None
+    result.update(change_status(dry_run=False, version_created=created is not None))
     return result
