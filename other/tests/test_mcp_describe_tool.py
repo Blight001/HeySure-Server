@@ -1,6 +1,7 @@
 from tools.introspection import _mcp_describe_tool
 from fastapi import HTTPException
 import pytest
+from types import MappingProxyType, SimpleNamespace
 
 
 @pytest.fixture(autouse=True)
@@ -8,9 +9,16 @@ def _without_online_device_tools(monkeypatch):
     monkeypatch.setattr("tools.introspection.online_tool_defs_for_user", lambda _user_id: {})
 
 
-class _DisabledConfig:
-    mcp_enabled = False
-    mcp_tools = "[]"
+def _capability(name, description="", schema=None, *, destructive=False, implementation=None):
+    return SimpleNamespace(
+        canonical_name=name,
+        description=description,
+        input_schema=MappingProxyType(schema or {}),
+        implementation=(
+            MappingProxyType(implementation) if implementation is not None else None
+        ),
+        destructive=destructive,
+    )
 
 
 def test_describe_tool_dedupes_same_tool_from_tool_and_tools():
@@ -67,27 +75,13 @@ def test_describe_tool_accepts_copied_catalog_line():
 def test_describe_tool_requires_current_ai_eligibility(monkeypatch):
     import tools.introspection as introspection
 
-    class _Exec:
-        def where(self, *_args, **_kwargs):
-            return self
-
-        def first(self):
-            return _DisabledConfig()
-
-    class _Session:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def exec(self, *_args, **_kwargs):
-            return _Exec()
-
-    monkeypatch.setattr(introspection, "Session", _Session)
+    monkeypatch.setattr(
+        introspection,
+        "_scoped_eligible_capabilities",
+        lambda _user_id, _ai_config_id: {
+            "mcp.describe+tool": _capability("mcp.describe+tool", "读取工具说明"),
+        },
+    )
 
     with pytest.raises(HTTPException) as raised:
         _mcp_describe_tool(
@@ -105,8 +99,11 @@ def test_describe_v2_reports_unambiguous_counts_and_next_turn(monkeypatch):
 
     monkeypatch.setattr(
         introspection,
-        "_allowed_tool_names",
-        lambda _user_id, _ai_config_id: {"mcp.describe+tool", "workspace.search"},
+        "_scoped_eligible_capabilities",
+        lambda _user_id, _ai_config_id: {
+            "mcp.describe+tool": _capability("mcp.describe+tool", "读取工具说明"),
+            "workspace.search": _capability("workspace.search", "联网搜索"),
+        },
     )
 
     result = _mcp_describe_tool(
@@ -134,8 +131,13 @@ def test_describe_query_only_searches_current_ai_eligible_tools(monkeypatch):
 
     monkeypatch.setattr(
         introspection,
-        "_allowed_tool_names",
-        lambda _user_id, _ai_config_id: {"mcp.describe+tool", "workspace.search"},
+        "_scoped_eligible_capabilities",
+        lambda _user_id, _ai_config_id: {
+            "mcp.describe+tool": _capability("mcp.describe+tool", "读取工具说明"),
+            "workspace.search": _capability(
+                "workspace.search", "联网搜索", {"type": "object"}
+            ),
+        },
     )
 
     result = _mcp_describe_tool(
@@ -146,6 +148,43 @@ def test_describe_query_only_searches_current_ai_eligible_tools(monkeypatch):
 
     assert [item["name"] for item in result["tools"]] == ["workspace.search"]
     assert result["availability"]["eligible_total"] == 2
+
+
+def test_describe_query_searches_bound_capability_description(monkeypatch):
+    """Query uses the AI-scoped capability metadata, not the global registry."""
+    import tools.introspection as introspection
+
+    monkeypatch.setattr(
+        introspection,
+        "_scoped_eligible_capabilities",
+        lambda _user_id, _ai_config_id: {
+            "device.custom_flow": _capability(
+                "device.custom_flow",
+                "执行当前设备绑定的自动化发布流程",
+                {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                },
+                destructive=True,
+                implementation={"kind": "device_script"},
+            ),
+        },
+    )
+
+    result = _mcp_describe_tool(
+        user_id=1,
+        args={"query": "自动化"},
+        ai_config_id=123,
+    )
+
+    assert [item["name"] for item in result["tools"]] == ["device.custom_flow"]
+    assert result["tools"][0]["description"] == "执行当前设备绑定的自动化发布流程"
+    assert result["tools"][0]["inputSchema"]["properties"]["title"]["type"] == "string"
+    assert result["availability"] == {
+        "eligible_total": 1,
+        "returned_count": 1,
+        "eligible_not_returned_count": 0,
+    }
 
 
 def test_describe_tool_accepts_browser_dot_alias_for_endpoint_tool(monkeypatch):

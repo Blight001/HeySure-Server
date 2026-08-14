@@ -1,7 +1,6 @@
 """MCP routes: list permitted tools for a config (``/tools``), execute a tool call
 with permission checks (``/call``), and reload the tool registry (internal)."""
 
-import json
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -11,18 +10,7 @@ from sqlmodel import Session, select
 from api.database import get_session
 from api.devices.presence import online_tool_defs
 from mcp_runtime.mcp import registry
-from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from mcp_runtime.mcp.loader import reload_registry
-from mcp_runtime.mcp.permissions import (
-    CONFIGURABLE_ROLES,
-    ROLE_LABELS_ZH,
-    config_role_tier,
-    default_role_permissions,
-    effective_allowed_for_config,
-    parse_role_permissions,
-    role_tool_options,
-    tool_min_role,
-)
 from api.models import AssistantAIConfig
 from .auth import get_current_user
 from api.runtime.internal_http import require_internal_token
@@ -34,10 +22,8 @@ from connector_runtime.dispatch.desktop_device_tools import (
     endpoint_tools_for_config,
     is_endpoint_agent_tool,
     is_workshop_tool,
-    strip_endpoint_tool_config_names,
 )
 from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
-from api.services.tasks.task_system import with_workspace_read_by_name_compat
 
 router = APIRouter()
 PREFIX = "/api/mcp"
@@ -96,7 +82,6 @@ async def list_mcp_tools(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    cfg = None
     allowed_tools = None
     if ai_config_id is not None:
         cfg = session.exec(
@@ -107,59 +92,14 @@ async def list_mcp_tools(
         ).first()
         if not cfg:
             raise HTTPException(status_code=404, detail="AI config not found")
-        if cfg.mcp_enabled:
-            try:
-                parsed_allowed = json.loads(cfg.mcp_tools or "[]")
-                if not isinstance(parsed_allowed, list):
-                    raise ValueError("mcp_tools must be a JSON array")
-                allowed_tools = {str(item).strip() for item in parsed_allowed if isinstance(item, str) and str(item).strip()}
-                from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
-                allowed_tools = fully_clean_tool_names(allowed_tools)
-                allowed_tools = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(allowed_tools))
-                allowed_tools.update(MCP_INTROSPECTION_TOOLS)
-                allowed_tools.update(endpoint_bridge_tools_for_config(ai_config_id, user.id))
-                allowed_tools.update(endpoint_tools_for_config(ai_config_id, user.id))
-            except Exception:
-                raise HTTPException(status_code=400, detail="Invalid AI MCP tool config")
-        else:
-            allowed_tools = set()
+        from api.services.mcp.capability_view import scoped_tool_view_for_ids
 
-    # System built-in server MCPs (non-library) are direct-callable; force-include
-    # them here so they appear with allowedForCurrentAi=true and are not filtered.
-    # Only library tools still depend on binding (handled later in groups + runtime).
-    if (cfg is None or getattr(cfg, 'mcp_enabled', True)):
-        try:
-            from mcp_runtime.mcp import registry as _reg
-            from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS as _lib
-            _sys = {str(t.get("name") or "").strip() for t in _reg.list_tools() if t.get("name")}
-            _sys -= set(_lib or ())
-            if allowed_tools is None:
-                allowed_tools = set()
-            allowed_tools |= _sys
-        except Exception:
-            pass
-
-    # Server toolbox tools are now primarily granted via the bound toolbox's DeviceMcpScope
-    # (edited in 工具箱 MCP 权限). Augment here so that /tools and catalog reflect the
-    # actual selectable tools after binding (for device-like display). System builtins
-    # are already forced above and not gated.
-    if ai_config_id is not None and (cfg is None or getattr(cfg, 'mcp_enabled', True)):
-        try:
-            from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
-            tb = toolbox_tools_for_config(ai_config_id, user.id)
-            if allowed_tools is None:
-                allowed_tools = set()
-            allowed_tools |= tb
-        except Exception:
-            pass
+        allowed_tools = set(scoped_tool_view_for_ids(user.id, ai_config_id).eligible_names)
 
     tools = registry.list_tools()
     for tool in tools:
-        name = str(tool.get("name") or "")
-        tool["minRole"] = tool_min_role(name)
         tool["description"] = str(tool.get("description") or "").strip()
         tool["inputSchema"] = tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {}
-    tool_names = {str(tool.get("name") or "") for tool in tools}
     endpoint_defs = online_tool_defs()
     endpoint_tool_defs = [
         {
@@ -226,16 +166,6 @@ async def list_mcp_tools(
         "promptToolsAiConfigId": ai_config_id,
         "promptToolsMcpEnabled": True if cfg is None else bool(cfg.mcp_enabled),
         "userId": user.id,
-        "roleOrder": CONFIGURABLE_ROLES,
-        "roleLabels": ROLE_LABELS_ZH,
-        # Per-role defaults for checked state and reset-to-default.
-        "roleDefaults": default_role_permissions(tool_names),
-        # Per-role visible/configurable options. This may include tools that are
-        # not checked by default.
-        "roleOptions": role_tool_options(tool_names),
-        # The admin's currently configured per-role allow-list (may be empty,
-        # meaning "use defaults").
-        "rolePermissions": parse_role_permissions(user),
     }
 
 
@@ -269,56 +199,9 @@ async def call_mcp_tool(
             raise HTTPException(status_code=404, detail="AI config not found")
         if not cfg.mcp_enabled:
             raise HTTPException(status_code=400, detail="MCP is disabled for this AI")
-        try:
-            parsed_allowed = json.loads(cfg.mcp_tools or "[]")
-            if not isinstance(parsed_allowed, list):
-                raise ValueError("mcp_tools must be a JSON array")
-            allowed_tools = {str(item).strip() for item in parsed_allowed if isinstance(item, str) and str(item).strip()}
-            from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names as _fully_clean
-            allowed_tools = _fully_clean(allowed_tools)
-            allowed_tools = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(allowed_tools))
-            allowed_tools.update(MCP_INTROSPECTION_TOOLS)
-            allowed_tools.update(endpoint_bridge_tools_for_config(req.ai_config_id, user.id))
-            allowed_tools.update(endpoint_tools_for_config(req.ai_config_id, user.id))
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid AI MCP tool config")
+        from api.services.mcp.capability_view import ensure_tool_eligible
 
-        # System built-in MCPs (server registry non-library) allow direct call.
-        # Force them into allowed so the membership check below passes for them.
-        is_server_builtin = False
-        try:
-            from mcp_runtime.mcp import registry as _reg
-            from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS as _lib
-            _sys_direct = {str(t.get("name") or "").strip() for t in _reg.list_tools() if t.get("name")}
-            _sys_direct -= set(_lib or ())
-            allowed_tools |= _sys_direct
-            is_server_builtin = (
-                _reg.has(req.tool)
-                and req.tool not in set(_lib or ())
-                and not is_endpoint_agent_tool(req.tool)
-            )
-        except Exception:
-            pass
-
-        if not is_server_builtin and req.tool not in allowed_tools:
-            raise HTTPException(status_code=403, detail=f"Tool not allowed for this AI: {req.tool}")
-
-        # Augment with toolbox scope (for device display / grouping)
-        try:
-            from connector_runtime.dispatch.desktop_device_tools import toolbox_tools_for_config
-            allowed_tools |= toolbox_tools_for_config(req.ai_config_id, user.id)
-        except Exception:
-            pass
-
-        # Enforce the role ceiling: known registry tools must be within the set
-        # permitted for this AI's role tier, regardless of its saved allow-list.
-        role_allowed = effective_allowed_for_config(user, cfg)
-        bridge_tools = endpoint_bridge_tools_for_config(req.ai_config_id, user.id)
-        if registry.has(req.tool) and req.tool not in role_allowed and req.tool not in bridge_tools:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Tool not permitted for role {config_role_tier(cfg)}: {req.tool}",
-            )
+        ensure_tool_eligible(user.id, req.ai_config_id, req.tool)
 
     if is_endpoint_agent_tool(req.tool):
         # The Connector process owns live endpoint sockets in split deployments.

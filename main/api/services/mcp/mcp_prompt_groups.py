@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional, Set
 
 from api.devices.mcp_permissions import get_scope
 from connector_runtime.dispatch.desktop_device_tools import (
-    _config_selected_tool_names,
     agent_endpoint_tools,
     device_type_of,
     is_endpoint_agent_tool,
@@ -95,9 +94,9 @@ def automation_card_prompt_sections(
         return []
     catalog = automation_card_catalog_text(user_id, ai_config_id)
     policy = (
-        "自动化卡片设备约束：创建或编辑含设备 MCP 节点的卡片前，先确认实际设备 ID 和工具；"
-        "请求必须用 device_ids 声明引用的全部契约设备，并为每个设备 MCP 节点设置 toolRef.deviceId。"
-        "不得创建未绑定设备的设备 MCP 卡片。启动已保存契约设备的卡片时可省略 device_id。"
+        "自动化卡片是服务器通用编排，不是 AI-FREE 浏览器卡片。automation.manage 本身无需绑定设备。"
+        "mcp 节点可调用当前 AI 已绑定的任意设备工具，不同节点可以跨设备；每个节点设置 "
+        "toolRef.deviceId，服务端自动汇总设备，无需另传 device_ids。没有 mcp 节点的卡片无需设备。"
     )
     return [f"{policy}\n当前 AI 可用自动化卡片\n{catalog}" if catalog else policy]
 
@@ -135,7 +134,11 @@ _PRESENCE_TYPE_FLAG = {
 
 
 def _presence_agent_dict(
-    device_id: str, device_type: str, caps, name: str = ""
+    device_id: str,
+    device_type: str,
+    caps,
+    name: str = "",
+    description: str = "",
 ) -> Dict[str, Any]:
     """Synthesize the agent-like record the group builder expects from a DB
     presence row, so ``device_type_of`` / ``agent_endpoint_tools`` keep working
@@ -150,6 +153,7 @@ def _presence_agent_dict(
         # 设备) classifiable, otherwise their group renders with zero tools.
         "deviceType": str(device_type or "").strip(),
         "platform": device_type,
+        "aiDescription": str(description or "").strip(),
         "capabilities": sorted({str(c).strip() for c in (caps or []) if str(c).strip()}),
     }
     flag = _PRESENCE_TYPE_FLAG.get(str(device_type or "").strip())
@@ -165,31 +169,44 @@ def _agents_for_prompt_groups(user_id: int, ai_config_id: Optional[int]) -> List
     made the ai-runtime-built prompt drop every device group (it owns no sockets)
     while the gateway-built /system-prompt-preview still showed them. See the
     INVARIANT note in chat_runtime_helpers.build_runtime_system_prompt_and_tools."""
-    from api.devices.presence import (
-        online_device_display_names,
-        online_devices_for_config,
-        online_tool_catalog_for_user,
+    from api.devices.presence import online_devices_for_config, online_tool_catalog_for_user
+
+    display_names, prompt_metadata = _safe_online_device_metadata(user_id)
+    if ai_config_id is not None:
+        return _configured_prompt_agents(
+            online_devices_for_config(user_id, ai_config_id),
+            display_names,
+            prompt_metadata,
+        )
+    return _all_prompt_agents(
+        online_tool_catalog_for_user(user_id),
+        display_names,
+        prompt_metadata,
     )
 
-    try:
-        display_names = online_device_display_names(user_id)
-    except Exception:
-        display_names = {}
+
+def _configured_prompt_agents(rows, display_names, prompt_metadata):
     agents: List[Dict[str, Any]] = []
     seen: Set[str] = set()
-    if ai_config_id is not None:
-        for device_id, device_type, caps in online_devices_for_config(user_id, ai_config_id):
-            did = str(device_id or "").strip()
-            if not did or did in seen:
-                continue
-            seen.add(did)
-            agents.append(
-                _presence_agent_dict(
-                    did, str(device_type or "").strip(), caps, name=display_names.get(did, "")
-                )
-            )
-        return agents
-    for entry in online_tool_catalog_for_user(user_id):
+    for device_id, device_type, caps in rows:
+        did = str(device_id or "").strip()
+        if not did or did in seen:
+            continue
+        seen.add(did)
+        agents.append(_presence_agent_dict(
+            did,
+            str(device_type or "").strip(),
+            caps,
+            name=display_names.get(did, ""),
+            description=str(prompt_metadata.get(did, {}).get("purpose") or ""),
+        ))
+    return agents
+
+
+def _all_prompt_agents(entries, display_names, prompt_metadata):
+    agents: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for entry in entries:
         did = str(entry.get("device_id") or "").strip()
         if not did or did in seen:
             continue
@@ -201,9 +218,27 @@ def _agents_for_prompt_groups(user_id: int, ai_config_id: Optional[int]) -> List
                 str(entry.get("device_type") or "").strip(),
                 caps,
                 name=display_names.get(did, ""),
+                description=str(prompt_metadata.get(did, {}).get("purpose") or ""),
             )
         )
     return agents
+
+
+def _safe_online_device_metadata(user_id: int) -> tuple[Dict[str, str], Dict[str, dict]]:
+    from api.devices.presence import (
+        online_device_display_names,
+        online_device_prompt_metadata,
+    )
+
+    try:
+        display_names = online_device_display_names(user_id)
+    except Exception:
+        display_names = {}
+    try:
+        prompt_metadata = online_device_prompt_metadata(user_id)
+    except Exception:
+        prompt_metadata = {}
+    return display_names, prompt_metadata
 
 
 def _tool_names_for_agent(
@@ -224,6 +259,142 @@ def _tool_names_for_agent(
     return {name for name in names if is_endpoint_agent_tool(name)}
 
 
+def _tool_map(prompt_tools: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    return {
+        str(tool.get("name") or "").strip(): tool
+        for tool in prompt_tools
+        if str(tool.get("name") or "").strip()
+    }
+
+
+def _workspace_names(by_name, allowed_tools) -> Set[str]:
+    if allowed_tools is None:
+        return {name for name, tool in by_name.items() if _is_workspace_tool(tool)}
+    return {
+        name for name in allowed_tools
+        if name in by_name and _is_workspace_tool(by_name[name])
+    }
+
+
+def _library_names(workspace_names, allowed_tools, user_id, ai_config_id) -> Set[str]:
+    from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
+
+    names = set(workspace_names) & LIBRARY_BOUND_TOOLS
+    if allowed_tools is not None:
+        names |= set(allowed_tools) & LIBRARY_BOUND_TOOLS
+    if ai_config_id is None:
+        return names
+    try:
+        from api.devices.workshop_bindings import config_bound_to_library
+
+        return names if config_bound_to_library(user_id, ai_config_id) else set()
+    except Exception:
+        return names
+
+
+def _toolbox_group(by_name, workspace_names) -> Dict[str, Any]:
+    from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
+
+    return {
+        "groupKey": "toolbox",
+        "groupLabel": "工具箱 MCP",
+        "groupKind": "workspace",
+        "tools": [
+            by_name[name]
+            for name in sorted(set(workspace_names) - LIBRARY_BOUND_TOOLS)
+            if name in by_name
+        ],
+    }
+
+
+def _device_entries(agents) -> tuple[list[tuple], Dict[str, int]]:
+    entries = []
+    counts: Dict[str, int] = {}
+    for agent in agents:
+        device_id = str(agent.get("id") or "").strip()
+        agent_type = device_type_of(agent)
+        if not device_id or agent_type == "workshop":
+            continue
+        label = _agent_display_name(agent)
+        counts[label] = counts.get(label, 0) + 1
+        entries.append((agent, device_id, agent_type, label))
+    return entries, counts
+
+
+def _fallback_prompt_tool(name, source, device_id="") -> Dict[str, Any]:
+    return {
+        "name": name,
+        "description": "",
+        "inputSchema": {},
+        "destructive": True,
+        "mcpSource": str(source or "desktop"),
+        "deviceId": device_id,
+        "allowedForCurrentAi": True,
+    }
+
+
+def _deduplicated_device_label(label: str, device_id: str, count: int) -> str:
+    if count <= 1:
+        return label
+    suffix = device_id[-4:] if len(device_id) >= 4 else device_id
+    return f"{label}·{suffix}" if suffix else label
+
+
+def _device_groups(by_name, agents, user_id, ai_config_id, allowed_tools):
+    entries, label_counts = _device_entries(agents)
+    groups = []
+    for agent, device_id, agent_type, base_label in entries:
+        names = _tool_names_for_agent(
+            agent,
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            allowed_tools=allowed_tools,
+        )
+        tools = [
+            by_name.get(name) or _fallback_prompt_tool(name, agent_type, device_id)
+            for name in sorted(names)
+        ]
+        label = _deduplicated_device_label(
+            base_label, device_id, label_counts.get(base_label, 0)
+        )
+        groups.append({
+            "groupKey": f"device:{device_id}",
+            "groupLabel": f"{label} MCP",
+            "groupDescription": str(agent.get("aiDescription") or "").strip(),
+            "groupKind": "device",
+            "deviceId": device_id,
+            "deviceType": str(agent_type or ""),
+            "tools": tools,
+        })
+    return groups
+
+
+def _library_group(by_name, names) -> Optional[Dict[str, Any]]:
+    tools = [
+        by_name.get(name) or _fallback_prompt_tool(name, "workshop")
+        for name in sorted(names)
+    ]
+    if not tools:
+        return None
+    return {
+        "groupKey": "library",
+        "groupLabel": "图书馆 MCP",
+        "groupKind": "workspace",
+        "tools": tools,
+    }
+
+
+def _empty_device_group() -> Dict[str, Any]:
+    return {
+        "groupKey": "device:none",
+        "groupLabel": "端侧设备 MCP",
+        "groupKind": "device",
+        "deviceId": "",
+        "deviceType": "",
+        "tools": [],
+    }
+
+
 def build_prompt_tool_groups(
     *,
     user_id: int,
@@ -231,139 +402,19 @@ def build_prompt_tool_groups(
     prompt_tools: List[Dict[str, Any]],
     allowed_tools: Optional[Set[str]],
 ) -> List[Dict[str, Any]]:
-    by_name: Dict[str, Dict[str, Any]] = {}
-    for tool in prompt_tools:
-        name = str(tool.get("name") or "").strip()
-        if name:
-            by_name[name] = tool
-
-    workspace_names: Set[str] = set()
-    if allowed_tools is None:
-        workspace_names = {name for name, tool in by_name.items() if _is_workspace_tool(tool)}
-    else:
-        workspace_names = {
-            name for name in allowed_tools
-            if name in by_name and _is_workspace_tool(by_name[name])
-        }
+    by_name = _tool_map(prompt_tools)
+    workspace_names = _workspace_names(by_name, allowed_tools)
 
     # 工作区（服务端）MCP 再分两组：工具箱（系统自带 MCP，直接可用）与 图书馆（需绑定图书馆）。
     # 工具箱组中的系统工具现在由上游 allowlist 直接带入（不再依赖 toolbox 绑定）。
-    from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
-
-    toolbox_tools = [
-        by_name[name]
-        for name in sorted(workspace_names)
-        if name in by_name and name not in LIBRARY_BOUND_TOOLS
-    ]
-    library_tool_names: Set[str] = {
-        name for name in sorted(workspace_names)
-        if name in by_name and name in LIBRARY_BOUND_TOOLS
-    }
-    # 治理类 manage 工具只存于 AI 配置的 mcp_tools；显式并入图书馆分组。
-    if ai_config_id is not None:
-        library_tool_names |= _config_selected_tool_names(ai_config_id, user_id) & LIBRARY_BOUND_TOOLS
-    if allowed_tools is not None:
-        library_tool_names |= {name for name in allowed_tools if name in LIBRARY_BOUND_TOOLS}
-
-    # Only expose the library group if this specific AI is actually bound to the library.
-    # Otherwise the "图书馆 MCP" group leaks even when not connected.
-    if ai_config_id is not None:
-        try:
-            from api.devices.workshop_bindings import config_bound_to_library
-            if not config_bound_to_library(user_id, ai_config_id):
-                library_tool_names = set()
-        except Exception:
-            pass
-    groups: List[Dict[str, Any]] = [{
-        "groupKey": "toolbox",
-        "groupLabel": "工具箱 MCP",
-        "groupKind": "workspace",
-        "tools": toolbox_tools,
-    }]
-
     agents = _agents_for_prompt_groups(user_id, ai_config_id)
-    # 一个 AI 现在可绑定多台端侧设备（含同类型）。先算出每台设备的展示名，
-    # 对重名（如两台未命名桌面端都回落成"桌面端"）追加设备号短后缀，
-    # 这样对话"+"面板与系统 Prompt 里两台同类型设备可以区分。
-    device_entries: List[Dict[str, Any]] = []
-    label_counts: Dict[str, int] = {}
-    for agent in agents:
-        device_id = str(agent.get("id") or "").strip()
-        if not device_id:
-            continue
-        agent_type = device_type_of(agent)
-        if agent_type == "workshop":
-            continue
-        base_label = _agent_display_name(agent)
-        label_counts[base_label] = label_counts.get(base_label, 0) + 1
-        device_entries.append((agent, device_id, agent_type, base_label))
-
-    for agent, device_id, agent_type, base_label in device_entries:
-        names = _tool_names_for_agent(
-            agent,
-            user_id=user_id,
-            ai_config_id=ai_config_id,
-            allowed_tools=allowed_tools,
-        )
-        device_tools: List[Dict[str, Any]] = []
-        for name in sorted(names):
-            tool = by_name.get(name)
-            if tool:
-                device_tools.append(tool)
-                continue
-            device_tools.append({
-                "name": name,
-                "description": "",
-                "inputSchema": {},
-                "destructive": True,
-                "mcpSource": str(agent_type or "desktop"),
-                "deviceId": device_id,
-                "allowedForCurrentAi": True,
-            })
-        label = base_label
-        if label_counts.get(base_label, 0) > 1:
-            suffix = device_id[-4:] if len(device_id) >= 4 else device_id
-            if suffix:
-                label = f"{base_label}·{suffix}"
-        groups.append({
-            "groupKey": f"device:{device_id}",
-            "groupLabel": f"{label} MCP",
-            "groupKind": "device",
-            "deviceId": device_id,
-            "deviceType": str(agent_type or ""),
-            "tools": device_tools,
-        })
-
-    library_tools: List[Dict[str, Any]] = []
-    for name in sorted(library_tool_names):
-        tool = by_name.get(name)
-        if tool:
-            library_tools.append(tool)
-            continue
-        library_tools.append({
-            "name": name,
-            "description": "",
-            "inputSchema": {},
-            "destructive": True,
-            "mcpSource": "workshop",
-            "allowedForCurrentAi": True,
-        })
-    if library_tools:
-        groups.append({
-            "groupKey": "library",
-            "groupLabel": "图书馆 MCP",
-            "groupKind": "workspace",
-            "tools": library_tools,
-        })
-
+    groups = [_toolbox_group(by_name, workspace_names)]
+    groups.extend(_device_groups(by_name, agents, user_id, ai_config_id, allowed_tools))
+    library = _library_group(
+        by_name, _library_names(workspace_names, allowed_tools, user_id, ai_config_id)
+    )
+    if library:
+        groups.append(library)
     if not agents:
-        groups.append({
-            "groupKey": "device:none",
-            "groupLabel": "端侧设备 MCP",
-            "groupKind": "device",
-            "deviceId": "",
-            "deviceType": "",
-            "tools": [],
-        })
-
+        groups.append(_empty_device_group())
     return groups

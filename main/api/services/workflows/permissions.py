@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from jsonschema import Draft202012Validator
 from sqlmodel import Session, select
@@ -14,7 +14,6 @@ from api.models import DevicePresence, User, WorkflowCard, WorkflowCardVersion
 from api.services.device_tools.device_permission_policy import get_policy
 
 from .compiler import schema_digest
-from .interaction_steps import is_ai_intervention_step
 
 
 class WorkflowDispatchError(RuntimeError):
@@ -96,6 +95,25 @@ def _owned_online_device(session: Session, user_id: int, device_id: str) -> Devi
     return device
 
 
+def _run_mcp_device_context(
+    session: Session,
+    user_id: int,
+    device_id: str,
+    definition: Dict[str, Any],
+) -> Optional[tuple[list[tuple[str, Dict[str, Any]]], str, DevicePresence]]:
+    steps = [
+        (str(step_id), step)
+        for step_id, step in definition.get("steps", {}).items()
+        if isinstance(step, dict) and step.get("type") == "mcp"
+    ]
+    if not steps:
+        return None
+    first_ref = steps[0][1].get("toolRef")
+    first_ref = first_ref if isinstance(first_ref, dict) else {}
+    fallback_id = str(device_id or first_ref.get("deviceId") or "").strip()
+    return steps, fallback_id, _owned_online_device(session, user_id, fallback_id)
+
+
 def validate_run_device(
     session: Session,
     *,
@@ -104,18 +122,19 @@ def validate_run_device(
     definition: Dict[str, Any],
     version: WorkflowCardVersion,
     default_device_id: str = "",
-) -> DevicePresence:
+) -> Optional[DevicePresence]:
     """Validate every MCP node against its own bound device before creating a run."""
-    fallback_device = _owned_online_device(session, user_id, device_id)
+    context = _run_mcp_device_context(session, user_id, device_id, definition)
+    if context is None:
+        return None
+    mcp_steps, fallback_id, fallback_device = context
     contracts = _load_json(version.tool_contracts_json, {})
     contracts = contracts if isinstance(contracts, dict) else {}
     bound_ids = _bound_device_ids(version, contracts)
-    for step_id, step in definition.get("steps", {}).items():
-        if not isinstance(step, dict) or step.get("type") != "mcp" or is_ai_intervention_step(step):
-            continue
+    for step_id, step in mcp_steps:
         ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
         name = str(ref.get("name") or "").strip()
-        target_id = str(ref.get("deviceId") or device_id).strip()
+        target_id = str(ref.get("deviceId") or fallback_id).strip()
         if default_device_id and target_id == default_device_id:
             target_id = device_id
         if bound_ids and target_id not in bound_ids:
@@ -123,7 +142,7 @@ def validate_run_device(
                 "DEVICE_NOT_BOUND_TO_CARD",
                 f"step {step_id} targets a device not bound to this card version",
             )
-        target = fallback_device if target_id == device_id else _owned_online_device(session, user_id, target_id)
+        target = fallback_device if target_id == fallback_id else _owned_online_device(session, user_id, target_id)
         contract = _contract_for_step(contracts, str(step_id), name)
         _validate_live_contract(target, name, _tool_defs(target).get(name), contract)
     return fallback_device
@@ -146,7 +165,6 @@ def validate_step_dispatch(
     expected_provider: str,
     expected_digest: str,
     arguments: Dict[str, Any],
-    confirmation_granted: bool = False,
     card_id: str = "",
     card_version_id: str = "",
 ) -> DevicePresence:
@@ -197,11 +215,6 @@ def validate_step_dispatch(
     current_schema = current_schema if isinstance(current_schema, dict) else {}
     if expected_digest and schema_digest(current_schema) != expected_digest:
         raise WorkflowDispatchError("TOOL_SCHEMA_INCOMPATIBLE", "tool input schema changed after card publication")
-    if bool(definition.get("destructive")) and not confirmation_granted:
-        raise WorkflowDispatchError(
-            "CONFIRMATION_REQUIRED",
-            "destructive tools require an approved workflow confirmation",
-        )
     if len(json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")) > int(
         settings.workflow_max_argument_bytes
     ):

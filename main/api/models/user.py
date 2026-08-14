@@ -51,9 +51,8 @@ class User(SQLModel, table=True):
     # automatic prefix caching (DeepSeek/OpenAI/Grok) still hits.
     mcp_history_result_max_chars: int = Field(default=8000)
     conversation_auto_compress_enabled: bool = Field(default=True)
-    # Per-role MCP allow-list configured by the admin. JSON object mapping a role
-    # tier (assistant_admin / digital_member_manager / digital_member_member) to a
-    # list of allowed tool names. Empty string means "use the per-role default".
+    # Inert rolling-release compatibility column. It is not exposed by the API
+    # and no runtime authorization path reads it; remove in a later contract migration.
     role_mcp_permissions: str = Field(default="")
     tavily_api_key: str = Field(default="")
     model_presets: str = Field(default=DEFAULT_MODEL_PRESETS)
@@ -103,7 +102,6 @@ class UserRead(SQLModel):
     mcp_max_steps: int
     mcp_history_result_max_chars: int = 8000
     conversation_auto_compress_enabled: bool = True
-    role_mcp_permissions: str
     tavily_api_key: str
     model_presets: str
     default_start_task_prompt: str
@@ -139,7 +137,6 @@ class UserUpdate(SQLModel):
     mcp_max_steps: Optional[int] = None
     mcp_history_result_max_chars: Optional[int] = None
     conversation_auto_compress_enabled: Optional[bool] = None
-    role_mcp_permissions: Optional[str] = None
     tavily_api_key: Optional[str] = None
     model_presets: Optional[str] = None
     default_start_task_prompt: Optional[str] = None

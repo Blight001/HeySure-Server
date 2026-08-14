@@ -45,7 +45,10 @@ def test_gateway_endpoint_call_uses_runtime_aware_dispatch(monkeypatch):
     monkeypatch.setattr(mcp, "get_current_user", lambda _authorization, _session: user)
     monkeypatch.setattr(mcp, "endpoint_tools_for_config", lambda *_args: {tool})
     monkeypatch.setattr(mcp, "endpoint_bridge_tools_for_config", lambda *_args: set())
-    monkeypatch.setattr(mcp, "effective_allowed_for_config", lambda *_args: set())
+    monkeypatch.setattr(
+        "api.services.mcp.capability_view.ensure_tool_eligible",
+        lambda *_args: None,
+    )
     monkeypatch.setattr(mcp, "is_endpoint_agent_tool", lambda name: name == tool)
     monkeypatch.setattr(mcp.registry, "has", lambda _name: False)
     monkeypatch.setattr(mcp.registry, "list_tools", lambda: [])

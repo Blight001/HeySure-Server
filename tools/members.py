@@ -21,7 +21,6 @@ from api.models import (
 )
 from api.services.model_presets import normalize_model_presets
 from api.services.tasks.task_system import compact_system_auto_control
-from mcp_runtime.mcp.permissions import clamp_tools_json, config_role_tier
 from tools.tasks import TASK_MANAGE_SCHEMA, _task_manage
 
 
@@ -236,7 +235,7 @@ def _create_member(session: Session, user: User, args: Dict[str, Any]) -> Assist
         switch_key=f"assistant_{int(time.time() * 1000)}",
         system_auto_control=compact_system_auto_control(json.dumps({"enabled": True, "tasks": []}, ensure_ascii=False)),
     )
-    cfg.mcp_tools = clamp_tools_json(user, config_role_tier(cfg), cfg.mcp_tools)
+    cfg.mcp_tools = "[]"
     session.add(cfg)
     session.flush()
     _write_prompt(int(user.id or 0), cfg, str(args.get("prompt") or ""))
@@ -277,7 +276,7 @@ def _update_member(session: Session, user: User, cfg: AssistantAIConfig, args: D
         setattr(cfg, key, value)
     cfg.ai_role = "digital_member"
     cfg.enabled = True
-    cfg.mcp_tools = clamp_tools_json(user, config_role_tier(cfg), cfg.mcp_tools)
+    cfg.mcp_tools = "[]"
     cfg.updated_at = time.time()
     session.add(cfg)
     if "prompt" in args:

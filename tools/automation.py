@@ -22,7 +22,11 @@ from api.models import (
     WorkflowRun,
     WorkflowStepRun,
 )
-from api.services.workflows.ai_interaction import create_validated_run, respond_ai_interaction
+from api.services.workflows.ai_interaction import (
+    ai_review_payload,
+    create_validated_run,
+    respond_ai_interaction,
+)
 from api.services.workflows.audit import add_audit
 from api.services.workflows.card_service import (
     card_payload,
@@ -49,7 +53,7 @@ from tools.automation_access import (
     _card_visible,
     _creation_tags,
     _is_admin_role,
-    _pending_confirmation_guidance,
+    _pending_ai_review_guidance,
     _public_card_creator,
     _updated_tags,
 )
@@ -59,8 +63,26 @@ from tools.automation_access import (
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled", "timed_out"}
 PAUSABLE_RUN_STATUSES = {
     "pending", "running", "retry_wait", "paused_offline",
-    "waiting_confirmation", "waiting_ai",
+    "waiting_ai",
 }
+
+AUTOMATION_DEFINITION_GUIDANCE = (
+    "definition 使用工作流 Schema v1：顶层至少包含 schemaVersion=1、startStepId 和非空 steps；"
+    "可选 inputSchema、limits、output、compatibility。steps 是以步骤 ID 为键的对象，只支持以下节点："
+    "① mcp：{type:'mcp',toolRef:{namespace:'device',name,deviceId},arguments:{},saveAs,next}。"
+    "deviceId 可指向当前 AI 有权调用的任意已绑定设备；不同节点可分别使用桌面端、Linux、浏览器、"
+    "Android 或自建设备上的 MCP，不限于浏览器自动化。服务端自动从节点汇总契约设备。"
+    "可选 timeoutSeconds、totalTimeoutSeconds、resultProjection、retryPolicy、onError、targetResolver；"
+    "② condition：{type:'condition',expression,onTrue,onFalse}，expression 只支持 "
+    "eq/ne/gt/gte/lt/lte/exists/contains/startsWith/endsWith/and/or/not；"
+    "③ delay：{type:'delay',delaySeconds,next}；"
+    "④ ai：{type:'ai',prompt,saveAs,next}，运行到此节点时暂停并把此前完整步骤轨迹和 prompt 返回给负责的 AI；"
+    "AI 完成审核或指定任务后调用 action=respond，通过 parameters 回传参数并从 next 继续，"
+    "可用 onError 指向拒绝或失败分支；⑤ end：{type:'end'}，可选 output。"
+    "参数和输出可用 ${input.<字段>}、${steps.<saveAs>.result.<字段>}、"
+    "${steps.<saveAs>.error.<字段>} 模板；input 字段必须先在 inputSchema.properties 声明。"
+    "所有跳转目标必须存在，流程不得成环，且每条可达路径最终必须到达 end。"
+)
 
 
 def _require_enabled(*, run: bool = False) -> None:
@@ -190,31 +212,6 @@ def _create_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
         return card_payload(create_card(session, user_id, body))
 
 
-def _clone_card(
-    session: Session,
-    card: WorkflowCard,
-    user_id: int,
-    ai_config_id: Optional[int],
-) -> Dict[str, Any]:
-    source = card_payload(card)
-    latest = session.get(WorkflowCardVersion, card.latest_version_id) if card.latest_version_id else None
-    definition = _load(latest.definition_json, {}) if latest else source.get("definition") or {}
-    body = CardCreate(
-        name=f"{card.name}（副本）",
-        description=card.description,
-        tags=_creation_tags(
-            source.get("tags"),
-            None if _public_card_creator(session, user_id, ai_config_id) else ai_config_id,
-        ),
-        access_scope="all" if _public_card_creator(session, user_id, ai_config_id) else "owner",
-        risk_level=card.risk_level,
-        definition=definition,
-        default_device_id=str(definition.get("defaultDeviceId") or "") or None,
-        device_ids=_load(latest.contract_device_ids_json, []) if latest else [],
-    )
-    return card_payload(create_card(session, user_id, body))
-
-
 def _edit_card(
     session: Session,
     card: WorkflowCard,
@@ -239,28 +236,14 @@ def _edit_card(
     return card_payload(update_card(session, card, CardUpdate(**values), user_id=user_id))
 
 
-def _export_card(card: WorkflowCard) -> Dict[str, Any]:
-    payload = card_payload(card)
-    return {
-        "schema": "heysure.workflow-card.export/v1",
-        "name": payload["name"],
-        "description": payload["description"],
-        "tags": payload["tags"],
-        "access_scope": payload["access_scope"],
-        "allowed_ai_config_ids": payload["allowed_ai_config_ids"],
-        "risk_level": payload["risk_level"],
-        "definition": payload["definition"],
-    }
-
-
 def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     action = str(args.get("action") or "").strip().lower()
     if action == "list":
         return _list_cards(user_id, args, ai_config_id)
-    if action in {"create", "import", "from_trace"}:
+    if action in {"create", "from_trace"}:
         return _create_card(user_id, args, ai_config_id)
     with Session(engine) as session:
-        admin_read = action in {"get", "clone", "validate", "versions", "get_version", "export"}
+        admin_read = action in {"get", "validate", "versions", "get_version"}
         card = _accessible_card(
             session,
             user_id,
@@ -283,8 +266,6 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
                 base_version_id=str(args.get("base_version_id") or ""),
                 operations=args.get("operations") if isinstance(args.get("operations"), list) else [],
             )
-        if action == "clone":
-            return _clone_card(session, card, user_id, ai_config_id)
         if action == "delete":
             delete_card(session, card)
             return {"deleted": True, "card_id": card.id}
@@ -297,8 +278,6 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             return {"items": [version_payload(row) for row in rows]}
         if action == "get_version":
             return version_payload(_version(session, card, str(args.get("version_id") or "")), include_definition=True)
-        if action == "export":
-            return _export_card(card)
     raise HTTPException(status_code=400, detail="unsupported card action")
 
 
@@ -328,6 +307,7 @@ def _run_for_ai(
         pending = session.exec(select(WorkflowConfirmation.id).where(
             WorkflowConfirmation.run_id == run.id,
             WorkflowConfirmation.ai_config_id == int(ai_config_id),
+            WorkflowConfirmation.confirmation_type == "ai_review",
             WorkflowConfirmation.status == "pending",
         )).first()
         if pending:
@@ -347,8 +327,20 @@ def _chat_origin() -> Dict[str, str]:
 def _pending_interaction(session: Session, run_id: str) -> Optional[WorkflowConfirmation]:
     return session.exec(select(WorkflowConfirmation).where(
         WorkflowConfirmation.run_id == run_id,
+        WorkflowConfirmation.confirmation_type == "ai_review",
         WorkflowConfirmation.status == "pending",
     ).order_by(WorkflowConfirmation.created_at.desc())).first()
+
+
+def _pending_ai_review_result(
+    session: Session,
+    run: WorkflowRun,
+    pending: WorkflowConfirmation,
+    ai_config_id: Optional[int],
+) -> Dict[str, Any]:
+    payload = ai_review_payload(session, run, pending)
+    payload.update(_pending_ai_review_guidance(pending, ai_config_id))
+    return payload
 
 
 def _origin_chat_stopped(session: Session, row: WorkflowRun) -> bool:
@@ -365,13 +357,7 @@ def _wait_for_original_chat_run(
     *,
     poll_seconds: float = 0.5,
 ) -> Dict[str, Any]:
-    """Keep the originating MCP call parked until the workflow is done.
-
-    AI-only review gates are returned to the same model immediately so it can
-    decide them with its intact context. Human gates remain inside this call;
-    the web decision and all remaining deterministic card steps happen while
-    the chat UI stays in ``waiting_mcp``.
-    """
+    """Park the originating MCP call until terminal state or an AI review node."""
     while True:
         with Session(engine) as session:
             row = session.get(WorkflowRun, run_id)
@@ -385,8 +371,8 @@ def _wait_for_original_chat_run(
                 return payload
             pending = _pending_interaction(session, row.id)
             if pending and pending.confirmation_type == "ai_review":
-                payload["pending_confirmation"] = _pending_confirmation_guidance(
-                    pending, ai_config_id
+                payload["pending_ai_review"] = _pending_ai_review_result(
+                    session, row, pending, ai_config_id
                 )
                 payload["resumed_in_original_chat"] = True
                 return payload
@@ -524,6 +510,45 @@ def _resume_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
         return run_payload(run)
 
 
+def _respond_to_ai_review(
+    user_id: int,
+    args: Dict[str, Any],
+    ai_config_id: Optional[int],
+) -> Dict[str, Any]:
+    if not ai_config_id:
+        raise HTTPException(status_code=403, detail="AI_INTERACTION_REQUIRES_AI")
+    with Session(engine) as session:
+        run = _run_for_ai(
+            session,
+            user_id,
+            str(args.get("run_id") or ""),
+            ai_config_id,
+            assigned_interaction=True,
+            lock=True,
+        )
+        pending = _pending_interaction(session, run.id)
+        guidance = _pending_ai_review_guidance(pending, ai_config_id) if pending else None
+        if guidance and not guidance["can_respond"]:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "AI_INTERACTION_ACCESS_DENIED", "pending_ai_review": guidance},
+            )
+        try:
+            responded = respond_ai_interaction(
+                session,
+                run=run,
+                user_id=user_id,
+                ai_config_id=int(ai_config_id),
+                approved=bool(args.get("approved")),
+                parameters=args.get("parameters") if isinstance(args.get("parameters"), dict) else {},
+                message=str(args.get("message") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        run_id = responded.id
+    return _wait_for_original_chat_run(run_id, ai_config_id)
+
+
 def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     action = str(args.get("action") or "").strip().lower()
     if action in {"start", "run"}:
@@ -534,6 +559,8 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
         return _pause_run(user_id, args, ai_config_id)
     if action == "resume":
         return _resume_run(user_id, args, ai_config_id)
+    if action == "respond":
+        return _respond_to_ai_review(user_id, args, ai_config_id)
     if action in {"debug_step", "debug_continue"}:
         resumed_args = dict(args)
         resumed_args["_debug_single_step"] = action == "debug_step"
@@ -573,39 +600,22 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
             user_id,
             str(args.get("run_id") or ""),
             ai_config_id,
-            assigned_interaction=action == "respond",
-            lock=action in {"cancel", "retry", "respond", "debug_restart"},
+            lock=action in {"cancel", "debug_restart"},
         )
         if action == "status":
             payload = run_payload(run)
             pending = session.exec(select(WorkflowConfirmation).where(
                 WorkflowConfirmation.run_id == run.id,
+                WorkflowConfirmation.confirmation_type == "ai_review",
                 WorkflowConfirmation.status == "pending",
             ).order_by(WorkflowConfirmation.created_at.desc())).first()
             if pending:
-                payload["pending_confirmation"] = _pending_confirmation_guidance(
-                    pending, ai_config_id
+                payload["pending_ai_review"] = _pending_ai_review_result(
+                    session, run, pending, ai_config_id
                 )
             return payload
         if action == "cancel":
             return run_payload(cancel_run(session, run, str(args.get("reason") or "cancelled by AI")))
-        if action == "retry":
-            try:
-                return run_payload(create_validated_run(
-                    session,
-                    user_id=user_id,
-                    card_id=run.card_id,
-                    device_id=run.device_id,
-                    input_value=decrypt_json(run.input_json),
-                    version_id=run.card_version_id,
-                    idempotency_key=str(args.get("idempotency_key") or "") or f"retry:{run.id}:{uuid.uuid4().hex}",
-                    actor=RunActorContext(
-                        actor_type="ai" if ai_config_id else "user",
-                        actor_id=str(ai_config_id or user_id),
-                    ),
-                ))
-            except ValueError as exc:
-                raise HTTPException(status_code=409, detail=str(exc))
         if action == "debug_restart":
             try:
                 return run_payload(create_validated_run(
@@ -631,31 +641,6 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
                 ))
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
-        if action == "respond":
-            if not ai_config_id:
-                raise HTTPException(status_code=403, detail="AI_INTERACTION_REQUIRES_AI")
-            pending = session.exec(select(WorkflowConfirmation).where(
-                WorkflowConfirmation.run_id == run.id,
-                WorkflowConfirmation.status == "pending",
-            ).order_by(WorkflowConfirmation.created_at.desc())).first()
-            guidance = _pending_confirmation_guidance(pending, ai_config_id) if pending else None
-            if guidance and not guidance["can_respond"]:
-                raise HTTPException(
-                    status_code=409,
-                    detail={"code": "USER_CONFIRMATION_REQUIRED", "pending_confirmation": guidance},
-                )
-            try:
-                return run_payload(respond_ai_interaction(
-                    session,
-                    run=run,
-                    user_id=user_id,
-                    ai_config_id=int(ai_config_id),
-                    approved=bool(args.get("approved")),
-                    parameters=args.get("parameters") if isinstance(args.get("parameters"), dict) else {},
-                    message=str(args.get("message") or ""),
-                ))
-            except ValueError as exc:
-                raise HTTPException(status_code=409, detail=str(exc))
     raise HTTPException(status_code=400, detail="unsupported run action")
 
 
@@ -709,16 +694,16 @@ def _manage_recording(user_id: int, args: Dict[str, Any], ai_config_id: Optional
 
 def _automation_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     action = str(args.get("action") or "").strip().lower()
-    _require_enabled(run=action in {"start", "run", "retry", "resume", "respond", "debug_start", "debug_step", "debug_continue", "debug_restart"})
+    _require_enabled(run=action in {"start", "run", "resume", "respond", "debug_start", "debug_step", "debug_continue", "debug_restart"})
     try:
         if action in {
-            "list", "get", "create", "import", "from_trace", "clone", "edit", "update", "patch",
-            "delete", "validate", "versions", "get_version", "export",
+            "list", "get", "create", "from_trace", "edit", "update", "patch",
+            "delete", "validate", "versions", "get_version",
         }:
             return _manage_card(user_id, args, ai_config_id)
         if action in {
             "start", "run", "list_runs", "status", "pause", "resume",
-            "cancel", "retry", "respond",
+            "cancel", "respond",
             "debug_start", "debug_step", "debug_continue", "debug_restart",
         }:
             return _manage_run(user_id, args, ai_config_id)
@@ -738,28 +723,26 @@ AUTOMATION_MANAGE_SCHEMA = {
         "自动化卡片创建原则：完整流程必须优先使用录制方案，因为录制会保存实际成功的工具名、参数、"
         "设备绑定和调用顺序，比 AI 凭空手写 definition 更稳定。标准流程是 record_start → 在真实环境中"
         "逐步调用工具完成任务 → record_stop(create_card=true) → validate → debug_start/debug_step 验证。"
-        "录制生成后若只有选择器、变量路径、等待时间、初始环境说明等小细节需要调整，使用 patch + "
+        "录制生成后若只有参数模板、变量路径、等待时间等小细节需要调整，使用 patch + "
         "base_version_id 做最小局部修改。不要为了小改动重新手写或整体替换卡片。仅在无法进入真实环境录制、"
-        "或用户明确提供了完整且已审核的结构化定义时，才使用 create/import/from_trace。"
+        "或用户明确提供了完整且已审核的结构化定义时，才使用 create/from_trace。"
     ),
     "properties": {
         "action": {
             "type": "string",
             "enum": [
-                "list", "get", "create", "import", "from_trace", "clone", "edit", "patch", "delete",
-                "validate", "versions", "get_version", "export", "start",
-                "list_runs", "status", "pause", "resume", "cancel", "retry", "respond",
+                "list", "get", "create", "from_trace", "edit", "patch", "delete",
+                "validate", "versions", "get_version", "start",
+                "list_runs", "status", "pause", "resume", "cancel", "respond",
                 "record_start", "record_status", "record_stop", "record_cancel",
                 "debug_start", "debug_step", "debug_continue", "debug_restart",
             ],
             "description": (
-                "唯一动作选择器；聊天中的 start 会停留在当前 MCP 调用，等待真人网页确认并持续到卡片终态，"
+                "唯一动作选择器；聊天中的 start 会停留在当前 MCP 调用，并持续到卡片终态或 AI 审核节点，"
                 "新建完整卡片优先选择 record_start/record_stop，录制后的小细节使用 patch；"
                 "不要默认使用 create/from_trace 手写完整流程；"
-                "不要重复轮询 status；status 查看已有运行且会返回 pending_confirmation；"
-                "respond 仅处理分配给当前 AI 的 waiting_ai 交互，真人门禁会明确返回 user_confirmation；"
-                "浏览器卡片必须从入口执行 browser+tab reload/replace，再用 browser+wait/observe 等待就绪，"
-                "并在 compatibility.initialEnvironment 声明 description、resetStepId、readyStepId；"
+                "不要重复轮询 status；status 查看已有运行且会返回 pending_ai_review；"
+                "respond 仅处理分配给当前 AI 的 waiting_ai 审核交互；"
                 "pause/resume 暂停恢复；已有卡片优先用 patch 局部修改；"
                 "debug_start 从任意步骤暂停创建调试运行，debug_step 单步，debug_continue 连续运行。"
             ),
@@ -773,8 +756,8 @@ AUTOMATION_MANAGE_SCHEMA = {
         "operations": {
             "type": "array", "minItems": 1, "maxItems": 100,
             "description": (
-                "录制卡片后的首选修正方式。使用 RFC 6902 风格局部修改，只修正选择器、变量路径、参数、"
-                "等待时间、初始环境契约等小细节；仅支持 add/replace/remove/test，且仅允许修改 definition 流程字段。"
+                "录制卡片后的首选修正方式。使用 RFC 6902 风格局部修改，只修正参数模板、变量路径、"
+                "等待时间等小细节；仅支持 add/replace/remove/test，且仅允许修改 definition 流程字段。"
             ),
             "items": {
                 "type": "object",
@@ -807,7 +790,8 @@ AUTOMATION_MANAGE_SCHEMA = {
         "definition": {
             "type": "object",
             "description": (
-                "仅供 create/import 使用的完整定义。不要凭空手写复杂流程；优先实战录制生成，再用 patch 修正小细节。"
+                "仅供 create 使用的完整定义。不要凭空手写复杂流程；优先实战录制生成，再用 patch 修正小细节。"
+                + AUTOMATION_DEFINITION_GUIDANCE
             ),
         },
         "calls": {
@@ -825,15 +809,15 @@ AUTOMATION_MANAGE_SCHEMA = {
         },
         "device_id": {
             "type": "string",
-            "description": "action=start/debug_start 时可指定本次目标设备号，必须属于卡片 contractDeviceIds；省略则使用 defaultDeviceId。",
+            "description": "action=start/debug_start 时可覆盖卡片默认设备；省略时由各 mcp 节点的 toolRef.deviceId 决定。没有 mcp 节点的卡片无需设备。",
         },
         "default_device_id": {
             "type": "string",
-            "description": "创建/编辑卡片时指定默认设备号；必须包含在 device_ids 中。不填时使用 device_ids 第一项。",
+            "description": "可选默认设备号；新卡片优先为每个 mcp 节点填写 toolRef.deviceId。",
         },
         "device_ids": {
             "type": "array", "items": {"type": "string"}, "maxItems": 20,
-            "description": "创建或编辑卡片时必填：列出定义中设备 MCP 节点引用的全部契约设备 ID。每个 MCP 节点的 toolRef.deviceId 必须属于此列表。",
+            "description": "可选兼容字段。服务端会从所有 mcp 节点的 toolRef.deviceId 自动汇总契约设备，无需重复填写。",
         },
         "input": {"type": "object"},
         "idempotency_key": {"type": "string"},
@@ -843,7 +827,7 @@ AUTOMATION_MANAGE_SCHEMA = {
         "reason": {"type": "string"},
         "approved": {
             "type": "boolean",
-            "description": "仅用于 action=respond 且 status 返回 can_respond=true 的 AI 交互；真人确认门禁不能由 AI 代批。",
+            "description": "仅用于 action=respond 且 status 返回 can_respond=true 的 AI 审核交互。",
         },
         "parameters": {"type": "object"},
         "message": {"type": "string"},

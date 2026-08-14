@@ -16,6 +16,7 @@ from api.models.external_control import (
     ExternalControllerEvent,
     ExternalControllerRun,
 )
+from api.services.mcp.capability_view import scoped_tool_view_for_ids
 from .state import RunTransitionError, TERMINAL_RUN_STATES, transition_run
 
 
@@ -171,7 +172,9 @@ class ExternalControlService:
                 "prompt": kb_store.effective_ai_prompt(credential.user_id, cfg),
             },
             "devices": [self._device_payload(row) for row in devices],
-            "configured_mcp_tools": _json_loads(cfg.mcp_tools, []),
+            "configured_mcp_tools": sorted(
+                scoped_tool_view_for_ids(credential.user_id, cfg.id).eligible_names
+            ),
             "controller": {
                 "credential_id": credential.id,
                 "scopes": _json_loads(credential.scopes_json, []),

@@ -13,7 +13,6 @@ from api.devices.presence import tool_defs_for_agent
 from api.models import AssistantAIConfig, DevicePresence, WorkflowCard, WorkflowCardVersion
 
 from .compiler import WorkflowValidationError, compile_definition, definition_digest, schema_digest
-from .interaction_steps import is_ai_intervention_step
 
 
 
@@ -302,20 +301,31 @@ def _snapshot_contracts(
     device_id: Optional[str] = None,
     device_ids: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], List[str]]:
-    bound_ids = _contract_device_ids(device_id, device_ids)
+    fallback_ids = _contract_device_ids(device_id, device_ids)
+    declared_ids = [
+        str(step.get("toolRef", {}).get("deviceId") or "").strip()
+        for step in definition["steps"].values()
+        if step.get("type") == "mcp" and isinstance(step.get("toolRef"), dict)
+    ]
+    declared_ids = list(dict.fromkeys(item for item in declared_ids if item))
     device_steps = [
         step_id for step_id, step in definition["steps"].items()
-        if step.get("type") == "mcp" and not is_ai_intervention_step(step)
+        if step.get("type") == "mcp"
     ]
+    all_nodes_bound = all(
+        str(definition["steps"][step_id].get("toolRef", {}).get("deviceId") or "").strip()
+        for step_id in device_steps
+    )
+    bound_ids = declared_ids if all_nodes_bound else list(dict.fromkeys(fallback_ids + declared_ids))
     if device_steps and not bound_ids:
         raise WorkflowValidationError([
-            "select at least one contract device before saving a card with device MCP steps"
+            "each device MCP node must declare toolRef.deviceId, or provide one fallback device"
         ])
     snapshots = {item: _device_snapshot(session, user_id, item) for item in bound_ids}
     contracts: Dict[str, Any] = {}
     errors: List[str] = []
     for step_id, step in definition["steps"].items():
-        if step.get("type") != "mcp" or is_ai_intervention_step(step):
+        if step.get("type") != "mcp":
             continue
         ref = step["toolRef"]
         name = str(ref["name"]).strip()

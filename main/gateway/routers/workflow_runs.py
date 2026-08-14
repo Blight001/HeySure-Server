@@ -20,16 +20,15 @@ from api.models import (
 from api.services.workflows.result_store import load_result
 from api.services.workflows.run_service import (
     cancel_run,
-    decide_confirmation,
     run_payload,
     step_payload,
 )
 from api.services.workflows.ai_interaction import (
     create_validated_run,
-    interaction_confirmation_payload,
+    ai_review_history_payload,
     retry_validated_run,
 )
-from api.services.workflows.schemas import RunCancel, RunConfirm, RunCreate, RunRetry
+from api.services.workflows.schemas import RunCancel, RunCreate, RunRetry
 from api.core.settings import settings
 from api.runtime.internal_http import internal_post
 from .auth import get_current_user
@@ -108,10 +107,6 @@ def workflow_metrics(
         "step_failures": sum(step.status in {"failed", "timed_out"} for step in steps),
         "retry_attempts": sum(max(0, step.attempt - 1) for step in steps),
         "offline_recoveries": event_counts.get("device_reconnected", 0),
-        "confirmation_denials": sum(
-            event.event_type == "confirmation_decided" and '\"decision\":\"denied\"' in event.detail_json
-            for event in audits
-        ),
         "schema_incompatible": sum("TOOL_SCHEMA_INCOMPATIBLE" in event.detail_json for event in audits),
         "permission_denials": sum("TOOL_PERMISSION_DENIED" in event.detail_json for event in audits),
         "ignored_terminal_results": event_counts.get("step_result_ignored", 0),
@@ -241,8 +236,8 @@ async def cancel(
     return run_payload(cancelled)
 
 
-@router.get("/workflow-runs/{run_id}/confirmations")
-def confirmations(
+@router.get("/workflow-runs/{run_id}/ai-reviews")
+def ai_reviews(
     run_id: str,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -253,27 +248,13 @@ def confirmations(
         raise HTTPException(status_code=404, detail={"code": "RUN_NOT_FOUND"})
     items = session.exec(
         select(WorkflowConfirmation)
-        .where(WorkflowConfirmation.run_id == run_id)
+        .where(
+            WorkflowConfirmation.run_id == run_id,
+            WorkflowConfirmation.confirmation_type == "ai_review",
+        )
         .order_by(WorkflowConfirmation.created_at.desc())
     ).all()
-    return {"items": [interaction_confirmation_payload(item) for item in items]}
-
-
-@router.post("/workflow-runs/{run_id}/confirm")
-def confirm(
-    run_id: str,
-    body: RunConfirm,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None),
-):
-    user = get_current_user(authorization, session)
-    row = _owned_run(session, user.id, run_id)
-    if not row:
-        raise HTTPException(status_code=404, detail={"code": "RUN_NOT_FOUND"})
-    try:
-        return run_payload(decide_confirmation(session, run=row, user_id=user.id, approved=body.approved))
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail={"code": str(exc)})
+    return {"items": [ai_review_history_payload(item) for item in items]}
 
 
 @router.post("/workflow-runs/{run_id}/retry", status_code=202)

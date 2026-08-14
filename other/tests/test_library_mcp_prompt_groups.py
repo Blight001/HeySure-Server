@@ -1,23 +1,13 @@
 import json
+from types import SimpleNamespace
 
 from api.chat_runtime.chat_prompt_utils import _filter_tools_for_current_bindings
 from api.services.mcp.mcp_prompt_groups import build_prompt_tool_groups
 from mcp_runtime.mcp.permissions import (
     LIBRARY_BOUND_TOOLS,
-    ROLE_MEMBER,
-    clamp_tools_json,
-    effective_allowed_for_tier,
     requires_library_binding,
-    tool_min_role,
 )
 from tools.engine import is_toolbox_gated_tool, toolbox_capability_names
-
-
-class _User:
-    id = 1
-    role_mcp_permissions = json.dumps({
-        "digital_member_member": ["workspace.search"],
-    })
 
 
 def _prompt_tools():
@@ -33,14 +23,6 @@ def _prompt_tools():
     ]
 
 
-def test_clamp_tools_json_keeps_library_bound_tools_despite_role_policy():
-    requested = json.dumps(sorted(LIBRARY_BOUND_TOOLS), ensure_ascii=False)
-    clamped = json.loads(
-        clamp_tools_json(_User(), "digital_member_member", requested)
-    )
-    assert set(clamped) == set(LIBRARY_BOUND_TOOLS)
-
-
 def test_member_manage_belongs_to_library_instead_of_toolbox():
     assert "member.manage" in LIBRARY_BOUND_TOOLS
     assert requires_library_binding("member.manage") is True
@@ -48,17 +30,11 @@ def test_member_manage_belongs_to_library_instead_of_toolbox():
     assert "member.manage" not in toolbox_capability_names()
 
 
-def test_library_binding_replaces_all_role_gates():
-    """Every library MCP and every folded action has the member floor.
-
-    Runtime binding checks are covered separately; this locks down the policy
-    that a bound AI's identity never turns a library read/write into a 403.
-    """
+def test_library_actions_do_not_depend_on_member_roles():
     from tools.knowledge import _KNOWLEDGE_ACTIONS
     from tools.members import MEMBER_ACTIONS, MEMBER_MANAGE_SCHEMA, TASK_ACTIONS
     from tools.tasks import _TASK_ACTIONS
 
-    assert all(tool_min_role(name) == ROLE_MEMBER for name in LIBRARY_BOUND_TOOLS)
     assert all(callable(handler) for handler in _KNOWLEDGE_ACTIONS.values())
     assert all(callable(handler) for handler in _TASK_ACTIONS.values())
     assert set(MEMBER_MANAGE_SCHEMA["properties"]["action"]["enum"]) == set(MEMBER_ACTIONS + TASK_ACTIONS)
@@ -67,8 +43,8 @@ def test_library_binding_replaces_all_role_gates():
 
 def test_unbound_ai_loses_member_manage_but_keeps_todo_tool(monkeypatch):
     monkeypatch.setattr(
-        "api.devices.workshop_bindings.config_bound_to_library",
-        lambda user_id, ai_config_id: False,
+        "api.services.mcp.capability_view.scoped_tool_view_for_ids",
+        lambda user_id, ai_config_id: SimpleNamespace(eligible_names={"todo.manage"}),
     )
 
     filtered = _filter_tools_for_current_bindings(
@@ -81,25 +57,7 @@ def test_unbound_ai_loses_member_manage_but_keeps_todo_tool(monkeypatch):
     assert "todo.manage" in filtered
 
 
-def test_describe_tool_allowed_despite_restrictive_role_policy():
-    """自省工具 mcp.describe+tool 不受角色策略白名单收敛：即使管理员保存的
-    per-role 策略里没有它，运行时天花板也必须放行。"""
-    from mcp_runtime.mcp import registry
-
-    names = {
-        str(t.get("name") or "").strip()
-        for t in registry.list_tools()
-        if str(t.get("name") or "").strip()
-    }
-    allowed = effective_allowed_for_tier(_User(), "digital_member_member", names)
-    assert "mcp.describe+tool" in allowed
-
-
 def test_build_prompt_tool_groups_includes_governance_tools(monkeypatch):
-    monkeypatch.setattr(
-        "api.services.mcp.mcp_prompt_groups._config_selected_tool_names",
-        lambda ai_config_id, user_id: set(LIBRARY_BOUND_TOOLS),
-    )
     monkeypatch.setattr(
         "api.services.mcp.mcp_prompt_groups._agents_for_prompt_groups",
         lambda user_id, ai_config_id: [{
@@ -146,18 +104,12 @@ def test_removed_duplicate_library_tools_are_cleaned_from_saved_configs():
     }) == {"member.manage"}
 
 
-def test_library_scope_payload_uses_exact_saved_subset():
-    from gateway.routers.workshop import _library_scope_payload
+def test_browser_local_card_tools_are_hidden_in_favor_of_server_automation():
+    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
 
-    class _Cfg:
-        id = 42
-        mcp_tools = json.dumps(["member.manage", "knowledge.manage", "workspace.search"])
-
-    payload = _library_scope_payload(_Cfg())
-    assert payload["allowed"] == ["knowledge.manage", "member.manage"]
-    assert set(payload["mcpTools"]) == {
-        "knowledge.manage", "member.manage", "workspace.search",
-    }
+    assert fully_clean_tool_names({
+        "automation.manage", "manage_card", "run_card", "write_card",
+    }) == {"automation.manage"}
 
 
 def test_task_runtime_does_not_regrant_member_management():

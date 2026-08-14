@@ -577,7 +577,8 @@ async def list_ai_cards(
                 "bot_enabled": active_bot_enabled,
                 "bot_status": bot_statuses_view.get(bot_channel, {"status": "disabled", "message": "未知机器人"}),
                 "switch_key": cfg.switch_key,
-                "mcp_tools": cfg.mcp_tools,
+                # Deprecated flat allow-list; device member scopes are authoritative.
+                "mcp_tools": "[]",
                 "system_auto_control": cfg.system_auto_control,
                 "runtime_status": status.current_status if status else "idle",
                 "runtime_tool": status.current_mcp_tool if status else "",

@@ -19,19 +19,22 @@ from api.models import (
     WorkflowRun,
 )
 
-from .ai_interaction import AI_REVIEW_TYPES
+from .ai_interaction import AI_REVIEW_TYPES, ai_review_payload
 
 
 def _ai_kind(config: AssistantAIConfig) -> str:
     return "assistant" if config.ai_role == "assistant_admin" else "core"
 
 
-def _notice_content(run: WorkflowRun, item: WorkflowConfirmation) -> str:
+def _notice_content(session: Session, run: WorkflowRun, item: WorkflowConfirmation) -> str:
+    review = ai_review_payload(session, run, item)
     lines = [
         "【自动化卡片交互请求】",
         f"- 运行ID: {run.id}",
         f"- 步骤ID: {item.step_id}",
-        f"- 请求说明: {item.risk_summary}",
+        f"- 当前 AI 节点任务: {item.risk_summary}",
+        "- 此前完整运行过程:",
+        json.dumps(review["execution_trace"], ensure_ascii=False, default=str),
     ]
     lines.extend([
         "请核对说明与当前上下文；确认后调用 automation.manage，action=respond、approved=true。",
@@ -57,7 +60,7 @@ def _ensure_session(session: Session, item: WorkflowConfirmation, config: Assist
         ai_config_id=item.ai_config_id,
         ai_kind=kind,
         session_id=session_id,
-        session_name=f"自动化确认：{item.run_id}",
+        session_name=f"自动化 AI 审核：{item.run_id}",
     )
     session.add(row)
     session.flush()
@@ -82,7 +85,7 @@ def _enqueue_notice(session: Session, item: WorkflowConfirmation) -> bool:
     if not config or not run:
         return False
     chat = _ensure_session(session, item, config)
-    content = _notice_content(run, item)
+    content = _notice_content(session, run, item)
     if item.notified_at is None:
         session.add(ChatMessage(
             user_id=item.requested_user_id,

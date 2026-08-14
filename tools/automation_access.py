@@ -80,14 +80,13 @@ def _updated_tags(card: WorkflowCard, tags: Any) -> list[str]:
     return list(dict.fromkeys(_creation_tags(tags, None) + owners))
 
 
-def _pending_confirmation_guidance(row: Any, ai_config_id: Optional[int]) -> dict[str, Any]:
-    interaction_types = {"ai_review", "user_via_ai", "user_via_ai_dispatch"}
+def _pending_ai_review_guidance(row: Any, ai_config_id: Optional[int]) -> dict[str, Any]:
     confirmation_type = str(getattr(row, "confirmation_type", "explicit") or "explicit")
     assigned_ai_id = getattr(row, "ai_config_id", None)
     can_respond = bool(
         ai_config_id
         and assigned_ai_id == int(ai_config_id)
-        and confirmation_type in interaction_types
+        and confirmation_type == "ai_review"
     )
     return {
         "id": str(getattr(row, "id", "") or ""),
@@ -97,10 +96,10 @@ def _pending_confirmation_guidance(row: Any, ai_config_id: Optional[int]) -> dic
         "expires_at": getattr(row, "expires_at", None),
         "assigned_ai_config_id": assigned_ai_id,
         "can_respond": can_respond,
-        "required_action": "automation.manage:respond" if can_respond else "user_confirmation",
+        "required_action": "automation.manage:respond" if can_respond else "unavailable",
         "guidance": (
             "调用 automation.manage action=respond，并提供 approved。"
             if can_respond
-            else "此门禁必须由真人用户确认；AI 不应反复调用 respond。"
+            else "该 AI 审核交互不属于当前 AI，不能响应。"
         ),
     }

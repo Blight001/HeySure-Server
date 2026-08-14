@@ -38,8 +38,6 @@ def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_
     导致 AI 之间无法互相通信。名单只从 DB 读取，保证 gateway 预览与
     ai-runtime 两进程组装结果一致。
     """
-    from mcp_runtime.mcp.permissions import ROLE_LABELS_ZH, config_role_tier
-
     rows = session.exec(
         select(AssistantAIConfig).where(
             AssistantAIConfig.user_id == user_id,
@@ -55,8 +53,12 @@ def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_
         if cfg_id == int(self_ai_config_id):
             self_name = str(cfg.name or "").strip()
             continue
-        tier = config_role_tier(cfg)
-        label = ROLE_LABELS_ZH.get(tier, tier)
+        if str(cfg.ai_role or "").strip() == "assistant_admin":
+            label = "辅助管理员"
+        elif str(cfg.digital_member_role or "").strip() == "manager":
+            label = "数字成员·管理者"
+        else:
+            label = "数字成员·普通成员"
         if bool(getattr(cfg, "is_librarian", False)):
             label += "，图书管理员"
         lines.append(f"- ID {cfg_id}：{cfg.name}（{label}）")

@@ -20,7 +20,7 @@ WORKFLOW_CHAT_WAIT_GRACE_SECONDS = 300
 def mcp_call_timeout(tool: str, arguments: dict) -> float:
     action = str((arguments or {}).get("action") or "").strip().lower()
     if tool == "automation.manage" and action in {"start", "run"}:
-        return float(settings.workflow_confirmation_timeout_seconds + WORKFLOW_CHAT_WAIT_GRACE_SECONDS)
+        return float(settings.workflow_chat_wait_timeout_seconds + WORKFLOW_CHAT_WAIT_GRACE_SECONDS)
     return 120.0
 
 

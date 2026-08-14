@@ -243,7 +243,7 @@ def test_joined_tool_events_preserve_skip_and_execution_order(monkeypatch):
         tool_execution.iter_joined_tool_executions(
             request,
             should_stop=lambda: False,
-            mark_waiting=waiting.append,
+            mark_waiting=lambda tool, arguments: waiting.append((tool, arguments)),
         )
     )
 
@@ -251,7 +251,7 @@ def test_joined_tool_events_preserve_skip_and_execution_order(monkeypatch):
     assert events[0].execution.failed is True
     assert events[0].execution.error == "unsafe joined call"
     assert events[1].execution.failed is False
-    assert waiting == ["workspace.read"]
+    assert waiting == [("workspace.read", {"path": "README.md"})]
 
 
 def test_joined_tool_events_emit_explicit_stop_before_next_call():
@@ -267,7 +267,7 @@ def test_joined_tool_events_emit_explicit_stop_before_next_call():
         tool_execution.iter_joined_tool_executions(
             request,
             should_stop=lambda: True,
-            mark_waiting=lambda _tool: None,
+            mark_waiting=lambda _tool, _arguments: None,
         )
     )
 

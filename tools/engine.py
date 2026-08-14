@@ -5,10 +5,9 @@
 形态不同：
 
 - **图书馆**：1:1 绑定、注册 ``DevicePresence``、自带 handler，工具经内置设备分发。
-- **工具箱**：多绑（新建 AI 时默认绑定，之后完全由用户在设备/AI配置中管理绑定与解绑），
-  **不注册 presence、不经内置设备分发**——它只是一个绑定标记 + 展示条目。
-  注意：系统自带 MCP 工具（knowledge.search 等）现已改为直接调用，不再受工具箱绑定硬门禁；
-  工具箱绑定/scope 主要用于 UI 分组与治理展示。调用时仍来自常规服务端注册表。
+- **工具箱**：多绑（新建 AI 时默认绑定，之后完全由用户在设备栏目管理绑定与解绑），
+  **不注册 presence、不经内置设备分发**——它提供绑定标记、成员 scope 和展示条目。
+  系统自带 MCP 工具只有出现在该成员的工具箱 scope 中才能调用。
 
 本模块收拢工具箱设备的全部自有逻辑：身份/展示、能力清单、绑定读写、以及"哪些
 工具属于工具箱（需绑定）"的门禁判定。中央权限层与注册表核心只调用这里，不再内联
@@ -56,8 +55,7 @@ def _library_bound_tools() -> Set[str]:
 def is_toolbox_gated_tool(tool_name: str) -> bool:
     """该工具是否属于「工具箱」分类（用于 UI 分组/展示）。
 
-    注意：运行时调用已不再以此作为硬门禁（系统自带 MCP 直接可用）。仅服务端固定工具
-    来自 MCPRegistry；端侧工具走各自 scope，不受此分类影响。"""
+    服务端固定工具来自 MCPRegistry；端侧工具走各自设备 scope。"""
     name = str(tool_name or "").strip()
     if not name or name in _library_bound_tools() or name in TOOLBOX_GATE_EXEMPT:
         return False
@@ -66,7 +64,7 @@ def is_toolbox_gated_tool(tool_name: str) -> bool:
 
         return any(str(t.get("name") or "").strip() == name for t in registry.list_tools())
     except Exception:
-        # 注册表不可用时 fail-open（不门禁），避免误删任何工具。
+        # 注册表不可用时无法把名字归入工具箱。
         return False
 
 
@@ -148,7 +146,7 @@ def toolbox_connected_entry_for_user(user_id) -> Dict[str, Any]:
 
 
 def enforce_toolbox_binding(tool_name: str, user_id: int, ai_config_id: Optional[int]) -> None:
-    """工具箱绑定门禁：工具箱工具需绑定工具箱。
+    """工具箱门禁：工具需同时满足成员绑定和该设备成员 scope。
 
     没有 ``ai_config_id`` 视为核心 / 管理员直调，放行；自省工具始终放行。非工具箱
     工具（图书馆/端侧/内置设备）不在本判定内。拒绝以 ``HTTPException`` 抛出。"""
@@ -162,6 +160,20 @@ def enforce_toolbox_binding(tool_name: str, user_id: int, ai_config_id: Optional
         raise HTTPException(
             status_code=403,
             detail=f"该 AI 未绑定工具箱，无法调用 {tool_name}（请在 AI 配置或世界中绑定工具箱）",
+        )
+    from api.devices.mcp_permissions import get_scope
+
+    selected = get_scope(
+        user_id,
+        toolbox_device_id_for_user(user_id),
+        ai_config_id,
+    )
+    if selected is not None and tool_name not in selected:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=403,
+            detail=f"该 AI 的工具箱 MCP 权限范围未启用 {tool_name}",
         )
 
 
@@ -222,9 +234,8 @@ def _parse_int(value: Any) -> Optional[int]:
 def toolbox_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Set[str]:
     """Server (non-library) fixed MCP tools for an AI via toolbox binding + scope.
 
-    Used primarily for UI grouping ("工具箱 MCP 权限") and display. Runtime allow-lists
-    now force-include system built-ins directly (no hard gate); this may return a subset
-    or empty when unbound but calls to knowledge.search etc. will still succeed.
+    This is the authoritative server-tool projection for model exposure and
+    execution. Unbound members receive no toolbox tools.
     """
     config_id = _parse_int(ai_config_id)
     uid = _parse_int(user_id)
@@ -254,51 +265,3 @@ def toolbox_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int]
         return tb_all
 
     return tb_all & scope
-
-
-def sanitize_mcp_tools(raw: Optional[str], *, user_id: Optional[int] = None, ai_config_id: Optional[int] = None) -> str:
-    """彻底清理一份 mcp_tools 字符串：
-    - 归一并删除所有老细粒度名字（admin.get_overview 等）
-    - 如果传了 user_id + ai_config_id，会根据当前绑定状态过滤掉需要图书馆的治理工具（系统自带 MCP 如 knowledge.search 现在直接可用，不再因工具箱绑定被清理）
-    - 保留自省工具
-    返回可直接存回 AssistantAIConfig.mcp_tools 的 JSON 字符串。
-    """
-    from api.mcp_tool_aliases import fully_clean_tool_names
-    from api.services.tasks.task_system import with_workspace_read_by_name_compat
-    from connector_runtime.dispatch.desktop_device_tools import strip_endpoint_tool_config_names
-    from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
-    import json
-
-    try:
-        parsed = json.loads(raw or "[]")
-        if not isinstance(parsed, list):
-            parsed = []
-        names = {str(x).strip() for x in parsed if isinstance(x, str) and str(x).strip()}
-
-        # 1. 彻底消灭老名字
-        names = fully_clean_tool_names(names)
-
-        # 2. 基础处理
-        names = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(names))
-        names.update(MCP_INTROSPECTION_TOOLS)
-
-        # 3. 仅清理图书馆绑定类（系统自带工具如 knowledge.search / workspace.* / todo.manage 直接调用，不按工具箱绑定剥离）
-        if user_id and ai_config_id:
-            try:
-                from api.devices.workshop_bindings import config_bound_to_library
-                from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
-
-                protected = set(MCP_INTROSPECTION_TOOLS or set())
-
-                if not config_bound_to_library(int(user_id), int(ai_config_id)):
-                    names -= (set(LIBRARY_BOUND_TOOLS) - protected)
-
-                # toolbox gated strip removed: system MCPs are direct
-            except Exception:
-                pass  # fail soft
-
-        cleaned_list = sorted(n for n in names if n)
-        return json.dumps(cleaned_list, ensure_ascii=False)
-    except Exception:
-        # 最坏情况返回只保留自省工具的干净列表
-        return json.dumps(sorted(MCP_INTROSPECTION_TOOLS), ensure_ascii=False)

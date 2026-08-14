@@ -7,7 +7,6 @@ are loaded only when a view is explicitly requested.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
@@ -83,40 +82,32 @@ def _resolve_eligible_names(user, cfg, request, registry_names):
     from connector_runtime.dispatch.desktop_device_tools import (
         endpoint_bridge_tools_for_config,
         endpoint_tools_for_config,
-        strip_endpoint_tool_config_names,
         toolbox_tools_for_config,
     )
     from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
     from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
     from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
-    from api.services.tasks.task_system import with_workspace_read_by_name_compat
 
     user_id = int(user.id or 0)
     ai_config_id = request.ai_config_id
     introspection = set(MCP_INTROSPECTION_TOOLS)
-    configured = fully_clean_tool_names(_configured_names(cfg))
-    configured = strip_endpoint_tool_config_names(
-        with_workspace_read_by_name_compat(configured)
-    )
     if cfg is not None and not bool(getattr(cfg, "mcp_enabled", False)):
         return introspection, set()
     endpoint_names = set(endpoint_tools_for_config(ai_config_id, user_id))
     bridge_names = set(endpoint_bridge_tools_for_config(ai_config_id, user_id))
     toolbox_names = _safe_toolbox_names(toolbox_tools_for_config, ai_config_id, user_id)
-    direct_names = registry_names - set(LIBRARY_BOUND_TOOLS)
-    required = introspection | set(request.task_required_tools) | set(request.extra_required_tools)
-    eligible_names = direct_names | configured | endpoint_names | bridge_names | toolbox_names | required
-    retained = endpoint_names | bridge_names | toolbox_names | direct_names | introspection
-    eligible_names = _apply_task_override(eligible_names, request.override_tools, retained)
-    eligible_names = _apply_library_binding(
-        eligible_names, configured, user_id, ai_config_id, set(LIBRARY_BOUND_TOOLS)
+    library_names = _library_tools_for_config(
+        user_id,
+        ai_config_id,
+        registry_names & set(LIBRARY_BOUND_TOOLS),
     )
-    eligible_names = _apply_role_policy(eligible_names, registry_names, user, cfg) | required
+    eligible_names = endpoint_names | bridge_names | toolbox_names | library_names | introspection
+    eligible_names = _apply_task_override(eligible_names, request.override_tools, introspection)
     eligible_names = fully_clean_tool_names(eligible_names)
     eligible_names = _apply_selected_scope(
         eligible_names,
         request.selected_tools,
-        introspection | set(request.task_required_tools),
+        introspection,
     )
     return eligible_names, endpoint_names
 
@@ -280,44 +271,31 @@ def _placeholder_capability(name: str, endpoint_names: set[str]) -> ToolCapabili
     )
 
 
-def _configured_names(cfg: Optional[AssistantAIConfig]) -> set[str]:
-    try:
-        parsed = json.loads(getattr(cfg, "mcp_tools", "") or "[]")
-    except Exception:
-        return set()
-    if not isinstance(parsed, list):
-        return set()
-    return {str(item).strip() for item in parsed if isinstance(item, str) and str(item).strip()}
-
-
-def _apply_task_override(names: set[str], override: Optional[frozenset[str]], retained: set[str]) -> set[str]:
+def _apply_task_override(
+    names: set[str],
+    override: Optional[frozenset[str]],
+    retained: set[str],
+) -> set[str]:
     if override is None:
         return set(names)
-    return set(override) | retained
+    return (set(names) & set(override)) | (set(names) & set(retained))
 
 
-def _apply_library_binding(names, configured, user_id, ai_config_id, library_tools):
-    result = set(names)
-    result -= library_tools - set(configured)
-    if not ai_config_id:
-        return result
+def _library_tools_for_config(user_id, ai_config_id, library_tools):
+    """Resolve built-in library tools from its device binding and member scope."""
+    if not ai_config_id or not library_tools:
+        return set()
     try:
+        from api.devices.mcp_permissions import get_scope
         from api.devices.workshop_bindings import config_bound_to_library
+        from library.engine import device_id_for_user
 
         if not config_bound_to_library(user_id, ai_config_id):
-            result -= library_tools
+            return set()
+        scope = get_scope(user_id, device_id_for_user(user_id), ai_config_id)
+        return set(library_tools) if scope is None else set(library_tools) & set(scope)
     except Exception:
-        result -= library_tools
-    return result
-
-
-def _apply_role_policy(names, registry_names, user, cfg):
-    if cfg is None:
-        return set(names)
-    from mcp_runtime.mcp.permissions import effective_allowed_for_config
-
-    allowed_server = effective_allowed_for_config(user, cfg, registry_names)
-    return (set(names) - registry_names) | (set(names) & set(allowed_server))
+        return set()
 
 
 def _apply_selected_scope(names, selected, preserved):

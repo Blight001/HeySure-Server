@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 import time
-from typing import Callable, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 from api.chat_runtime.chat_prompt_utils import (
     _build_mcp_display_result,
@@ -191,7 +191,7 @@ def execute_tool_call(
 def iter_joined_tool_executions(
     request: JoinedToolRequest,
     should_stop: Callable[[], bool],
-    mark_waiting: Callable[[str], None],
+    mark_waiting: Callable[[str, Dict[str, Any]], None],
 ) -> Iterator[JoinedToolEvent]:
     """Yield each joined-tool outcome in execution/persistence order."""
 
@@ -220,7 +220,7 @@ def iter_joined_tool_executions(
                 latency=time.perf_counter() - started_at,
             )
         else:
-            mark_waiting(tool)
+            mark_waiting(tool, request.arguments)
             execution = execute_tool_call(
                 tool,
                 request.user_id,

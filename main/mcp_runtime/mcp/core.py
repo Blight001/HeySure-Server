@@ -1,7 +1,6 @@
 import asyncio
 import contextvars
 import inspect
-import json
 import logging
 import os
 import time
@@ -12,7 +11,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.models import AIRuntimeStatus, AssistantAIConfig
+from api.models import AIRuntimeStatus
 from api.services.storage.workspace_scope import member_workspace_dir
 from api.sio import sio
 
@@ -23,9 +22,8 @@ _IGNORED_WORKSPACE_DIRS = {".git", ".heysure", "__pycache__", "venv", "node_modu
 def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
     """Resolve the working directory available to an AI.
 
-    Manager digital members can manage the whole user workspace. Assistant
-    admins and regular members use their own ``<id>-<slug>`` subdirectory.
-    Callers that pass no ``ai_config_id`` get the user root.
+    Every AI member uses its own ``<id>-<slug>`` subdirectory. Callers that
+    pass no ``ai_config_id`` get the user root.
 
     Note: the shared knowledge base is resolved separately
     (``user_shared_knowledge_dir``) so it stays one-per-user across AIs.
@@ -215,21 +213,11 @@ def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Option
                 status_code=403,
                 detail=f"该 AI 未绑定图书馆，无法调用 {tool_name}（请在 AI 配置或世界中绑定图书馆）",
             )
-        # Binding opens the library device; the per-AI saved subset still
-        # decides which library MCPs this member may invoke.
-        from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
-        with Session(engine) as session:
-            cfg = session.exec(
-                select(AssistantAIConfig).where(
-                    AssistantAIConfig.user_id == int(user_id),
-                    AssistantAIConfig.id == int(ai_config_id),
-                )
-            ).first()
-        try:
-            selected = fully_clean_tool_names(json.loads(cfg.mcp_tools or "[]")) if cfg else set()
-        except Exception:
-            selected = set()
-        if tool_name not in selected:
+        from api.devices.mcp_permissions import get_scope
+        from library.engine import device_id_for_user
+
+        selected = get_scope(user_id, device_id_for_user(user_id), ai_config_id)
+        if selected is not None and tool_name not in selected:
             raise HTTPException(
                 status_code=403,
                 detail=f"该 AI 的图书馆 MCP 权限范围未启用 {tool_name}",

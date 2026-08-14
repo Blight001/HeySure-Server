@@ -1,6 +1,6 @@
 import hashlib
 import json
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import AssistantAIConfig
 from api.devices.presence import online_tool_defs_for_user
+from api.services.mcp.capability_types import ToolCapability
 _TOOL_NAME_STOP_CHARS = (":", "：", "!", "！")
 MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
 
@@ -80,6 +81,25 @@ def _eligible_tool_names(
     allowed = _allowed_tool_names(user_id, ai_config_id)
     resolved = {_resolve_tool_alias(name, available) for name in allowed}
     return {name for name in resolved if name in available}
+
+
+def _scoped_eligible_capabilities(
+    user_id: int,
+    ai_config_id: Optional[int],
+) -> Optional[Mapping[str, ToolCapability]]:
+    """Return the authoritative descriptions for one AI's eligible tools.
+
+    Calls without an AI context retain the privileged full-catalog behaviour.
+    Keeping the capability objects (rather than only their names) matters for
+    query mode: bound device MCP descriptions may not exist in this process's
+    global presence snapshot, while ``ScopedToolView`` already resolved the
+    correct bound provider and schema.
+    """
+    if ai_config_id is None:
+        return None
+    from api.services.mcp.capability_view import scoped_tool_view_for_ids
+
+    return scoped_tool_view_for_ids(user_id, ai_config_id).eligible
 
 
 def _eligibility_revision(eligible: set[str]) -> str:
@@ -266,6 +286,31 @@ def _describe_one_tool(name: str, endpoint_defs: Dict[str, Any], user_id: int = 
     })
 
 
+def _describe_capability(capability: ToolCapability) -> Dict[str, Any]:
+    """Render a scoped capability using the same public describe contract."""
+    result: Dict[str, Any] = {
+        "name": capability.canonical_name,
+        "description": capability.description,
+        "inputSchema": dict(capability.input_schema),
+        "destructive": capability.destructive,
+    }
+    if capability.implementation is not None:
+        result["implementation"] = dict(capability.implementation)
+    return _with_schema_version(result)
+
+
+def _describe_eligible_tool(
+    name: str,
+    endpoint_defs: Dict[str, Any],
+    user_id: int,
+    capabilities: Optional[Mapping[str, ToolCapability]],
+) -> Dict[str, Any]:
+    capability = capabilities.get(name) if capabilities is not None else None
+    if capability is not None:
+        return _describe_capability(capability)
+    return _describe_one_tool(name, endpoint_defs, user_id)
+
+
 def current_tool_schema_versions(user_id: int, names: Iterable[str]) -> Dict[str, str]:
     """Resolve current effective versions using the same source as describe_tool."""
     endpoint_defs = online_tool_defs_for_user(user_id)
@@ -305,6 +350,7 @@ def _describe_query(
     endpoint_defs: Dict[str, Any],
     user_id: int,
     ai_config_id: Optional[int],
+    capabilities: Optional[Mapping[str, ToolCapability]] = None,
 ) -> Dict[str, Any]:
     needle = query.lower()
     eligible_lower = {name.lower() for name in eligible}
@@ -322,7 +368,9 @@ def _describe_query(
         matches = []
         hint = ""
         for name in sorted(eligible):
-            described = _describe_one_tool(name, endpoint_defs, user_id)
+            described = _describe_eligible_tool(
+                name, endpoint_defs, user_id, capabilities
+            )
             haystack = f"{name} {described.get('description') or ''}".lower()
             if needle in haystack:
                 matches.append(described)
@@ -348,6 +396,7 @@ def _describe_requested(
     endpoint_defs: Dict[str, Any],
     user_id: int,
     ai_config_id: Optional[int],
+    capabilities: Optional[Mapping[str, ToolCapability]] = None,
 ) -> Dict[str, Any]:
     results: list[Dict[str, Any]] = []
     errors: list[Dict[str, str]] = []
@@ -363,7 +412,9 @@ def _describe_requested(
         if resolved in seen_results:
             continue
         seen_results.add(resolved)
-        described = _describe_one_tool(resolved, endpoint_defs, user_id)
+        described = _describe_eligible_tool(
+            resolved, endpoint_defs, user_id, capabilities
+        )
         described["requested_name"] = raw
         results.append(described)
     if not is_batch and not results:
@@ -394,7 +445,12 @@ def _mcp_describe_tool(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
         {name: spec for name, spec in _workshop_tool_defs().items() if name not in endpoint_defs}
     )
     available = _describable_tool_names(endpoint_defs)
-    eligible = _eligible_tool_names(user_id, ai_config_id, available)
+    capabilities = _scoped_eligible_capabilities(user_id, ai_config_id)
+    eligible = (
+        set(capabilities)
+        if capabilities is not None
+        else _eligible_tool_names(user_id, ai_config_id, available)
+    )
 
     requested, query, is_batch = _parse_describe_request(args)
     if len(requested) > 25:
@@ -406,6 +462,7 @@ def _mcp_describe_tool(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
             endpoint_defs=endpoint_defs,
             user_id=user_id,
             ai_config_id=ai_config_id,
+            capabilities=capabilities,
         )
     if not requested:
         raise HTTPException(status_code=400, detail="tool, tools, or query is required")
@@ -416,4 +473,5 @@ def _mcp_describe_tool(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
         endpoint_defs=endpoint_defs,
         user_id=user_id,
         ai_config_id=ai_config_id,
+        capabilities=capabilities,
     )

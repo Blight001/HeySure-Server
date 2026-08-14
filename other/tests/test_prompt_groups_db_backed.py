@@ -76,9 +76,12 @@ def test_device_groups_are_built_from_db_presence(monkeypatch):
     monkeypatch.setattr(
         "api.devices.presence.online_device_display_names", lambda user_id: {}
     )
+    monkeypatch.setattr(
+        "api.devices.presence.online_device_prompt_metadata",
+        lambda user_id: {device_id: {"purpose": "用于操作当前浏览器中的测试后台"}},
+    )
     # Per-agent scope opens exactly these tools.
     monkeypatch.setattr(g, "get_scope", lambda user_id, did, *_: set(browser_caps) if did == device_id else None)
-    monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
     monkeypatch.setattr(g, "is_endpoint_agent_tool", lambda name: name.startswith("browser_"))
     # Keep the library-binding probe off the DB.
     monkeypatch.setattr("api.devices.workshop_bindings.config_bound_to_library", lambda u, c: False)
@@ -94,6 +97,7 @@ def test_device_groups_are_built_from_db_presence(monkeypatch):
     assert len(device_groups) == 1, groups
     grp = device_groups[0]
     assert grp.get("deviceId") == device_id
+    assert grp.get("groupDescription") == "用于操作当前浏览器中的测试后台"
     assert {t["name"] for t in grp["tools"]} == browser_caps
     # The empty fallback group must NOT appear when a real device is present.
     assert not any(x.get("groupKey") == "device:none" for x in groups)
@@ -116,8 +120,11 @@ def test_custom_device_group_keeps_its_tools(monkeypatch):
         "api.devices.presence.online_device_display_names",
         lambda user_id: {device_id: "AI账号管理总台"},
     )
+    monkeypatch.setattr(
+        "api.devices.presence.online_device_prompt_metadata",
+        lambda user_id: {device_id: {"purpose": "用于管理 AI 账号与密钥"}},
+    )
     monkeypatch.setattr(g, "get_scope", lambda user_id, did, *_: set(custom_caps) if did == device_id else None)
-    monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
     # In production these names classify as desktop-class endpoint tools via the
     # presence snapshot (custom devices land in the desktop bucket).
     monkeypatch.setattr(g, "is_endpoint_agent_tool", lambda name: name in custom_caps)
@@ -136,6 +143,7 @@ def test_custom_device_group_keeps_its_tools(monkeypatch):
     assert grp.get("deviceId") == device_id
     assert grp.get("deviceType") == "custom"
     assert grp.get("groupLabel") == "AI账号管理总台 MCP"
+    assert grp.get("groupDescription") == "用于管理 AI 账号与密钥"
     assert {t["name"] for t in grp["tools"]} == custom_caps
 
 
@@ -149,7 +157,9 @@ def test_empty_device_fallback_when_no_presence(monkeypatch):
     monkeypatch.setattr(
         "api.devices.presence.online_device_display_names", lambda user_id: {}
     )
-    monkeypatch.setattr(g, "_config_selected_tool_names", lambda ai_config_id, user_id: set())
+    monkeypatch.setattr(
+        "api.devices.presence.online_device_prompt_metadata", lambda user_id: {}
+    )
     monkeypatch.setattr("api.devices.workshop_bindings.config_bound_to_library", lambda u, c: False)
 
     groups = g.build_prompt_tool_groups(

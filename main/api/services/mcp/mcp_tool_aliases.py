@@ -3,7 +3,7 @@
 
 历史重构把 ``conversation.create`` / ``prompt.list_targets`` / ``admin.get_overview``
 等一批细粒度工具合并成 ``*.manage(action=...)``。一次性迁移会重写已落库的
-``cfg.mcp_tools`` / 角色授权，但**未迁到或迁后又写入旧名**的配置仍可能存着旧名；
+历史 ``cfg.mcp_tools`` 数据仍可能存着旧名；
 运行时解析 allow-list 时若不归一，这些旧名会以「注册表里已不存在、无描述」的死
 工具形式出现在 ``[动态 MCP 说明]`` 目录里。
 
@@ -84,6 +84,11 @@ RETIRED_TOOL_NAMES: Set[str] = {
     "admin.manage",
     "task.manage",
     "prompt.manage",
+    # 端侧 AI-FREE 的浏览器专用卡片入口。服务器通用卡片统一使用
+    # automation.manage；端侧 UI 仍可在本机使用这些兼容实现。
+    "manage_card",
+    "run_card",
+    "write_card",
 }
 
 

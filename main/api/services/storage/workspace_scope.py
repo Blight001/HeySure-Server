@@ -18,8 +18,8 @@ def member_workspace_dir(
 ) -> str:
     """Return the existing workspace scope used by MCP and persisted files.
 
-    Manager members intentionally retain their established user-root scope;
-    every other configured AI is isolated in its own named subdirectory.
+    Every configured AI is isolated in its own named subdirectory. Role fields
+    are labels and never widen filesystem access.
     """
 
     user_root = os.path.abspath(user_workspace_dir(int(user_id)))
@@ -35,13 +35,10 @@ def member_workspace_dir(
         if cfg is None:
             root = os.path.join(user_root, f"{int(ai_config_id)}-ai")
         else:
-            ai_role = str(cfg.ai_role or "").strip().lower()
-            member_role = str(cfg.digital_member_role or "").strip().lower()
-            if not (ai_role == "digital_member" and member_role == "manager"):
-                root = os.path.join(
-                    user_root,
-                    ai_workspace_dirname(cfg.id, cfg.name, cfg.ai_role),
-                )
+            root = os.path.join(
+                user_root,
+                ai_workspace_dirname(cfg.id, cfg.name, cfg.ai_role),
+            )
     root = os.path.abspath(root)
     if create:
         os.makedirs(root, exist_ok=True)

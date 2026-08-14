@@ -2,12 +2,13 @@ from types import SimpleNamespace
 
 from mcp_runtime.mcp.builtin_catalog import BUILTIN_TOOLS
 from mcp_runtime.mcp.permissions import requires_library_binding
+from tools import automation
 from tools.automation import (
     AUTOMATION_MANAGE_SCHEMA,
     _card_visible,
     _creation_tags,
     _is_admin_role,
-    _pending_confirmation_guidance,
+    _pending_ai_review_guidance,
     _updated_tags,
     _edit_card,
 )
@@ -68,6 +69,14 @@ def test_registry_exposes_one_aggregated_automation_toolbox_mcp():
     assert not requires_library_binding("automation.manage")
     actions = set(AUTOMATION_MANAGE_SCHEMA["properties"]["action"]["enum"])
     assert {"create", "edit", "start", "pause", "resume", "cancel", "delete"} <= actions
+    assert {"import", "clone", "retry", "export"}.isdisjoint(actions)
+
+
+@pytest.mark.parametrize("action", ["import", "clone", "retry", "export"])
+def test_removed_automation_actions_are_rejected(monkeypatch, action):
+    monkeypatch.setattr(automation, "_require_enabled", lambda **kwargs: None)
+    with pytest.raises(HTTPException, match="unsupported automation.manage action"):
+        automation._automation_manage(1, {"action": action}, 2)
 
 
 def test_automation_schema_prefers_recording_and_scopes_manual_edits_to_patches():
@@ -81,7 +90,22 @@ def test_automation_schema_prefers_recording_and_scopes_manual_edits_to_patches(
     assert "不要凭空手写复杂流程" in definition_description
 
 
-def test_pending_confirmation_guidance_distinguishes_user_and_ai_actions():
+def test_automation_description_teaches_ai_all_supported_node_shapes():
+    tool = next(item for item in BUILTIN_TOOLS if item.name == "automation.manage")
+    definition_description = AUTOMATION_MANAGE_SCHEMA["properties"]["definition"]["description"]
+    for description in (tool.description, definition_description):
+        assert "mcp" in description
+        assert "condition" in description
+        assert "delay" in description
+        assert "type:'ai'" in description
+        assert "end" in description
+        assert "完整步骤轨迹" in description
+        assert "action=respond" in description
+        assert "__workflow.ai_intervention" not in description
+        assert "${steps.<saveAs>.result.<字段>}" in description
+
+
+def test_removed_human_confirmation_is_not_actionable_by_ai():
     explicit = SimpleNamespace(
         id="confirm-user",
         step_id="dangerous",
@@ -90,8 +114,8 @@ def test_pending_confirmation_guidance_distinguishes_user_and_ai_actions():
         expires_at=123.0,
         ai_config_id=None,
     )
-    user_guidance = _pending_confirmation_guidance(explicit, 19)
-    assert user_guidance["required_action"] == "user_confirmation"
+    user_guidance = _pending_ai_review_guidance(explicit, 19)
+    assert user_guidance["required_action"] == "unavailable"
     assert user_guidance["can_respond"] is False
 
     ai_review = SimpleNamespace(
@@ -102,7 +126,7 @@ def test_pending_confirmation_guidance_distinguishes_user_and_ai_actions():
         expires_at=456.0,
         ai_config_id=19,
     )
-    ai_guidance = _pending_confirmation_guidance(ai_review, 19)
+    ai_guidance = _pending_ai_review_guidance(ai_review, 19)
     assert ai_guidance["required_action"] == "automation.manage:respond"
     assert ai_guidance["can_respond"] is True
 

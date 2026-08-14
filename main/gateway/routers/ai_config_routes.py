@@ -17,7 +17,6 @@ from connector_runtime.bots import all_channels, iter_bots, sync_connection_dire
 logger = logging.getLogger(__name__)
 from api.database import get_session
 from api.core.settings import settings
-from mcp_runtime.mcp.permissions import clamp_tools_json, config_role_tier
 from api.models import (
     AIRuntimeStatus,
     AssistantAIConfig,
@@ -158,14 +157,6 @@ def create_ai_config(
     token_limit = body.token_limit or 10000
     bot_channel = _normalize_bot_channel(body.bot_channel)
     model_fields = _resolve_config_model_fields(user, body.model_preset_id, body.model)
-    raw_mcp_tools = body.mcp_tools or AssistantAIConfig.model_fields["mcp_tools"].default
-    tier = config_role_tier(
-        AssistantAIConfig(ai_role=role, digital_member_role=member_role)
-    )
-    clamped_mcp_tools = clamp_tools_json(user, tier, raw_mcp_tools)
-    # Note: system built-in MCP tools (e.g. knowledge.search) are now direct-callable.
-    # We no longer strip toolbox-gated names here; mcp_tools may contain them for legacy/display.
-    # Device scope / library binding still control what they should.
     raw_avatar = (body.avatar or "").strip()
     m = re.search(r'ai_avatars([1-9])', raw_avatar)
     avatar = f"ai_avatars{m.group(1)}.png" if m else "ai_avatars1.png"
@@ -195,7 +186,8 @@ def create_ai_config(
         enabled=True,
         mcp_enabled=body.mcp_enabled if body.mcp_enabled is not None else True,
         switch_key=switch_key,
-        mcp_tools=clamped_mcp_tools,
+        # MCP authorization lives exclusively on bound-device member scopes.
+        mcp_tools="[]",
         system_auto_control=compact_system_auto_control(
             body.system_auto_control or _default_system_auto_control_for_user(user)
         ),
@@ -324,6 +316,9 @@ def update_ai_config(
     updates.pop("workspace_root", None)
     # 人格 Prompt 列已删：从 setattr 循环里取出，单独落盘到 personas 文件。
     prompt_update = updates.pop("prompt", None)
+    # Deprecated flat tool selection is intentionally ignored. Device scopes
+    # are the single authorization source for every member.
+    updates.pop("mcp_tools", None)
     if "system_auto_control" in updates:
         updates["system_auto_control"] = compact_system_auto_control(updates["system_auto_control"])
     if next_ai_role == "assistant_admin":
@@ -332,10 +327,7 @@ def update_ai_config(
     for key, value in updates.items():
         setattr(cfg, key, value)
     cfg.enabled = True
-    # Narrow the saved tool set to what this AI's role tier is permitted to use.
-    cfg.mcp_tools = clamp_tools_json(user, config_role_tier(cfg), cfg.mcp_tools)
-    # Strip server toolbox-gated tools (now sourced only from toolbox scope).
-    # Note: stopped stripping is_toolbox_gated from mcp_tools (system MCPs direct).
+    cfg.mcp_tools = "[]"
     cfg.updated_at = time.time()
     session.add(cfg)
     session.commit()
@@ -530,14 +522,13 @@ def clone_ai_config(
         enabled=True,
         mcp_enabled=src.mcp_enabled,
         switch_key=f"assistant_{int(time.time() * 1000)}",
-        mcp_tools=clamp_tools_json(user, config_role_tier(src), src.mcp_tools),
+        mcp_tools="[]",
         system_auto_control=compact_system_auto_control(src.system_auto_control),
     )
     session.add(new_cfg)
     session.commit()
     session.refresh(new_cfg)
     _ensure_ai_workspace_dir(user.id, new_cfg.id)
-    # System built-in MCPs are direct (no strip of toolbox-gated names on clone).
     _write_persona_file(user.id, new_cfg, prompt=src_prompt)
     return _cfg_response(new_cfg, user.id)
 

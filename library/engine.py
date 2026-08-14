@@ -8,7 +8,7 @@
   放开 per-agent scope。该函数挂在 ``ensure_default_ai_for_user`` 上，
   用户登录/拉取 AI 列表时自动接入，设备面板与社会显示随之出现图书馆设备。
 - **专用绑定保留**：AI 仍通过兼容表 ``WorkshopAiBinding`` 与设备多对多绑定。
-- **知识库 MCP**：经注册表工具 ``knowledge.manage``（action 分发）提供，不经内置设备 scope。
+- **图书馆 MCP**：注册表治理工具与内置工具统一进入该设备的成员 scope。
 """
 
 import logging
@@ -58,6 +58,11 @@ def library_capability_names() -> List[str]:
         return []
 
 
+def scope_capability_names() -> List[str]:
+    """All MCP names governed by the library device's per-member scope."""
+    return sorted(set(capability_names()) | set(library_capability_names()))
+
+
 def tool_defs_map() -> Dict[str, Dict[str, Any]]:
     """``{name: {description, input_schema}}``，供在线快照/工具目录展示。"""
     allowed = set(capability_names())
@@ -71,6 +76,21 @@ def tool_defs_map() -> Dict[str, Dict[str, Any]]:
             "description": str(raw.get("description") or "").strip(),
             "input_schema": schema if isinstance(schema, dict) else {},
         }
+    try:
+        from mcp_runtime.mcp import registry
+
+        for raw in registry.list_tools():
+            name = str(raw.get("name") or "").strip()
+            if name not in set(library_capability_names()):
+                continue
+            schema = raw.get("inputSchema")
+            out[name] = {
+                "description": str(raw.get("description") or "").strip(),
+                "input_schema": schema if isinstance(schema, dict) else {},
+                "destructive": bool(raw.get("destructive")),
+            }
+    except Exception:
+        pass
     return out
 
 
@@ -94,7 +114,7 @@ def ensure_presence_for_user(user_id) -> None:
         from api.devices.mcp_permissions import reconcile_scope_with_capabilities
 
         device_id = device_id_for_user(uid)
-        caps = capability_names()
+        caps = scope_capability_names()
         upsert_presence(
             uid,
             device_id,
@@ -149,8 +169,8 @@ def connected_entry_for_user(user_id) -> Dict[str, Any]:
         "aiConfigId": bound_cfg_id,
         "boundAiConfigIds": bound_cfg_ids,
         "userId": int(user_id),
-        "capabilities": capability_names(),
-        # 治理类图书馆 MCP（按 AI 配置 mcp_tools 开关）。
+        "capabilities": scope_capability_names(),
+        # 兼容旧前端字段；实际授权统一读取该设备的 per-member scope。
         "libraryGovernanceTools": library_capability_names(),
         "libraryMcpCatalog": library_catalog,
         "version": "builtin",

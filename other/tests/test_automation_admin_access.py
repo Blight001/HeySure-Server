@@ -141,12 +141,6 @@ def test_admin_and_assistant_admin_card_access_policy():
         else:
             raise AssertionError("member executed another AI card")
 
-        cloned = automation._manage_card(
-            user_id,
-            {"action": "clone", "card_id": manager_card["id"]},
-            admin_id,
-        )
-        assert not any(str(tag).startswith("ai_owner:") for tag in cloned["tags"])
     finally:
         automation.engine = original_engine
         automation.create_validated_run = original_create

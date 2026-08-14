@@ -306,10 +306,10 @@ def test_machine_releases_read_transaction_before_each_joined_tool(monkeypatch):
     )
 
     def execute_batch(request, context):
-        context.mark_waiting("workspace.read")
+        context.mark_waiting("workspace.read", request.arguments)
         assert session.active is False
         session.active = True
-        context.mark_waiting("workspace.write")
+        context.mark_waiting("workspace.write", request.arguments)
         assert session.active is False
         return SimpleNamespace(stopped=False, failed=False, items=())
 

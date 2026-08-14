@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import logging
 import time
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlmodel import Session
 
@@ -69,7 +69,7 @@ class JoinedPersistenceContext:
     plan_active: bool
     phase_mcp_statuses: List[tuple]
     should_stop: Callable[[], bool]
-    mark_waiting: Callable[[str], None]
+    mark_waiting: Callable[[str, Dict[str, Any]], None]
 
 
 @dataclass(frozen=True)

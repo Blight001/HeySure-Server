@@ -14,10 +14,10 @@ from api.core.settings import settings
 from api.database import engine
 from api.models import WorkflowRun, WorkflowSchedulerHeartbeat
 from api.services.workflows.run_service import error_payload, fail_run, run_payload
-from api.services.workflows.run_service import expire_confirmations
 from api.services.workflows.ai_interaction import (
     advance_interactive_run,
     expire_ai_interactions,
+    retire_removed_human_confirmation_runs,
 )
 from api.services.workflows.ai_interaction_notifier import process_pending_ai_interactions
 from connector_runtime.dispatch.workflow_dispatch import (
@@ -51,26 +51,6 @@ async def _emit_updated_runs(since: float) -> None:
         ).all()
     for row in rows:
         await sio.emit("workflow:run_update", run_payload(row), room=f"user_{row.user_id}")
-
-
-async def _emit_confirmation_updates(since: float) -> None:
-    from api.sio import sio
-    from api.services.workflows.confirmation_notifications import notification_events_since, notification_room
-
-    with Session(engine) as session:
-        requested, resolved = notification_events_since(session, since=since)
-    for payload in requested:
-        await sio.emit(
-            "workflow:confirmation_requested",
-            payload,
-            room=notification_room(payload["requested_user_id"]),
-        )
-    for payload in resolved:
-        await sio.emit(
-            "workflow:confirmation_resolved",
-            payload,
-            room=notification_room(payload["requested_user_id"]),
-        )
 
 
 async def _emit_user_notification_updates(since: float) -> None:
@@ -120,7 +100,7 @@ def _expire_waiting_runs(limit: int = 100) -> int:
             select(WorkflowRun)
             .where(
                 WorkflowRun.status.in_([
-                    "waiting_device", "waiting_confirmation", "waiting_ai", "retry_wait",
+                    "waiting_device", "waiting_ai", "retry_wait",
                     "paused_offline", "pending", "running",
                 ]),
                 WorkflowRun.deadline_at <= now,
@@ -146,12 +126,11 @@ async def run_workflow_scheduler(stop_event: asyncio.Event) -> None:
             reconcile_finished_dispatches()
             _expire_waiting_runs()
             with Session(engine) as session:
+                retire_removed_human_confirmation_runs(session)
                 expire_ai_interactions(session)
-                expire_confirmations(session)
             _advance_ready_runs()
             process_pending_ai_interactions()
             await dispatch_pending_steps()
-            await _emit_confirmation_updates(last_emit)
             await _emit_user_notification_updates(last_emit)
             await _emit_updated_runs(last_emit)
             last_emit = tick_started

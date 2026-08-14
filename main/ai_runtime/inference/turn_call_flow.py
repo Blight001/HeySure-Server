@@ -209,7 +209,7 @@ class TurnCallMachine:
 
     def _execute_regular(self, tool, arguments, call_id, pending):
         context = self.context
-        context.set_live_phase("waiting_mcp", tool)
+        context.set_live_phase("waiting_mcp", tool, arguments)
         release_clean_session_before_external_io(
             context.session,
             boundary=f"MCP tool {tool}",
@@ -245,12 +245,12 @@ class TurnCallMachine:
         )
         return TurnCallAction.NEXT_CALL
 
-    def _mark_joined_waiting(self, tool: str) -> None:
+    def _mark_joined_waiting(self, tool: str, arguments) -> None:
         release_clean_session_before_external_io(
             self.context.session,
             boundary=f"MCP tool {tool}",
         )
-        self.context.set_live_phase("waiting_mcp", tool)
+        self.context.set_live_phase("waiting_mcp", tool, arguments)
 
     def _record_execution(self, tool, execution) -> None:
         context = self.context

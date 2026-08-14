@@ -26,13 +26,7 @@ from .result_store import device_step_error, save_result
 from .secrets import decrypt_json, encrypt_json
 from .step_device_binding import step_contract, step_device_id
 from .workflow_cancellation import (
-    RUN_CONFIRMATION_SCOPE,
     cancel_workflow_run,
-    confirmation_granted,
-    decide_confirmation,
-    expire_confirmations,
-    renew_dispatch_step_deadline,
-    request_confirmation,
 )
 
 
@@ -191,6 +185,26 @@ def confirmation_payload(row: WorkflowConfirmation) -> Dict[str, Any]:
     }
 
 
+def _require_device_for_mcp_run(
+    session: Session,
+    user_id: int,
+    device_id: str,
+    definition: Dict[str, Any],
+) -> None:
+    has_device_steps = any(
+        isinstance(step, dict) and step.get("type") == "mcp"
+        for step in definition.get("steps", {}).values()
+    )
+    if not has_device_steps:
+        return
+    device = session.exec(select(DevicePresence).where(
+        DevicePresence.user_id == user_id,
+        DevicePresence.device_id == device_id,
+    )).first()
+    if not device:
+        raise ValueError("DEVICE_ACCESS_DENIED")
+
+
 def create_run(
     session: Session,
     *,
@@ -226,15 +240,8 @@ def create_run(
     ).first()
     if not version or not WorkflowCard.is_runnable_status(card.status):
         raise ValueError("CARD_VERSION_NOT_RUNNABLE")
-    device = session.exec(
-        select(DevicePresence).where(
-            DevicePresence.user_id == user_id,
-            DevicePresence.device_id == device_id,
-        )
-    ).first()
-    if not device:
-        raise ValueError("DEVICE_ACCESS_DENIED")
     definition = _load(version.definition_json, {})
+    _require_device_for_mcp_run(session, user_id, device_id, definition)
     selected_start, initial_status, variables, initial_wakeup = _initial_run_state(definition, actor, now=time.time())
     errors = list(Draft202012Validator(definition.get("inputSchema", {"type": "object"})).iter_errors(input_value))
     if errors:
@@ -262,13 +269,13 @@ def create_run(
     active_user_runs = session.exec(
         select(WorkflowRun).where(
             WorkflowRun.user_id == user_id,
-            WorkflowRun.status.in_(["pending", "running", "waiting_device", "waiting_confirmation", "retry_wait", "paused_offline", "paused"]),
+            WorkflowRun.status.in_(["pending", "running", "waiting_device", "waiting_ai", "retry_wait", "paused_offline", "paused"]),
         )
     ).all()
     if len(active_user_runs) >= int(settings.workflow_max_concurrent_per_user):
         raise ValueError("RUN_CONCURRENCY_LIMIT")
-    active_device_runs = [item for item in active_user_runs if item.device_id == device_id]
-    if len(active_device_runs) >= int(settings.workflow_max_concurrent_per_device):
+    active_device_runs = [item for item in active_user_runs if device_id and item.device_id == device_id]
+    if device_id and len(active_device_runs) >= int(settings.workflow_max_concurrent_per_device):
         raise ValueError("DEVICE_CONCURRENCY_LIMIT")
     session.add(row)
     # WorkflowAuditEvent.run_id has a foreign key but the models do not expose
@@ -346,7 +353,7 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
     run = session.exec(
         select(WorkflowRun).where(WorkflowRun.id == run_id).with_for_update(skip_locked=True)
     ).first()
-    if not run or run.status in TERMINAL_RUN_STATUSES or run.status in {"waiting_device", "waiting_confirmation", "paused"}:
+    if not run or run.status in TERMINAL_RUN_STATUSES or run.status in {"waiting_device", "waiting_ai", "paused"}:
         return run
     now = time.time()
     if run.status == "retry_wait" and (run.next_wakeup_at or 0) > now:
@@ -450,20 +457,6 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
             detail={"delay_seconds": delay_seconds, "wake_at": run.next_wakeup_at},
         )
         _pause_after_debug_step(run, now, entered_step_id)
-        session.commit()
-        return run
-
-    if step_type == "confirm":
-        request_confirmation(
-            session,
-            run=run,
-            step_id=run.current_step_id,
-            confirmation_type="explicit",
-            risk_summary=str(step.get("message") or step.get("riskSummary") or "请确认继续执行自动化卡片"),
-            timeout_seconds=int(step.get("timeoutSeconds", 300)),
-            next_step_id=str(step["next"]),
-            on_denied_step_id=str(step.get("onDenied") or ""),
-        )
         session.commit()
         return run
 

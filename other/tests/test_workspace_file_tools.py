@@ -14,9 +14,6 @@ class WorkspaceFileToolTests(unittest.TestCase):
         self.root_patch = patch("tools.workspace.get_project_root", return_value=self.root)
         self.root_patch.start()
         self.addCleanup(self.root_patch.stop)
-        self.manager_patch = patch("tools.workspace._caller_is_below_manager", return_value=False)
-        self.manager_patch.start()
-        self.addCleanup(self.manager_patch.stop)
 
     def test_missing_absolute_cwd_explains_execution_environment(self):
         missing = os.path.join(self.root, "missing-host-path")

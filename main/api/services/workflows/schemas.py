@@ -50,9 +50,5 @@ class RunCancel(BaseModel):
     reason: str = Field(default="cancelled by user", max_length=500)
 
 
-class RunConfirm(BaseModel):
-    approved: bool
-
-
 class RunRetry(BaseModel):
     idempotency_key: Optional[str] = Field(default=None, max_length=200)

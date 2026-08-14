@@ -16,12 +16,14 @@ from api.models import (
     DevicePresence,
     WorkflowCard,
     WorkflowCardVersion,
+    WorkflowAuditEvent,
     WorkflowConfirmation,
     WorkflowRun,
+    WorkflowStepRun,
 )
 
 from .audit import add_audit
-from .interaction_steps import AI_INTERVENTION_TOOL, is_ai_intervention_step
+from .interaction_steps import is_ai_review_step
 from .permissions import WorkflowDispatchError, validate_run_device
 from .run_service import (
     _redact,
@@ -30,15 +32,16 @@ from .run_service import (
     create_run,
     error_payload,
     fail_run,
-    renew_dispatch_step_deadline,
+    run_payload,
     RunActorContext,
+    step_payload,
 )
 from .secrets import decrypt_json
 
 
 AI_REVIEW_TYPES = {"ai_review"}
 ACTIVE_RUN_STATUSES = {
-    "pending", "running", "waiting_device", "waiting_confirmation", "waiting_ai",
+    "pending", "running", "waiting_device", "waiting_ai",
     "retry_wait", "paused_offline", "paused",
 }
 
@@ -66,23 +69,12 @@ def _dump(value: Any) -> str:
 
 
 def _interaction_spec(step_id: str, step: Dict[str, Any]) -> Optional[InteractionSpec]:
-    if step.get("type") == "confirm":
-        return InteractionSpec(
-            kind="user_via_ai",
-            step_id=step_id,
-            prompt=str(step.get("message") or step.get("riskSummary") or "请确认是否继续执行自动化卡片"),
-            next_step_id=str(step.get("next") or ""),
-            denied_step_id=str(step.get("onDenied") or ""),
-            save_as="",
-            timeout_seconds=int(step.get("timeoutSeconds", 300)),
-        )
-    if not is_ai_intervention_step(step):
+    if not is_ai_review_step(step):
         return None
-    arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
     return InteractionSpec(
         kind="ai_review",
         step_id=step_id,
-        prompt=str(arguments.get("prompt") or "请核对当前流程信息并决定是否继续"),
+        prompt=str(step.get("prompt") or "请核对当前流程信息并决定是否继续"),
         next_step_id=str(step.get("next") or ""),
         denied_step_id=str(step.get("onError") or "") if step.get("onError") != "fail" else "",
         save_as=str(step.get("saveAs") or ""),
@@ -141,7 +133,7 @@ def _request_interaction(
     if spec.kind == "ai_review" and not row.ai_config_id:
         raise ValueError("AI_INTERACTION_UNAVAILABLE")
     previous = run.status
-    run.status = "waiting_ai" if spec.kind == "ai_review" else "waiting_confirmation"
+    run.status = "waiting_ai"
     run.next_wakeup_at = row.expires_at
     run.updated_at = now
     run.lock_version += 1
@@ -149,7 +141,7 @@ def _request_interaction(
     session.add(run)
     add_audit(
         session,
-        event_type="ai_interaction_requested" if spec.kind == "ai_review" else "confirmation_requested",
+        event_type="ai_interaction_requested",
         run=run,
         step_id=spec.step_id,
         status_from=previous,
@@ -228,7 +220,7 @@ def _validate_concurrency(session: Session, user_id: int, device_id: str) -> Non
     )).all()
     if len(active) >= int(settings.workflow_max_concurrent_per_user):
         raise ValueError("RUN_CONCURRENCY_LIMIT")
-    if sum(item.device_id == device_id for item in active) >= int(settings.workflow_max_concurrent_per_device):
+    if device_id and sum(item.device_id == device_id for item in active) >= int(settings.workflow_max_concurrent_per_device):
         raise ValueError("DEVICE_CONCURRENCY_LIMIT")
 
 
@@ -243,6 +235,11 @@ def _validated_device_selection(
     if not version:
         return device_id, ""
     definition = _load(version.definition_json, {})
+    if any(
+        isinstance(step, dict) and step.get("type") == "confirm"
+        for step in definition.get("steps", {}).values()
+    ):
+        raise ValueError("CARD_VERSION_CONTAINS_REMOVED_CONFIRM_STEP")
     default_device_id = str(definition.get("defaultDeviceId") or "").strip()
     contract_ids = _load(version.contract_device_ids_json, [])
     if requested_device_id and contract_ids and requested_device_id not in contract_ids:
@@ -337,10 +334,6 @@ def _apply_approved_response(
         variables = _load(run.variables_json, {"steps": {}})
         variables.setdefault("steps", {})[item.save_as] = {"result": response["parameters"], "error": None}
         run.variables_json = _dump(variables)
-    if item.confirmation_type == "user_via_ai_dispatch":
-        run.status = "waiting_device"
-        renew_dispatch_step_deadline(session, run, item.step_id)
-        return
     run.current_step_id = item.next_step_id
     run.status = "running"
 
@@ -371,6 +364,7 @@ def respond_ai_interaction(
     item = session.exec(select(WorkflowConfirmation).where(
         WorkflowConfirmation.run_id == run.id,
         WorkflowConfirmation.status == "pending",
+        WorkflowConfirmation.confirmation_type.in_(AI_REVIEW_TYPES),
         WorkflowConfirmation.ai_config_id == ai_config_id,
     ).order_by(WorkflowConfirmation.created_at.desc()).with_for_update(skip_locked=True)).first()
     if not item:
@@ -396,7 +390,7 @@ def respond_ai_interaction(
         event_type="ai_interaction_decided",
         run=run,
         step_id=item.step_id,
-        status_from="waiting_ai" if item.confirmation_type == "ai_review" else "waiting_confirmation",
+        status_from="waiting_ai",
         status_to=run.status,
         detail={"confirmation_id": item.id, "decision": item.status},
     )
@@ -405,11 +399,69 @@ def respond_ai_interaction(
     return run
 
 
-def interaction_confirmation_payload(row: WorkflowConfirmation) -> Dict[str, Any]:
+def ai_review_history_payload(row: WorkflowConfirmation) -> Dict[str, Any]:
     payload = confirmation_payload(row)
     payload["ai_config_id"] = row.ai_config_id
     payload["notified_at"] = row.notified_at
     return payload
+
+
+def ai_review_payload(
+    session: Session,
+    run: WorkflowRun,
+    item: WorkflowConfirmation,
+) -> Dict[str, Any]:
+    steps = session.exec(select(WorkflowStepRun).where(
+        WorkflowStepRun.run_id == run.id,
+    ).order_by(WorkflowStepRun.started_at, WorkflowStepRun.id)).all()
+    events = session.exec(select(WorkflowAuditEvent).where(
+        WorkflowAuditEvent.run_id == run.id,
+    ).order_by(WorkflowAuditEvent.created_at, WorkflowAuditEvent.id)).all()
+    return {
+        "id": item.id,
+        "step_id": item.step_id,
+        "prompt": item.risk_summary,
+        "save_as": item.save_as,
+        "next_step_id": item.next_step_id,
+        "on_error_step_id": item.on_denied_step_id,
+        "expires_at": item.expires_at,
+        "run": run_payload(run),
+        "execution_trace": {
+            "events": [
+                {
+                    "event_type": event.event_type,
+                    "step_id": event.step_id,
+                    "status_from": event.status_from,
+                    "status_to": event.status_to,
+                    "detail": _load(event.detail_json, {}),
+                    "created_at": event.created_at,
+                }
+                for event in events
+            ],
+            "steps": [step_payload(step) for step in steps],
+        },
+    }
+
+
+def retire_removed_human_confirmation_runs(session: Session, limit: int = 100) -> int:
+    """Terminalize runs parked by the removed human-confirmation feature."""
+    rows = session.exec(select(WorkflowRun).where(
+        WorkflowRun.status == "waiting_confirmation",
+    ).limit(limit)).all()
+    for run in rows:
+        fail_run(
+            session,
+            run,
+            error_payload(
+                "HUMAN_CONFIRMATION_REMOVED",
+                "this workflow was waiting on a removed human confirmation node",
+                "interaction",
+            ),
+            status="cancelled",
+        )
+    if rows:
+        session.commit()
+    return len(rows)
 
 
 def expire_ai_interactions(session: Session, now: Optional[float] = None, limit: int = 100) -> int:

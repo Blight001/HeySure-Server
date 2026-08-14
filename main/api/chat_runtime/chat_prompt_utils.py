@@ -19,7 +19,6 @@ import requests
 from fastapi import HTTPException
 
 from mcp_runtime.mcp import registry
-from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
 from api.models import AssistantAIConfig, DEFAULT_MCP_FORMAT_ERROR_HINT
 from api.models.defaults import DEFAULT_MCP_NAMESPACE_HINTS, STALE_SERIAL_CALL_RULES
 from api.chat_runtime.mcp_parser import (
@@ -31,9 +30,6 @@ from api.chat_runtime.mcp_parser import (
 from connector_runtime.dispatch.desktop_device_tools import (
     endpoint_bridge_tools_for_config,
     endpoint_tools_for_config,
-)
-from api.services.tasks.task_system import (
-    with_workspace_read_by_name_compat,
 )
 from .run_state import (
     STATE_PREFIX,
@@ -94,22 +90,12 @@ def _looks_like_mcp_template(text: str) -> bool:
     return ("<mcp-call>" in src and has_tools_line and has_rules_line)
 
 def _parse_allowed_tools_for_cfg(cfg: Optional[AssistantAIConfig]) -> set[str]:
-    from connector_runtime.dispatch.desktop_device_tools import strip_endpoint_tool_config_names
-
     if not cfg:
         return set()
     try:
-        parsed = json.loads(cfg.mcp_tools or "[]")
-        if not isinstance(parsed, list):
-            return set()
-        raw_tools = {str(item).strip() for item in parsed if isinstance(item, str) and str(item).strip()}
-        from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
-        raw_tools = fully_clean_tool_names(raw_tools)
-        raw_tools = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(raw_tools))
-        raw_tools.update(MCP_INTROSPECTION_TOOLS)
-        raw_tools.update(endpoint_bridge_tools_for_config(getattr(cfg, "id", None), getattr(cfg, "user_id", None)))
-        raw_tools.update(endpoint_tools_for_config(getattr(cfg, "id", None), getattr(cfg, "user_id", None)))
-        return raw_tools
+        from api.services.mcp.capability_view import scoped_tool_view_for_ids
+
+        return set(scoped_tool_view_for_ids(cfg.user_id, cfg.id).eligible_names)
     except Exception:
         return set()
 
@@ -394,36 +380,16 @@ def _render_mcp_tool_catalog(allowed_tools: set[str], endpoint_tools: Optional[s
 def _filter_tools_for_current_bindings(
     allowed: set[str], user_id: int, ai_config_id: Optional[int]
 ) -> set[str]:
-    """Filter out tools that the AI cannot actually use because of missing bindings.
-
-    - LIBRARY_BOUND_TOOLS (图书馆设备的成员与治理工具: member.manage, knowledge.manage 等)
-      require library (workshop) binding and must also be selected in cfg.mcp_tools.
-    - System built-in server MCPs (knowledge.search, workspace.*, todo.manage, etc.) are DIRECT.
-    - Device/endpoint MCPs remain governed by per-agent scopes.
-    - Always preserve introspection tools (mcp.describe+tool etc.).
-    This keeps the catalog honest: only show/callable what can actually be used.
-    """
+    """Intersect a prompt candidate set with the authoritative device-scoped view."""
     if not ai_config_id:
         return set(allowed)
-    result = set(allowed)
     try:
-        from api.devices.workshop_bindings import config_bound_to_library
-        from mcp_runtime.mcp.core import MCP_INTROSPECTION_TOOLS
-        from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
-        # Note: toolbox binding no longer gates system built-in MCPs (knowledge.search,
-        # workspace.*, todo.manage etc. are direct). Only library task-management/governance remains gated.
-        # is_toolbox_gated_tool / config_bound_to_toolbox kept for UI grouping only.
+        from api.services.mcp.capability_view import scoped_tool_view_for_ids
 
-        protected = set(MCP_INTROSPECTION_TOOLS or set())
-        if not config_bound_to_library(int(user_id), int(ai_config_id)):
-            result -= (set(LIBRARY_BOUND_TOOLS) - protected)
-
-        # Toolbox-gated removal intentionally removed: system server MCPs are now
-        # always direct-callable (subject only to mcp_enabled + mode + library for bound tools).
+        eligible = set(scoped_tool_view_for_ids(user_id, ai_config_id).eligible_names)
+        return set(allowed) & eligible
     except Exception:
-        # Fail open on any lookup error to avoid breaking catalogs.
-        pass
-    return result
+        return set()
 
 
 def _build_dynamic_mcp_explanation(
@@ -653,22 +619,11 @@ def _build_mcp_stream_warning(
     unauthorized_tools = []
     unknown_tools = []
     if cfg and parsed_calls:
-        allowed_tools = set()
-        try:
-            parsed_allowed = json.loads(cfg.mcp_tools or "[]")
-            if isinstance(parsed_allowed, list):
-                allowed_tools = {str(v).strip() for v in parsed_allowed if isinstance(v, str) and str(v).strip()}
-                from connector_runtime.dispatch.desktop_device_tools import strip_endpoint_tool_config_names
-
-                allowed_tools = strip_endpoint_tool_config_names(with_workspace_read_by_name_compat(allowed_tools))
-        except Exception:
-            allowed_tools = set()
+        allowed_tools = _parse_allowed_tools_for_cfg(cfg)
 
         if not cfg.mcp_enabled:
             unauthorized_tools = [call["tool"] for call in parsed_calls]
         else:
-            allowed_tools.update(endpoint_bridge_tools_for_config(getattr(cfg, "id", None), getattr(cfg, "user_id", None)))
-            allowed_tools.update(endpoint_tools_for_config(getattr(cfg, "id", None), getattr(cfg, "user_id", None)))
             for call in parsed_calls:
                 tool = call["tool"]
                 if tool not in known_tools:
@@ -829,20 +784,33 @@ def _extract_delta_text(delta) -> str:
         return "".join(parts)
     return ""
 
+def _format_live_tool_arguments(arguments: Any) -> str:
+    """Render current MCP arguments without creating unbounded live frames."""
+    if arguments in (None, "", {}):
+        return ""
+    try:
+        rendered = json.dumps(arguments, ensure_ascii=False, indent=2, default=str)
+    except (TypeError, ValueError):
+        rendered = str(arguments)
+    limit = 4000
+    return rendered if len(rendered) <= limit else f"{rendered[:limit - 1]}…"
+
+def _live_snapshot(previous: Dict[str, object], **changes: object) -> Dict[str, object]:
+    snapshot = {
+        "text": previous.get("text", ""), "reasoning": previous.get("reasoning", ""),
+        "phase": previous.get("phase", "generating"), "current_tool": previous.get("current_tool", ""),
+        "current_tool_arguments": previous.get("current_tool_arguments", ""),
+        **{key: int(previous.get(key) or 0) for key in ("pending_prompt_tokens", "pending_completion_tokens", "pending_total_tokens")},
+        "updated_at": time.time(),
+    }
+    snapshot.update(changes)
+    return snapshot
+
 def _set_run_live_text(run_id: str, text: str):
     with _RUN_STATE_LOCK:
         prev = _RUN_LIVE_STATE.get(run_id) or {}
         meta = _RUN_LIVE_META.get(run_id) or {}
-        _RUN_LIVE_STATE[run_id] = {
-            "text": text,
-            "reasoning": prev.get("reasoning", ""),
-            "phase": prev.get("phase", "generating"),
-            "current_tool": prev.get("current_tool", ""),
-            "pending_prompt_tokens": int(prev.get("pending_prompt_tokens") or 0),
-            "pending_completion_tokens": int(prev.get("pending_completion_tokens") or 0),
-            "pending_total_tokens": int(prev.get("pending_total_tokens") or 0),
-            "updated_at": time.time(),
-        }
+        _RUN_LIVE_STATE[run_id] = _live_snapshot(prev, text=text)
         _RUN_LIVE_META[run_id] = meta
     _emit_run_live_update(run_id)
     # Mirror the growing answer to any external streaming observer (e.g. a QQ
@@ -859,14 +827,7 @@ def _set_run_live_reasoning(run_id: str, reasoning: str):
         prev = _RUN_LIVE_STATE.get(run_id) or {}
         meta = _RUN_LIVE_META.get(run_id) or {}
         force = bool(reasoning) and not bool(prev.get("reasoning"))
-        _RUN_LIVE_STATE[run_id] = {
-            "text": prev.get("text", ""),
-            "reasoning": reasoning,
-            "phase": prev.get("phase", "generating"),
-            "current_tool": prev.get("current_tool", ""),
-            **{key: int(prev.get(key) or 0) for key in ("pending_prompt_tokens", "pending_completion_tokens", "pending_total_tokens")},
-            "updated_at": time.time(),
-        }
+        _RUN_LIVE_STATE[run_id] = _live_snapshot(prev, reasoning=reasoning)
         _RUN_LIVE_META[run_id] = meta
     _emit_run_live_update(run_id, force=force)
 
@@ -876,20 +837,14 @@ def _get_run_live_reasoning(run_id: str) -> str:
         live = _RUN_LIVE_STATE.get(run_id) or {}
         return str(live.get("reasoning") or "")
 
-def _set_run_live_phase(run_id: str, phase: str, current_tool: str = ""):
+def _set_run_live_phase(run_id: str, phase: str, current_tool: str = "", current_tool_arguments: Any = None):
     with _RUN_STATE_LOCK:
         prev = _RUN_LIVE_STATE.get(run_id) or {}
         meta = _RUN_LIVE_META.get(run_id) or {}
-        _RUN_LIVE_STATE[run_id] = {
-            "text": prev.get("text", ""),
-            "reasoning": prev.get("reasoning", ""),
-            "phase": phase,
-            "current_tool": current_tool,
-            "pending_prompt_tokens": int(prev.get("pending_prompt_tokens") or 0),
-            "pending_completion_tokens": int(prev.get("pending_completion_tokens") or 0),
-            "pending_total_tokens": int(prev.get("pending_total_tokens") or 0),
-            "updated_at": time.time(),
-        }
+        _RUN_LIVE_STATE[run_id] = _live_snapshot(
+            prev, phase=phase, current_tool=current_tool,
+            current_tool_arguments=_format_live_tool_arguments(current_tool_arguments) if phase == "waiting_mcp" and current_tool else "",
+        )
         _RUN_LIVE_META[run_id] = meta
     # Phase/tool transitions are rare but UI-critical — force past the throttle so
     # the MCP call shows the moment execution starts, not after the next text push.
@@ -904,16 +859,11 @@ def _set_run_live_usage(
     with _RUN_STATE_LOCK:
         prev = _RUN_LIVE_STATE.get(run_id) or {}
         meta = _RUN_LIVE_META.get(run_id) or {}
-        _RUN_LIVE_STATE[run_id] = {
-            "text": prev.get("text", ""),
-            "reasoning": prev.get("reasoning", ""),
-            "phase": prev.get("phase", "generating"),
-            "current_tool": prev.get("current_tool", ""),
-            "pending_prompt_tokens": max(0, int(prompt_tokens or 0)),
-            "pending_completion_tokens": max(0, int(completion_tokens or 0)),
-            "pending_total_tokens": max(0, int(total_tokens or 0)),
-            "updated_at": time.time(),
-        }
+        _RUN_LIVE_STATE[run_id] = _live_snapshot(
+            prev, pending_prompt_tokens=max(0, int(prompt_tokens or 0)),
+            pending_completion_tokens=max(0, int(completion_tokens or 0)),
+            pending_total_tokens=max(0, int(total_tokens or 0)),
+        )
         _RUN_LIVE_META[run_id] = meta
     _emit_run_live_update(run_id)
 
@@ -927,6 +877,19 @@ def _set_run_live_meta(run_id: str, **meta: object) -> None:
         current = dict(_RUN_LIVE_META.get(run_id) or {})
         current.update({k: v for k, v in meta.items() if v is not None})
         _RUN_LIVE_META[run_id] = current
+
+async def _send_run_live_payload(run_id: str, user_id: object, payload: Dict[str, object]) -> None:
+    try:
+        await sio.emit("chat:run_live", payload, room=f"user_{int(user_id)}")
+    except Exception:
+        logger.exception(f"chat_live_emit {run_id} failed")
+
+def _schedule_run_live_payload(run_id: str, user_id: object, payload: Dict[str, object]) -> None:
+    coroutine = _send_run_live_payload(run_id, user_id, payload)
+    try:
+        asyncio.get_running_loop().create_task(coroutine)
+    except RuntimeError:
+        asyncio.run(coroutine)
 
 def _emit_run_live_update(run_id: str, force: bool = False) -> None:
     # ``force`` bypasses the 80ms throttle for low-frequency but UI-critical
@@ -957,21 +920,12 @@ def _emit_run_live_update(run_id: str, force: bool = False) -> None:
         "reasoning": str(live.get("reasoning") or ""),
         "phase": str(live.get("phase") or "generating"),
         "current_tool": str(live.get("current_tool") or ""),
+        "current_tool_arguments": str(live.get("current_tool_arguments") or ""),
         **{f"{key}_tokens": int(live.get(f"pending_{key}_tokens") or 0) for key in ("prompt", "completion", "total")},
         "updated_at": live.get("updated_at"),
     }
 
-    async def _do_emit():
-        try:
-            await sio.emit("chat:run_live", payload, room=f"user_{int(user_id)}")
-        except Exception:
-            logger.exception(f"chat_live_emit {run_id} failed")
-
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_do_emit())
-    except RuntimeError:
-        asyncio.run(_do_emit())
+    _schedule_run_live_payload(run_id, user_id, payload)
 
 def _emit_run_done(
     *,

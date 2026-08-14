@@ -96,7 +96,11 @@ def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch)
         "steps": {
             "call": {
                 "type": "mcp", "toolRef": {"namespace": "device", "deviceId": "one", "name": "demo"},
-                "arguments": {}, "saveAs": "demo", "next": "finish",
+                "arguments": {}, "saveAs": "demo", "next": "call_two",
+            },
+            "call_two": {
+                "type": "mcp", "toolRef": {"namespace": "device", "deviceId": "two", "name": "other"},
+                "arguments": {}, "saveAs": "other", "next": "finish",
             },
             "finish": {"type": "end"},
         },
@@ -110,13 +114,16 @@ def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch)
         session.commit()
         monkeypatch.setattr(
             "api.services.workflows.card_service.tool_defs_for_agent",
-            lambda _user_id, device_id: {"demo": {"input_schema": schema, "destructive": False}} if device_id == "one" else {},
+            lambda _user_id, device_id: {
+                "demo" if device_id == "one" else "other": {
+                    "input_schema": schema, "destructive": False,
+                },
+            },
         )
 
         card = create_card(session, user.id, CardCreate(
             name="Multi",
             definition=definition,
-            device_ids=["one", "two"],
         ))
         version = session.get(WorkflowCardVersion, card.latest_version_id)
         payload = json.loads(version.tool_contracts_json)
@@ -127,11 +134,13 @@ def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch)
         assert payload["call"]["deviceId"] == "one"
         assert payload["call"]["publishedDeviceIds"] == ["one"]
         assert payload["call"]["providers"] == ["desktop"]
+        assert payload["call_two"]["deviceId"] == "two"
+        assert payload["call_two"]["providers"] == ["browser"]
 
         update_card(
             session,
             card,
-            CardUpdate(description="saved again", definition=definition, device_ids=["one", "two"]),
+            CardUpdate(description="saved again", definition=definition),
             user_id=user.id,
         )
         latest = session.get(WorkflowCardVersion, card.latest_version_id)
@@ -141,7 +150,7 @@ def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch)
         ).all()) == 2
 
 
-def test_device_mcp_card_requires_explicit_contract_devices():
+def test_device_mcp_card_requires_a_device_on_each_node_or_one_fallback():
     definition = {
         "schemaVersion": 1,
         "inputSchema": {"type": "object"},
@@ -164,7 +173,7 @@ def test_device_mcp_card_requires_explicit_contract_devices():
         try:
             create_card(session, user.id, CardCreate(name="Missing device", definition=definition))
         except Exception as exc:
-            assert "select at least one contract device" in str(exc)
+            assert "toolRef.deviceId" in str(exc)
         else:
             raise AssertionError("device MCP cards must declare contract devices")
 

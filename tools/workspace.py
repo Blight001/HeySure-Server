@@ -155,20 +155,10 @@ def _command_env(project_root: str, *, sandbox_env: bool = False) -> Dict[str, s
     return env
 
 
-def _caller_is_below_manager(user_id: int, ai_config_id: Optional[int]) -> bool:
-    from mcp_runtime.mcp.permissions import ROLE_MANAGER, ROLE_RANK, config_role_tier
-
-    if not ai_config_id:
-        return False
-    with Session(engine) as session:
-        cfg = session.exec(
-            select(AssistantAIConfig).where(
-                AssistantAIConfig.user_id == user_id,
-                AssistantAIConfig.id == ai_config_id,
-            )
-        ).first()
-    tier = config_role_tier(cfg) if cfg else "digital_member_member"
-    return ROLE_RANK.get(tier, 0) < ROLE_RANK.get(ROLE_MANAGER, 0)
+def _caller_requires_scoped_cwd(user_id: int, ai_config_id: Optional[int]) -> bool:
+    """Every AI member uses its resolved workspace; role labels do not widen it."""
+    _ = user_id
+    return bool(ai_config_id)
 
 
 def _output_decode_encodings() -> List[str]:
@@ -230,7 +220,7 @@ def _coerce_timeout(value: Any) -> int:
 def _run_command(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     project_root = get_project_root(user_id, ai_config_id)
     strict_workspace = _truthy(args.get("strict_workspace") or args.get("workspace_only"))
-    if _caller_is_below_manager(user_id, ai_config_id):
+    if _caller_requires_scoped_cwd(user_id, ai_config_id):
         strict_workspace = True
     sandbox_env = _truthy(args.get("sandbox_env") or args.get("isolated_env"))
     command_cwd = _resolve_command_cwd(project_root, args.get("cwd"), strict_workspace=strict_workspace)

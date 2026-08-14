@@ -62,7 +62,6 @@ def test_success_acknowledges_server_catalog_generation_after_persist(monkeypatc
         }),
     )
     monkeypatch.setattr(registration, "_store_live_agent", lambda _ctx: None)
-    monkeypatch.setattr(registration, "_push_pending_confirmations", AsyncMock())
     monkeypatch.setattr(registration, "_push_pending_user_notifications", AsyncMock())
     monkeypatch.setattr(registration, "_push_dynamic_tools", AsyncMock())
     monkeypatch.setattr(registration, "_resume_owned_work", AsyncMock())

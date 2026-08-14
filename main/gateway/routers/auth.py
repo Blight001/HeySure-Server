@@ -56,7 +56,6 @@ def _user_payload(user: User) -> dict:
         "mcp_max_steps": getattr(user, "mcp_max_steps", 0),
         "mcp_history_result_max_chars": getattr(user, "mcp_history_result_max_chars", 8000),
         "conversation_auto_compress_enabled": getattr(user, "conversation_auto_compress_enabled", True),
-        "role_mcp_permissions": getattr(user, "role_mcp_permissions", ""),
         "tavily_api_key": getattr(user, "tavily_api_key", ""),
         "model_presets": getattr(user, "model_presets", ""),
         "default_supervision_idle_seconds": getattr(user, "default_supervision_idle_seconds", 0),

@@ -2,7 +2,6 @@ import pytest
 from pathlib import Path
 
 from api.services.workflows.compiler import WorkflowValidationError, compile_definition
-from api.services.workflows.interaction_steps import AI_INTERVENTION_TOOL
 from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.expression import (
     TemplateResolutionError,
@@ -122,7 +121,7 @@ def test_condition_expression_uses_safe_boolean_language():
         evaluate_expression({"op": "eval", "value": "1+1"}, context)
 
 
-def test_compile_accepts_condition_delay_confirm_and_bounded_retry():
+def test_compile_accepts_condition_delay_ai_and_bounded_retry():
     definition = _definition()
     definition["steps"] = {
         "check": {
@@ -130,8 +129,11 @@ def test_compile_accepts_condition_delay_confirm_and_bounded_retry():
             "expression": {"op": "exists", "value": "${input.path}"},
             "onTrue": "delay", "onFalse": "read",
         },
-        "delay": {"type": "delay", "delaySeconds": 1, "next": "confirm"},
-        "confirm": {"type": "confirm", "message": "continue?", "next": "read"},
+        "delay": {"type": "delay", "delaySeconds": 1, "next": "review"},
+        "review": {
+            "type": "ai", "prompt": "核对读取参数", "saveAs": "review_result",
+            "next": "read",
+        },
         "read": {
             "type": "mcp",
             "toolRef": {"namespace": "device", "name": "fs.read", "schemaDigest": "sha256:test"},
@@ -145,6 +147,15 @@ def test_compile_accepts_condition_delay_confirm_and_bounded_retry():
     definition["startStepId"] = "check"
     definition["output"] = {"content": "${steps.read_result.result.content}"}
     assert compile_definition(definition)["definition"]["steps"]["read"]["retryPolicy"]["maxAttempts"] == 3
+
+
+def test_compile_rejects_removed_human_confirm_step():
+    definition = _definition()
+    definition["steps"]["read_first"]["next"] = "confirm"
+    definition["steps"]["confirm"] = {"type": "confirm", "message": "continue?", "next": "finish"}
+    with pytest.raises(WorkflowValidationError) as raised:
+        compile_definition(definition)
+    assert any("unsupported step type" in item for item in raised.value.errors)
 
 
 def test_compile_rejects_literal_secret_in_arguments():
@@ -243,16 +254,15 @@ def test_browser_initial_environment_requires_reload_before_ready_step():
     assert any("reset step must call browser+tab" in item for item in raised.value.errors)
 
 
-def test_ai_intervention_step_is_compiled_as_a_result_producer():
+def test_ai_review_step_is_compiled_as_a_result_producer():
     definition = {
         "schemaVersion": 1,
         "inputSchema": {"type": "object"},
         "startStepId": "review",
         "steps": {
             "review": {
-                "type": "mcp",
-                "toolRef": {"namespace": "device", "name": AI_INTERVENTION_TOOL},
-                "arguments": {"prompt": "核对并返回参数"},
+                "type": "ai",
+                "prompt": "核对并返回参数",
                 "saveAs": "review_result", "timeoutSeconds": 60, "next": "finish",
             },
             "finish": {"type": "end"},
@@ -263,7 +273,7 @@ def test_ai_intervention_step_is_compiled_as_a_result_producer():
 
     compiled = compile_definition(definition)
 
-    assert compiled["definition"]["steps"]["review"]["toolRef"]["name"] == AI_INTERVENTION_TOOL
+    assert compiled["definition"]["steps"]["review"]["type"] == "ai"
 
 
 def test_workflow_card_router_does_not_expose_deprecation_action():

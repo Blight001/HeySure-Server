@@ -83,6 +83,13 @@ def pop_run_stream(run_id: str) -> Any:
         return _RUN_STREAM_HOOKS.pop(str(run_id or "").strip(), None)
 
 
+def _float_or_zero(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def apply_relayed_run_live_state(payload: Any) -> bool:
     """Mirror an ai-runtime live snapshot into the gateway process.
 
@@ -97,17 +104,11 @@ def apply_relayed_run_live_state(payload: Any) -> bool:
     if not run_id:
         return False
 
-    try:
-        updated_at = float(payload.get("updated_at") or 0.0)
-    except (TypeError, ValueError):
-        updated_at = 0.0
+    updated_at = _float_or_zero(payload.get("updated_at"))
 
     with _RUN_STATE_LOCK:
         previous = _RUN_LIVE_STATE.get(run_id) or {}
-        try:
-            previous_updated_at = float(previous.get("updated_at") or 0.0)
-        except (TypeError, ValueError):
-            previous_updated_at = 0.0
+        previous_updated_at = _float_or_zero(previous.get("updated_at"))
         if (
             updated_at
             and previous_updated_at
@@ -120,6 +121,7 @@ def apply_relayed_run_live_state(payload: Any) -> bool:
             "reasoning": str(payload.get("reasoning") or ""),
             "phase": str(payload.get("phase") or "generating"),
             "current_tool": str(payload.get("current_tool") or ""),
+            "current_tool_arguments": str(payload.get("current_tool_arguments") or ""),
             "pending_prompt_tokens": int(payload.get("prompt_tokens") or 0),
             "pending_completion_tokens": int(
                 payload.get("completion_tokens") or 0

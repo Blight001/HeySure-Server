@@ -20,7 +20,11 @@ from tools.knowledge import _knowledge_manage, KNOWLEDGE_MANAGE_SCHEMA
 from tools.knowledge_search import _knowledge_search, KNOWLEDGE_SEARCH_SCHEMA
 from tools.web_search import _web_search
 from tools.device_mcp import _device_mcp_manage, DEVICE_MCP_MANAGE_SCHEMA
-from tools.automation import _automation_manage, AUTOMATION_MANAGE_SCHEMA
+from tools.automation import (
+    AUTOMATION_DEFINITION_GUIDANCE,
+    AUTOMATION_MANAGE_SCHEMA,
+    _automation_manage,
+)
 
 
 BUILTIN_TOOLS = (
@@ -336,16 +340,18 @@ BUILTIN_TOOLS = (
     MCPTool(
         name="automation.manage",
         description=(
-            "自动化卡片唯一聚合工具：action=list/get/create/import/from_trace/clone/edit/patch/delete/"
-            "validate/versions/get_version/export/start/list_runs/status/pause/resume/cancel/retry/respond，"
+            "自动化卡片唯一聚合工具：action=list/get/create/from_trace/edit/patch/delete/"
+            "validate/versions/get_version/start/list_runs/status/pause/resume/cancel/respond，"
             "以及 record_start/record_status/record_stop/record_cancel 操作录制。"
-            "创建或编辑含设备 MCP 节点的卡片时，必须传 device_ids，并为每个节点设置 toolRef.deviceId；"
-            "device_ids 每一项都是完整设备号；default_device_id 是默认端。启动时可用 device_id 指定候选端，"
-            "省略则使用默认端。AI 修改已有卡片应优先使用 patch+base_version_id，只改目标路径，禁止整卡覆盖。"
+            "这是服务器工具箱能力，不依赖某台设备绑定即可管理卡片。含 mcp 节点时，每个节点用 "
+            "toolRef.deviceId 指向当前 AI 可调用的任意绑定设备；一张卡片可跨桌面、Linux、浏览器、Android"
+            "和自建设备调用不同 MCP，服务端自动汇总契约设备。没有 mcp 节点的卡片完全不需要设备。"
+            "AI 修改已有卡片应优先使用 patch+base_version_id，只改目标路径，禁止整卡覆盖。"
             "完整卡片禁止默认凭空手写，稳定创建顺序是先 record_start 实战录制，正常调用工具，"
             "record_stop(create_card=true) 编译，再 validate，最后用调试动作逐步验证；"
-            "录制后只用 patch 修正选择器、变量路径、等待时间和初始环境说明等小细节。"
+            "录制后只用 patch 修正参数模板、变量路径和等待时间等小细节。"
             "保存会冻结设备、工具 Schema 与摘要，运行前再次检查在线状态和 Schema。"
+            + AUTOMATION_DEFINITION_GUIDANCE +
             "AI 创建的卡片会自动添加 ai_owner:<成员ID> 标签；普通成员只能访问自己的标签卡片或无所有者标签的公共卡片，"
             "管理员与辅助管理员创建的卡片默认全员可调用；显式调用范围优先，辅助管理员仍可治理同一用户下的卡片。"
         ),

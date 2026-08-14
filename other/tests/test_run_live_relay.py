@@ -29,6 +29,7 @@ class RunLiveRelayTests(unittest.IsolatedAsyncioTestCase):
             "reasoning": "thinking",
             "phase": "waiting_mcp",
             "current_tool": "workspace.run+command",
+            "current_tool_arguments": '{"command":"pwd"}',
             "prompt_tokens": 10,
             "completion_tokens": 4,
             "total_tokens": 14,
@@ -38,6 +39,10 @@ class RunLiveRelayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(applied)
         self.assertEqual(_RUN_LIVE_STATE["run_123"]["text"], "hello")
         self.assertEqual(_RUN_LIVE_STATE["run_123"]["reasoning"], "thinking")
+        self.assertEqual(
+            _RUN_LIVE_STATE["run_123"]["current_tool_arguments"],
+            '{"command":"pwd"}',
+        )
         self.assertEqual(
             _RUN_LIVE_STATE["run_123"]["pending_total_tokens"],
             14,

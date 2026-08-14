@@ -198,6 +198,37 @@ def _walk_sensitive_literals(value: Any, path: str = "definition", depth: int = 
             yield from _walk_sensitive_literals(child, f"{path}[{index}]", depth + 1)
 
 
+def _validate_ai_step(
+    step_id: str,
+    step: Dict[str, Any],
+    errors: List[str],
+    save_names: Set[str],
+    targets: List[str],
+) -> None:
+    if not str(step.get("prompt") or "").strip():
+        errors.append(f"step {step_id}: prompt is required")
+    save_as = str(step.get("saveAs") or "")
+    if not SAVE_AS_RE.fullmatch(save_as):
+        errors.append(f"step {step_id}: saveAs is required and must be a safe identifier")
+    elif save_as in save_names:
+        errors.append(f"step {step_id}: duplicate saveAs {save_as}")
+    else:
+        save_names.add(save_as)
+    target = str(step.get("next") or "")
+    if target:
+        targets.append(target)
+    else:
+        errors.append(f"step {step_id}: next is required")
+    on_error = step.get("onError", "fail")
+    if isinstance(on_error, str) and on_error not in {"", "fail"}:
+        targets.append(on_error)
+    elif not isinstance(on_error, str):
+        errors.append(f"step {step_id}: onError must be fail or a step id")
+    review_timeout = step.get("timeoutSeconds", 300)
+    if not isinstance(review_timeout, int) or not 1 <= review_timeout <= 86400:
+        errors.append(f"step {step_id}: timeoutSeconds must be 1..86400")
+
+
 def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
@@ -237,7 +268,7 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
             errors.append(f"step {step_id} must be an object")
             continue
         step_type = step.get("type")
-        if step_type not in {"mcp", "condition", "delay", "confirm", "end"}:
+        if step_type not in {"mcp", "condition", "delay", "ai", "end"}:
             errors.append(f"step {step_id}: unsupported step type {step_type}")
             continue
         targets: List[str] = []
@@ -300,6 +331,8 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
                         errors.append(f"step {step_id}: retryPolicy.maxDelaySeconds must be 0..3600")
                     if mode not in {"fixed", "exponential"}:
                         errors.append(f"step {step_id}: retryPolicy.backoff must be fixed or exponential")
+        elif step_type == "ai":
+            _validate_ai_step(str(step_id), step, errors, save_names, targets)
         elif step_type == "condition":
             _validate_expression(step.get("expression"), f"step {step_id}.expression", errors)
             for field in ("onTrue", "onFalse"):
@@ -317,18 +350,6 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
                 errors.append(f"step {step_id}: next is required")
             else:
                 targets.append(target)
-        elif step_type == "confirm":
-            target = str(step.get("next") or "")
-            if not target:
-                errors.append(f"step {step_id}: next is required")
-            else:
-                targets.append(target)
-            denied = str(step.get("onDenied") or "")
-            if denied:
-                targets.append(denied)
-            confirm_timeout = step.get("timeoutSeconds", 300)
-            if not isinstance(confirm_timeout, int) or not 1 <= confirm_timeout <= 86400:
-                errors.append(f"step {step_id}: timeoutSeconds must be 1..86400")
         edges[str(step_id)] = targets
 
     for source, targets in edges.items():
@@ -373,7 +394,7 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     producers = {
         str(step.get("saveAs")): step_id
         for step_id, step in steps.items()
-        if isinstance(step, dict) and step.get("type") == "mcp" and step.get("saveAs")
+        if isinstance(step, dict) and step.get("type") in {"mcp", "ai"} and step.get("saveAs")
     }
     predecessors: Dict[str, Set[str]] = {step_id: set() for step_id in steps}
     for source, targets in edges.items():

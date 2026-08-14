@@ -2,7 +2,6 @@ import os
 import tempfile
 
 from api.services.knowledge import kb_store
-from mcp_runtime.mcp.permissions import ROLE_MEMBER, tool_min_role
 from mcp_runtime.mcp.registry import registry
 
 
@@ -11,7 +10,9 @@ def test_knowledge_search_registered_as_read_only_tool():
 
     assert tool is not None
     assert tool.destructive is False
-    assert tool_min_role("knowledge.search") == ROLE_MEMBER
+    from tools.engine import toolbox_capability_names
+
+    assert "knowledge.search" in toolbox_capability_names()
 
 
 def test_keyword_search_ranks_relevant_entry_first(monkeypatch):

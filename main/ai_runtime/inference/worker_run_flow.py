@@ -416,8 +416,8 @@ class WorkerRunMachine:
     def set_run_error(self, error: str) -> None:
         _run_set_status(self.request.run_id, "error", error, finished=True)
 
-    def set_live_phase(self, phase: str, tool: str = "") -> None:
-        _set_run_live_phase(self.request.run_id, phase, tool)
+    def set_live_phase(self, phase: str, tool: str = "", arguments=None) -> None:
+        _set_run_live_phase(self.request.run_id, phase, tool, arguments)
 
     def clear_live_text(self) -> None:
         _set_run_live_text(self.request.run_id, "")

@@ -239,7 +239,9 @@ def _mcp_tool_definitions() -> list[dict]:
 
 def _configured_tool_catalog(cfg) -> list[dict]:
     try:
-        names = {str(item) for item in json.loads(cfg.mcp_tools or "[]") if str(item).strip()}
+        from api.services.mcp.capability_view import scoped_tool_view_for_ids
+
+        names = set(scoped_tool_view_for_ids(cfg.user_id, cfg.id).eligible_names)
     except Exception:
         names = set()
     definitions = {str(item.get("name") or ""): item for item in registry.list_tools()}

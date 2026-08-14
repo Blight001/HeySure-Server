@@ -12,16 +12,6 @@ from api.models import (
     WorkflowStepRun,
 )
 
-from .confirmation import (
-    RUN_CONFIRMATION_SCOPE,
-    confirmation_granted,
-    decide_confirmation,
-    expire_confirmations,
-    renew_dispatch_step_deadline,
-    request_confirmation,
-)
-
-
 def cancel_workflow_run(
     session: Session,
     run: WorkflowRun,

@@ -10,7 +10,6 @@
 ``/api/devices/*`` 是当前公开接口；``/api/workshop/*`` 仅保留给旧客户端兼容。
 """
 
-import json
 import time
 from typing import Dict, List, Optional
 
@@ -39,11 +38,6 @@ class DeviceBindRequest(BaseModel):
     bound: bool = True
 
 
-class LibraryMcpScopeRequest(BaseModel):
-    ai_config_id: int
-    tools: List[str] = []
-
-
 def _load_owned_config(session: Session, user_id: int, ai_config_id) -> AssistantAIConfig:
     if not ai_config_id:
         raise HTTPException(status_code=400, detail="ai_config_id is required")
@@ -68,80 +62,6 @@ def _config_name(session: Session, user_id: int, ai_config_id: Optional[int]) ->
         )
     ).first()
     return str(cfg.name or "").strip() if cfg else f"AI-{ai_config_id}"
-
-
-def _library_scope_payload(cfg: AssistantAIConfig) -> dict:
-    from mcp_runtime.mcp import registry
-    from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS
-    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
-
-    capabilities = sorted({
-        str(item.get("name") or "").strip()
-        for item in registry.list_tools()
-        if str(item.get("name") or "").strip() in LIBRARY_BOUND_TOOLS
-    })
-    try:
-        parsed = json.loads(cfg.mcp_tools or "[]")
-    except Exception:
-        parsed = []
-    saved = fully_clean_tool_names(parsed if isinstance(parsed, list) else [])
-    allowed = sorted(saved & set(capabilities))
-    return {
-        "aiConfigId": int(cfg.id or 0),
-        "capabilities": capabilities,
-        "allowed": allowed,
-        "mcpTools": sorted(saved),
-    }
-
-
-@device_router.get("/library-mcp-scope")
-@legacy_router.get("/mcp-scope", include_in_schema=False)
-def get_library_mcp_scope(
-    ai_config_id: int,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None),
-):
-    """Return the exact saved library-tool subset for one owned AI config."""
-    user = get_current_user(authorization, session)
-    cfg = _load_owned_config(session, user.id, ai_config_id)
-    return _library_scope_payload(cfg)
-
-
-@device_router.put("/library-mcp-scope")
-@legacy_router.put("/mcp-scope", include_in_schema=False)
-def update_library_mcp_scope(
-    payload: LibraryMcpScopeRequest,
-    session: Session = Depends(get_session),
-    authorization: str = Header(None),
-):
-    """Replace only the selected library MCP subset, preserving other tools."""
-    user = get_current_user(authorization, session)
-    cfg = _load_owned_config(session, user.id, payload.ai_config_id)
-    from mcp_runtime.mcp.permissions import LIBRARY_BOUND_TOOLS, clamp_tools_json, config_role_tier
-    from api.services.mcp.mcp_tool_aliases import fully_clean_tool_names
-
-    try:
-        parsed = json.loads(cfg.mcp_tools or "[]")
-    except Exception:
-        parsed = []
-    current = fully_clean_tool_names(parsed if isinstance(parsed, list) else [])
-    capabilities = set(_library_scope_payload(cfg)["capabilities"])
-    requested = {
-        str(item or "").strip()
-        for item in (payload.tools or [])
-        if str(item or "").strip()
-    } & capabilities
-    merged = (current - set(LIBRARY_BOUND_TOOLS)) | requested
-    cfg.mcp_tools = clamp_tools_json(
-        user,
-        config_role_tier(cfg),
-        json.dumps(sorted(merged), ensure_ascii=False),
-    )
-    cfg.updated_at = time.time()
-    session.add(cfg)
-    session.commit()
-    session.refresh(cfg)
-    return _library_scope_payload(cfg)
 
 
 @device_router.get("/builtin-bindings")
@@ -225,19 +145,6 @@ def update_workshop_binding(
     stored = set_workshop_binding(
         user.id, device_id, cfg.id, bound=bool(payload.bound), single=False
     )
-
-    # 解绑工具箱时，顺便把这个 AI 配置里残留的老 MCP 名字和 gated 工具清理干净
-    if is_toolbox and not payload.bound:
-        try:
-            from tools.engine import sanitize_mcp_tools
-            cleaned = sanitize_mcp_tools(cfg.mcp_tools, user_id=user.id, ai_config_id=cfg.id)
-            if cleaned != (cfg.mcp_tools or ""):
-                cfg.mcp_tools = cleaned
-                session.add(cfg)
-                session.commit()
-                session.refresh(cfg)
-        except Exception:
-            pass
 
     # 绑定/解绑后推送更新 device list，让设备面板能立即看到 toolbox 的 boundAiConfigIds 变化
     try:

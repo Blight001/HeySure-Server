@@ -532,38 +532,6 @@ def workshop_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int
     return tools
 
 
-def _config_selected_tool_names(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Set[str]:
-    """Tool names explicitly selected in an AI config's ``mcp_tools`` allow-list,
-    returned verbatim. Empty when MCP is disabled for the config or on any read
-    error. Lets the AI-config checkbox grant endpoint tools directly."""
-    config_id = _parse_int(ai_config_id)
-    if not config_id:
-        return set()
-    try:
-        import json
-        from sqlmodel import Session, select
-        from api.database import engine
-        from api.models import AssistantAIConfig
-
-        with Session(engine) as session:
-            query = select(AssistantAIConfig).where(AssistantAIConfig.id == config_id)
-            uid = _parse_int(user_id)
-            if uid:
-                query = query.where(AssistantAIConfig.user_id == uid)
-            cfg = session.exec(query).first()
-        if not cfg or not getattr(cfg, "mcp_enabled", False):
-            return set()
-        parsed = json.loads(cfg.mcp_tools or "[]")
-        if not isinstance(parsed, list):
-            return set()
-        from api.services.mcp.mcp_tool_aliases import normalize_legacy_tool_names
-        return normalize_legacy_tool_names(
-            str(item).strip() for item in parsed if isinstance(item, str) and str(item).strip()
-        )
-    except Exception:
-        return set()
-
-
 def endpoint_tools_for_config(ai_config_id: Optional[int], user_id: Optional[int] = None) -> Set[str]:
     """Endpoint MCP tools available to an AI right now.
 

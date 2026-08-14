@@ -445,6 +445,27 @@ def online_device_display_names(user_id) -> Dict[str, str]:
     return out
 
 
+def online_device_prompt_metadata(user_id) -> Dict[str, dict]:
+    """AI-facing metadata for each online endpoint owned by one account."""
+    uid = _int(user_id)
+    if uid is None:
+        return {}
+    out: Dict[str, dict] = {}
+    with Session(engine) as session:
+        rows = session.exec(
+            select(DevicePresence).where(
+                DevicePresence.user_id == uid,
+                DevicePresence.online == True,  # noqa: E712
+            ).order_by(DevicePresence.updated_at.desc(), DevicePresence.id.desc())
+        ).all()
+        for row in rows:
+            device_id = str(row.device_id or "").strip()
+            if not device_id or device_id in out:
+                continue
+            out[device_id] = device_prompt_metadata(row)
+    return out
+
+
 def online_agent_snapshot_for_user(user_id, device_id) -> Optional[dict]:
     """Return an agent-like record for an online endpoint owned by ``user_id``.
 

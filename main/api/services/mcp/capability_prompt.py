@@ -42,13 +42,29 @@ def _device_sections(view: ScopedToolView) -> list[str]:
             suffix = metadata.device_id[-4:]
             label = f"{base_label}·{suffix}" if suffix else base_label
         names = view.device_tool_names.get(metadata.device_id, frozenset())
-        sections.append(_section(f"{label} MCP", names, view))
+        sections.append(_section(
+            f"{label} MCP",
+            names,
+            view,
+            description=metadata.purpose,
+        ))
     return sections
 
 
-def _section(label: str, names: Iterable[str], view: ScopedToolView) -> str:
+def _section(
+    label: str,
+    names: Iterable[str],
+    view: ScopedToolView,
+    *,
+    description: str = "",
+) -> str:
     lines = [_tool_line(name, view) for name in sorted(set(names)) if name in view.eligible]
-    return f"{label}\n" + ("\n".join(lines) if lines else "- （当前无可用工具）")
+    heading = [label]
+    normalized_description = " ".join(str(description or "").split())
+    if normalized_description:
+        heading.append(f"  设备说明：{normalized_description}")
+    heading.append("\n".join(lines) if lines else "- （当前无可用工具）")
+    return "\n".join(heading)
 
 
 def _tool_line(name: str, view: ScopedToolView) -> str:
