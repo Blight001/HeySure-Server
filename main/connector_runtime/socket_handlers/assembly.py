@@ -2,6 +2,7 @@
 
 from api.sio import sio
 from connector_runtime.socket_handlers import disconnect, registration, remote, tasks
+from connector_runtime import maintenance
 
 
 def register_agent_socket_events() -> None:
@@ -10,6 +11,25 @@ def register_agent_socket_events() -> None:
     sio.on("task:result")(tasks.result)
     sio.on("task:error")(tasks.error)
     sio.on("disconnect")(disconnect.handle_disconnect)
+    @sio.on("codex:run_started")
+    async def codex_run_started(sid, data):
+        return await maintenance.guarded(maintenance.run_started, sid, data)
+
+    @sio.on("codex:event")
+    async def codex_event(sid, data):
+        return await maintenance.guarded(maintenance.event, sid, data)
+
+    @sio.on("codex:approval_requested")
+    async def codex_approval_requested(sid, data):
+        return await maintenance.guarded(maintenance.approval_requested, sid, data)
+
+    @sio.on("codex:run_completed")
+    async def codex_run_completed(sid, data):
+        return await maintenance.guarded(maintenance.run_completed, sid, data)
+
+    @sio.on("codex:command_ack")
+    async def codex_command_ack(sid, data):
+        return await maintenance.guarded(maintenance.command_ack, sid, data)
 
     @sio.on("flow:log")
     async def flow_log(_sid, data):

@@ -25,9 +25,37 @@ from tools.automation import (
     AUTOMATION_MANAGE_SCHEMA,
     _automation_manage,
 )
+from tools.maintenance import (
+    MAINTENANCE_COMMENT_SCHEMA,
+    MAINTENANCE_REQUEST_SCHEMA,
+    MAINTENANCE_STATUS_SCHEMA,
+    _maintenance_comment,
+    _maintenance_request,
+    _maintenance_status,
+)
 
 
 BUILTIN_TOOLS = (
+    MCPTool(
+        name="maintenance.request",
+        description="向项目维护负责人创建结构化维护工单，关联问题、验收标准、仓库、来源会话和报告成员。",
+        input_schema=MAINTENANCE_REQUEST_SCHEMA,
+        handler=_maintenance_request,
+        destructive=True,
+    ),
+    MCPTool(
+        name="maintenance.status",
+        description="查询当前账号的维护工单状态、阶段和最近审计事件。",
+        input_schema=MAINTENANCE_STATUS_SCHEMA,
+        handler=_maintenance_status,
+    ),
+    MCPTool(
+        name="maintenance.comment",
+        description="向未结束的维护工单补充信息，并实时调整 Codex 的处理方向。",
+        input_schema=MAINTENANCE_COMMENT_SCHEMA,
+        handler=_maintenance_comment,
+        destructive=True,
+    ),
     MCPTool(
         name="mcp.describe+tool",
         description=(

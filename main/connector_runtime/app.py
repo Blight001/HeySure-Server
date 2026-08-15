@@ -282,6 +282,12 @@ def create_app() -> FastAPI:
     _register_dispatch_cancel_route(router)
     _register_control_routes(router)
 
+    @router.post("/maintenance/command")
+    async def maintenance_command(req: Dict[str, Any]) -> Dict[str, Any]:
+        from connector_runtime.maintenance import MaintenanceCommandRequest, send_command
+
+        return await send_command(MaintenanceCommandRequest.model_validate(req))
+
     from api.runtime.health import build_health_router
     from connector_runtime.health_detail import connector_health_detail
 
