@@ -197,7 +197,16 @@ async def run_completed(sid: str, raw: object) -> dict:
         raise MaintenanceConflict("run completion requires a terminal status")
     normalized = data.model_dump(by_alias=True)
     normalized["status"] = status
-    return await _record(sid, normalized, "run.completed")
+    response = await _record(sid, normalized, "run.completed")
+    with Session(engine) as session:
+        task = session.exec(select(MaintenanceTask).where(
+            MaintenanceTask.run_id == data.run_id,
+        )).first()
+    if task is not None:
+        from connector_runtime.maintenance_conversation_bridge import complete_conversation_task
+
+        complete_conversation_task(task)
+    return response
 
 
 async def approval_requested(sid: str, raw: object) -> dict:

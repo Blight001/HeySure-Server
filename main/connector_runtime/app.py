@@ -64,6 +64,14 @@ class FeishuSendRequest(BaseModel):
     receive_id_type: Optional[str] = None
 
 
+def _start_conversation_bridge(stop_event: asyncio.Event) -> asyncio.Task:
+    from connector_runtime.maintenance_conversation_bridge import run_conversation_bridge
+
+    return asyncio.create_task(
+        run_conversation_bridge(stop_event), name="codex-conversation-bridge"
+    )
+
+
 class BotLoginRequest(BaseModel):
     user_id: int
     connection_ref: str = ""
@@ -152,6 +160,7 @@ async def _lifespan(app: FastAPI):
     push_task = asyncio.create_task(
         run_user_push_scheduler(stop_event), name="user-push-scheduler"
     )
+    conversation_bridge_task = _start_conversation_bridge(stop_event)
     workflow_task = None
     if settings.workflow_scheduler_enabled:
         from connector_runtime.dispatch.workflow_scheduler import run_workflow_scheduler
@@ -167,7 +176,7 @@ async def _lifespan(app: FastAPI):
     finally:
         health.begin_draining()
         stop_event.set()
-        background_tasks = [*keepalive_tasks, sweep_task, push_task]
+        background_tasks = [*keepalive_tasks, sweep_task, push_task, conversation_bridge_task]
         if workflow_task is not None:
             background_tasks.append(workflow_task)
         for task in background_tasks:
