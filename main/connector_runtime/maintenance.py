@@ -316,11 +316,12 @@ async def resume_codex_maintenance(device_id: str, user_id: int, ai_config_ids: 
         return
     from api.services.maintenance.views import run_start_payload
     for task in rows:
-        if task.status in {"queued", "running"}:
-            payload = run_start_payload(task)
-            payload.update({"taskId": task.task_id, "runId": task.run_id,
-                            "resume": task.status == "running"})
-            await sio.emit("codex:run_start", payload, to=sid)
+        if task.status not in {"queued", "running"}:
+            continue
+        payload = run_start_payload(task)
+        payload.update({"taskId": task.task_id, "runId": task.run_id,
+                        "resume": task.status == "running"})
+        await sio.emit("codex:run_start", payload, to=sid)
         task_events = [row for row in events if row.task_id == task.task_id]
         for socket_event, command in pending_commands(task_events):
             await sio.emit(socket_event, {"taskId": task.task_id, "runId": task.run_id,

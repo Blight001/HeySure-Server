@@ -281,6 +281,15 @@ def test_offline_commands_are_durable_and_reconnect_replays_only_unacked(db, mon
     names = [event for event, _payload, _sid in emitted]
     assert names == ["codex:run_start", "codex:approval_decision"]
 
+    emitted.clear()
+    task.status = "succeeded"
+    db[0].add(task)
+    db[0].commit()
+    asyncio.run(connector_maintenance.resume_codex_maintenance(
+        "codex-local", db[1], (db[2],),
+    ))
+    assert emitted == []
+
 
 def test_offline_rest_mutations_return_waiting_instead_of_false_failure(db, monkeypatch):
     import gateway.routers.maintenance as routes
