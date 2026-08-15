@@ -329,6 +329,7 @@ async def resume_codex_maintenance(device_id: str, user_id: int, ai_config_ids: 
             continue
         payload = run_start_payload(task)
         payload.update({"taskId": task.task_id, "runId": task.run_id,
+                        "commandId": f"run_start:{task.run_id}",
                         "resume": task.status == "running"})
         await sio.emit("codex:run_start", payload, to=sid)
         task_events = [row for row in events if row.task_id == task.task_id]

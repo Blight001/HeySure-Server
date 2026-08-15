@@ -280,6 +280,7 @@ def test_offline_commands_are_durable_and_reconnect_replays_only_unacked(db, mon
         agents.pop("codex-sid", None)
     names = [event for event, _payload, _sid in emitted]
     assert names == ["codex:run_start", "codex:approval_decision"]
+    assert emitted[0][1]["commandId"] == f"run_start:{task.run_id}"
 
     emitted.clear()
     task.status = "succeeded"
