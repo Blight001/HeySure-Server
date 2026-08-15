@@ -123,6 +123,12 @@ def test_automation_description_teaches_ai_all_supported_node_shapes():
         assert "action=respond" in description
         assert "__workflow.ai_intervention" not in description
         assert "${steps.<saveAs>.result.<字段>}" in description
+        assert "default 不会注入 input" in description
+        assert "不支持 ${input.x || 'fallback'}" in description
+        assert "{op:'exists',value:'${input.x}'}" in description
+        assert "resolver 必须能唯一命中" in description
+        assert "limits.maxTransitions" in description
+        assert "建议 1800 秒" in description
 
 
 def test_removed_human_confirmation_is_not_actionable_by_ai():

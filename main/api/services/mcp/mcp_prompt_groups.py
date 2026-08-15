@@ -97,6 +97,8 @@ def automation_card_prompt_sections(
         "自动化卡片是服务器通用编排，不是 AI-FREE 浏览器卡片。automation.manage 本身无需绑定设备。"
         "mcp 节点可调用当前 AI 已绑定的任意设备工具，不同节点可以跨设备；每个节点设置 "
         "toolRef.deviceId，服务端自动汇总设备，无需另传 device_ids。没有 mcp 节点的卡片无需设备。"
+        "录制后核对真实结果路径；不要依赖 inputSchema.default 或模板内 || 兜底。浏览器 resolver 要唯一命中，"
+        "页面变化后重新 observe；长时间 ai_review 应设置足够 timeoutSeconds。"
     )
     return [f"{policy}\n当前 AI 可用自动化卡片\n{catalog}" if catalog else policy]
 
