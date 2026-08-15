@@ -165,7 +165,7 @@ async def command_ack(sid: str, raw: object) -> dict:
         service = MaintenanceService(session)
         statement = select(MaintenanceEvent).where(
             MaintenanceEvent.event_id == f"cmd:{data.command_id}",
-            MaintenanceEvent.actor_type.in_(["user", "member"]),
+            MaintenanceEvent.actor_type.in_(["user", "member", "controller"]),
         )
         if data.run_id:
             statement = statement.where(MaintenanceEvent.run_id == data.run_id)

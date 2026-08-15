@@ -86,7 +86,12 @@ def test_queued_external_message_dispatches_and_replies_to_original_chat(
         task = session.exec(select(MaintenanceTask).where(
             MaintenanceTask.dedupe_key == f"external_turn:{turn_id}",
         )).one()
+        command = session.exec(select(MaintenanceEvent).where(
+            MaintenanceEvent.task_id == task.task_id,
+            MaintenanceEvent.event_type == "command.run_start",
+        )).one()
         assert turn.status == "running"
+        assert command.actor_type == "controller"
         assert "Please inspect the project" in task.description
         assert "本机 Codex 控制器" in task.description
         task.status = "succeeded"
