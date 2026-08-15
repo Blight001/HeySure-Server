@@ -317,6 +317,14 @@ def test_offline_rest_mutations_return_waiting_instead_of_false_failure(db, monk
     task_id = created["id"]
     service = MaintenanceService(db[0])
     task = service.owned_task(db[1], task_id)
+    start_command = db[0].exec(select(MaintenanceEvent).where(
+        MaintenanceEvent.task_id == task_id,
+        MaintenanceEvent.event_id == f"cmd:run_start:{task.run_id}",
+    )).first()
+    assert start_command is not None
+    start_payload = MaintenanceService.event_payload(start_command)["payload"]
+    assert start_payload["command_id"] == f"run_start:{task.run_id}"
+    assert start_payload["prompt"].startswith("维护工单")
     service.device_event(db[1], DeviceEventRecord(
         device_id="codex-local", run_id=task.run_id, event_id="rest-started",
         sequence=1, event_type="run.started", payload={}, status="running",

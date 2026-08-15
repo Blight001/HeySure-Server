@@ -114,9 +114,20 @@ async def create_task(body: CreateTaskRequest, session: Session = Depends(get_se
     except (MaintenanceConflict, MaintenanceNotFound) as exc:
         raise _service_error(exc) from exc
     await _emit_update(user.id, row)
-    delivered = await _send_device_command(row, "codex:run_start", _run_start_payload(row))
+    command_id = f"run_start:{row.run_id}"
+    command = service.append_event(row, EventRecord(
+        "command.run_start", "user",
+        {"command_id": command_id, "command": "run_start", **_run_start_payload(row)},
+        event_id=f"cmd:{command_id}", actor_id=str(user.id),
+    ))
+    session.commit()
+    session.refresh(row)
+    session.refresh(command)
+    await _emit_update(user.id, row, event=command)
+    command_payload = _stored_command_payload(command)
+    delivered = await _send_device_command(row, "codex:run_start", command_payload)
     if not delivered:
-        event = _record_waiting(session, row, f"run_start:{row.run_id}", "run_start", {})
+        event = _record_waiting(session, row, command_id, "run_start", command_payload)
         await _emit_update(user.id, row, event=event)
     return {**_task_dto(row), "delivery_status": "delivered" if delivered else "waiting_device"}
 
