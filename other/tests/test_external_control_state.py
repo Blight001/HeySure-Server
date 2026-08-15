@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from api.models import AssistantAIConfigUpdate
 from api.models.external_control import ExternalControllerRun, ExternalControllerTurn
-from api.services.external_control.service import _safe_value
+from api.services.external_control.service import ExternalControlService, _safe_value
 from api.services.external_control.state import RunTransitionError, TurnTransitionError, transition_run, transition_turn
 from gateway.routers.external_control import _handoff_markdown, _mcp_tool_definitions, _run_payload
 
@@ -83,6 +83,35 @@ def test_handoff_uses_environment_variable_instead_of_toml_secret() -> None:
     assert "bearer_token_env_var" in text
     assert "HEYSURE_CONTROLLER_TOKEN_42" in text
     assert 'url = "https://example.test/mcp/external"' in text
+
+
+def test_issuing_credential_does_not_revoke_parallel_controllers() -> None:
+    class SessionStub:
+        def __init__(self) -> None:
+            self.added = []
+
+        def exec(self, _statement):
+            raise AssertionError("credential issuance must not query or revoke existing controllers")
+
+        def add(self, row) -> None:
+            self.added.append(row)
+
+        def commit(self) -> None:
+            return None
+
+        def refresh(self, row) -> None:
+            row.id = 9
+
+    session = SessionStub()
+    service = ExternalControlService(session)  # type: ignore[arg-type]
+    service.get_member = lambda *_args: object()  # type: ignore[method-assign]
+    service.add_event = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+    credential, token = service.issue_credential(1, 19, "Seoul", 90)
+
+    assert credential.state == "active"
+    assert credential.revoked_at is None
+    assert token.startswith("hsc_")
 
 
 def test_execution_mode_contract_rejects_unknown_modes() -> None:

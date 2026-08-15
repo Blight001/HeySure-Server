@@ -81,17 +81,6 @@ class ExternalControlService(ExternalAuditMixin):
     def issue_credential(self, user_id: int, ai_config_id: int, label: str, ttl_days: int) -> Tuple[ExternalControllerCredential, str]:
         self.get_member(user_id, ai_config_id)
         now = time.time()
-        existing = self.session.exec(
-            select(ExternalControllerCredential).where(
-                ExternalControllerCredential.user_id == user_id,
-                ExternalControllerCredential.ai_config_id == ai_config_id,
-                ExternalControllerCredential.state == "active",
-            )
-        ).all()
-        for row in existing:
-            row.state = "revoked"
-            row.revoked_at = now
-            self.session.add(row)
         token = f"hsc_{secrets.token_urlsafe(36)}"
         credential = ExternalControllerCredential(
             user_id=user_id,
