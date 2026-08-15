@@ -10,14 +10,22 @@ from typing import Any, Optional, Tuple
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from api.models import AssistantAIConfig, DevicePresence, User
+from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, DevicePresence, User
 from api.models.external_control import (
     ExternalControllerCredential,
-    ExternalControllerEvent,
     ExternalControllerRun,
+    ExternalControllerTurn,
 )
 from api.services.mcp.capability_view import scoped_tool_view_for_ids
-from .state import RunTransitionError, TERMINAL_RUN_STATES, transition_run
+from api.services.chat.chat_persistence import _save_message
+from .audit import ExternalAuditMixin
+from .state import (
+    RunTransitionError,
+    TERMINAL_RUN_STATES,
+    TurnTransitionError,
+    transition_run,
+    transition_turn,
+)
 
 
 SCOPES = {"context:read", "mcp:call", "run:write", "audit:read"}
@@ -53,7 +61,7 @@ def _safe_value(value: Any, depth: int = 0) -> Any:
     return str(value)[:20_000]
 
 
-class ExternalControlService:
+class ExternalControlService(ExternalAuditMixin):
     def __init__(self, session: Session):
         self.session = session
 
@@ -194,33 +202,6 @@ class ExternalControlService:
             "updated_at": row.updated_at,
         }
 
-    def add_event(
-        self,
-        credential: ExternalControllerCredential,
-        event_type: str,
-        *,
-        run_id: Optional[str] = None,
-        tool_name: str = "",
-        status: str = "ok",
-        result: Any = None,
-    ) -> ExternalControllerEvent:
-        safe = _safe_value(result if result is not None else {})
-        payload = json.dumps(safe, ensure_ascii=False, separators=(",", ":"))[:50_000]
-        row = ExternalControllerEvent(
-            user_id=credential.user_id,
-            ai_config_id=credential.ai_config_id,
-            credential_id=credential.id,
-            run_id=run_id,
-            event_type=event_type[:80],
-            tool_name=tool_name[:200],
-            status=status[:40],
-            result_json=payload,
-        )
-        self.session.add(row)
-        self.session.commit()
-        self.session.refresh(row)
-        return row
-
     def start_run(self, credential: ExternalControllerCredential, title: str, lease_seconds: int = 300) -> ExternalControllerRun:
         now = time.time()
         row = ExternalControllerRun(
@@ -264,22 +245,272 @@ class ExternalControlService:
         self.add_event(credential, "run.finished", run_id=row.run_id, status=target, result={"summary": row.summary, "error": row.error_message})
         return row
 
-    def list_events(self, user_id: int, ai_config_id: int, limit: int = 100) -> list[dict]:
+    def enqueue_message(
+        self,
+        user_id: int,
+        ai_config_id: int,
+        *,
+        content: str,
+        session_id: str,
+        session_name: str,
+        ai_kind: str = "assistant",
+        tags: str = "",
+    ) -> ExternalControllerTurn:
+        """Persist a user message and queue it without starting the AI runtime."""
+        self.get_member(user_id, ai_config_id)
+        body = str(content or "").strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Message content is required")
+        message = _save_message(
+            self.session,
+            user_id,
+            ChatMessageCreate(
+                role="user",
+                content=body,
+                tags=str(tags or ""),
+                ai_config_id=ai_config_id,
+                ai_kind=str(ai_kind or "assistant"),
+                session_id=str(session_id or "default"),
+                session_name=str(session_name or "未命名会话"),
+            ),
+        )
+        now = time.time()
+        turn = ExternalControllerTurn(
+            turn_id=f"xturn_{uuid.uuid4().hex}",
+            user_id=user_id,
+            ai_config_id=ai_config_id,
+            user_message_id=int(message.id or 0),
+            session_id=message.session_id,
+            session_name=message.session_name or session_name or "未命名会话",
+            ai_kind=message.ai_kind,
+            created_at=now,
+            updated_at=now,
+        )
+        self.session.add(turn)
+        self.session.commit()
+        self.session.refresh(turn)
+        return turn
+
+    def _recover_expired_turns(self, credential: ExternalControllerCredential) -> None:
+        now = time.time()
         rows = self.session.exec(
-            select(ExternalControllerEvent).where(
-                ExternalControllerEvent.user_id == user_id,
-                ExternalControllerEvent.ai_config_id == ai_config_id,
-            ).order_by(ExternalControllerEvent.created_at.desc()).limit(max(1, min(limit, 500)))
+            select(ExternalControllerTurn).where(
+                ExternalControllerTurn.user_id == credential.user_id,
+                ExternalControllerTurn.ai_config_id == credential.ai_config_id,
+                ExternalControllerTurn.status == "running",
+                ExternalControllerTurn.lease_expires_at.is_not(None),
+                ExternalControllerTurn.lease_expires_at <= now,
+            )
         ).all()
-        return [
-            {
-                "id": row.id,
-                "run_id": row.run_id,
-                "event_type": row.event_type,
-                "tool_name": row.tool_name,
-                "status": row.status,
-                "result": _json_loads(row.result_json, {}),
-                "created_at": row.created_at,
-            }
-            for row in rows
-        ]
+        for row in rows:
+            if row.attempt >= 3:
+                transition_turn(row, "failed", now)
+                row.error_message = "controller lease expired after maximum attempts"
+            else:
+                transition_turn(row, "queued", now)
+            self.session.add(row)
+        if rows:
+            self.session.commit()
+
+    def claim_message(
+        self,
+        credential: ExternalControllerCredential,
+        *,
+        turn_id: str = "",
+        lease_seconds: int = 300,
+        history_limit: int = 30,
+    ) -> Optional[dict]:
+        self._recover_expired_turns(credential)
+        statement = select(ExternalControllerTurn).where(
+            ExternalControllerTurn.user_id == credential.user_id,
+            ExternalControllerTurn.ai_config_id == credential.ai_config_id,
+            ExternalControllerTurn.status == "queued",
+        )
+        wanted = str(turn_id or "").strip()
+        if wanted:
+            statement = statement.where(ExternalControllerTurn.turn_id == wanted)
+        statement = statement.order_by(ExternalControllerTurn.created_at.asc()).with_for_update(skip_locked=True)
+        row = self.session.exec(statement).first()
+        if row is None:
+            return None
+        now = time.time()
+        transition_turn(row, "running", now)
+        row.credential_id = credential.id
+        row.lease_owner = credential.token_prefix
+        row.lease_expires_at = now + max(30, min(int(lease_seconds), 1800))
+        row.attempt += 1
+        self.session.add(row)
+        self.session.commit()
+        self.session.refresh(row)
+        self.add_event(
+            credential,
+            "conversation.claimed",
+            status="ok",
+            result={"turn_id": row.turn_id, "session_id": row.session_id, "attempt": row.attempt},
+        )
+        return self._turn_payload(row, history_limit=history_limit, include_history=True)
+
+    def renew_message(
+        self, credential: ExternalControllerCredential, turn_id: str, lease_seconds: int = 300
+    ) -> dict:
+        row = self._owned_running_turn(credential, turn_id)
+        row.lease_expires_at = time.time() + max(30, min(int(lease_seconds), 1800))
+        row.updated_at = time.time()
+        self.session.add(row)
+        self.session.commit()
+        self.session.refresh(row)
+        return self._turn_payload(row)
+
+    def reply_message(
+        self,
+        credential: ExternalControllerCredential,
+        turn_id: str,
+        content: str,
+        *,
+        think: str = "",
+        model: str = "external-codex",
+    ) -> dict:
+        row = self._owned_running_turn(credential, turn_id)
+        body = str(content or "").strip()
+        if not body:
+            raise HTTPException(status_code=400, detail="Reply content is required")
+        message = _save_message(
+            self.session,
+            credential.user_id,
+            ChatMessageCreate(
+                role="assistant",
+                content=body,
+                think=str(think or "") or None,
+                model=str(model or "external-codex")[:200],
+                finish_reason="stop",
+                ai_config_id=row.ai_config_id,
+                ai_kind=row.ai_kind,
+                session_id=row.session_id,
+                session_name=row.session_name,
+            ),
+        )
+        transition_turn(row, "succeeded")
+        row.assistant_message_id = int(message.id or 0)
+        self.session.add(row)
+        self.session.commit()
+        self.session.refresh(row)
+        self.add_event(
+            credential,
+            "conversation.replied",
+            status="ok",
+            result={"turn_id": row.turn_id, "session_id": row.session_id, "message_id": message.id},
+        )
+        return self._turn_payload(row)
+
+    def fail_message(
+        self, credential: ExternalControllerCredential, turn_id: str, error: str
+    ) -> dict:
+        row = self._owned_running_turn(credential, turn_id)
+        transition_turn(row, "failed")
+        row.error_message = str(error or "external controller failed")[:4_000]
+        self.session.add(row)
+        self.session.commit()
+        self.session.refresh(row)
+        self.add_event(
+            credential,
+            "conversation.failed",
+            status="failed",
+            result={"turn_id": row.turn_id, "error": row.error_message},
+        )
+        return self._turn_payload(row)
+
+    def list_messages(
+        self,
+        credential: ExternalControllerCredential,
+        *,
+        status: str = "queued",
+        limit: int = 20,
+    ) -> list[dict]:
+        self._recover_expired_turns(credential)
+        statement = select(ExternalControllerTurn).where(
+            ExternalControllerTurn.user_id == credential.user_id,
+            ExternalControllerTurn.ai_config_id == credential.ai_config_id,
+        )
+        wanted = str(status or "").strip().lower()
+        if wanted:
+            statement = statement.where(ExternalControllerTurn.status == wanted)
+        rows = self.session.exec(
+            statement.order_by(ExternalControllerTurn.created_at.asc()).limit(max(1, min(int(limit), 100)))
+        ).all()
+        return [self._turn_payload(row) for row in rows]
+
+    def list_messages_for_owner(
+        self, user_id: int, ai_config_id: int, *, status: str = "", limit: int = 100
+    ) -> list[dict]:
+        self.get_member(user_id, ai_config_id)
+        statement = select(ExternalControllerTurn).where(
+            ExternalControllerTurn.user_id == user_id,
+            ExternalControllerTurn.ai_config_id == ai_config_id,
+        )
+        wanted = str(status or "").strip().lower()
+        if wanted:
+            statement = statement.where(ExternalControllerTurn.status == wanted)
+        rows = self.session.exec(
+            statement.order_by(ExternalControllerTurn.created_at.desc()).limit(max(1, min(int(limit), 100)))
+        ).all()
+        return [self._turn_payload(row) for row in rows]
+
+    def turn_payload_for_owner(self, row: ExternalControllerTurn) -> dict:
+        return self._turn_payload(row)
+
+    def _owned_running_turn(
+        self, credential: ExternalControllerCredential, turn_id: str
+    ) -> ExternalControllerTurn:
+        row = self.session.exec(
+            select(ExternalControllerTurn).where(
+                ExternalControllerTurn.turn_id == str(turn_id or "").strip(),
+                ExternalControllerTurn.user_id == credential.user_id,
+                ExternalControllerTurn.ai_config_id == credential.ai_config_id,
+            )
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Conversation turn not found")
+        if row.status != "running" or row.credential_id != credential.id:
+            raise HTTPException(status_code=409, detail="Conversation turn is not owned by this controller")
+        if row.lease_expires_at is not None and row.lease_expires_at <= time.time():
+            raise HTTPException(status_code=409, detail="Conversation turn lease has expired")
+        return row
+
+    def _turn_payload(
+        self,
+        row: ExternalControllerTurn,
+        *,
+        history_limit: int = 30,
+        include_history: bool = False,
+    ) -> dict:
+        user_message = self.session.get(ChatMessage, row.user_message_id)
+        payload = {
+            "turn_id": row.turn_id,
+            "status": row.status,
+            "session_id": row.session_id,
+            "session_name": row.session_name,
+            "ai_kind": row.ai_kind,
+            "user_message_id": row.user_message_id,
+            "content": str(user_message.content if user_message else ""),
+            "attempt": row.attempt,
+            "lease_expires_at": row.lease_expires_at,
+            "assistant_message_id": row.assistant_message_id,
+            "error": row.error_message,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+        if include_history:
+            rows = self.session.exec(
+                select(ChatMessage).where(
+                    ChatMessage.user_id == row.user_id,
+                    ChatMessage.ai_config_id == row.ai_config_id,
+                    ChatMessage.ai_kind == row.ai_kind,
+                    ChatMessage.session_id == row.session_id,
+                    ChatMessage.id <= row.user_message_id,
+                ).order_by(ChatMessage.id.desc()).limit(max(1, min(int(history_limit), 100)))
+            ).all()
+            payload["history"] = [
+                {"id": item.id, "role": item.role, "content": item.content, "created_at": item.created_at}
+                for item in reversed(rows)
+            ]
+        return payload

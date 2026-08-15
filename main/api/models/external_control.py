@@ -49,3 +49,30 @@ class ExternalControllerEvent(SQLModel, table=True):
     status: str = Field(default="ok", index=True)
     result_json: str = Field(default="{}")
     created_at: float = Field(default_factory=time.time, index=True)
+
+
+class ExternalControllerTurn(SQLModel, table=True):
+    """One user message waiting for an external controller reply."""
+
+    turn_id: str = Field(primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    ai_config_id: int = Field(foreign_key="assistantaiconfig.id", index=True)
+    credential_id: Optional[int] = Field(
+        default=None, foreign_key="externalcontrollercredential.id", index=True
+    )
+    user_message_id: int = Field(foreign_key="chatmessage.id", index=True)
+    assistant_message_id: Optional[int] = Field(
+        default=None, foreign_key="chatmessage.id", index=True
+    )
+    session_id: str = Field(index=True)
+    session_name: str = Field(default="")
+    ai_kind: str = Field(default="assistant", index=True)
+    status: str = Field(default="queued", index=True)
+    lease_owner: str = Field(default="")
+    lease_expires_at: Optional[float] = Field(default=None, index=True)
+    attempt: int = Field(default=0)
+    error_message: str = Field(default="")
+    created_at: float = Field(default_factory=time.time, index=True)
+    updated_at: float = Field(default_factory=time.time, index=True)
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None

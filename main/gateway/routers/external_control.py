@@ -30,6 +30,14 @@ class IssueCredentialRequest(BaseModel):
     ttl_days: int = Field(default=30, ge=1, le=90)
 
 
+class ExternalMessageRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=200_000)
+    session_id: str = Field(default="default", max_length=200)
+    session_name: str = Field(default="未命名会话", max_length=300)
+    ai_kind: str = Field(default="assistant", max_length=40)
+    tags: str = Field(default="", max_length=20_000)
+
+
 def _public_base(request: Request) -> str:
     configured = str(settings.public_base_url or "").strip().rstrip("/")
     if configured:
@@ -85,7 +93,7 @@ def _handoff_markdown(member_name: str, ai_config_id: int, endpoint: str, token:
     server_name = f"heysure_member_{ai_config_id}"
     return f"""# HeySure 外部 MCP 控制交接
 
-你将作为 HeySure 数字成员「{member_name}」的外部控制器。连接后先调用 `heysure.get_context`，读取当前 Prompt、绑定设备与权限；所有服务器或设备动作必须调用 `heysure.call_mcp`，不得猜测执行结果。开始一段工作时调用 `heysure.start_run`，结束时调用 `heysure.finish_run`。
+你将作为 HeySure 数字成员「{member_name}」的外部控制器。连接后先调用 `heysure.get_context`，读取当前 Prompt、绑定设备与权限；所有服务器或设备动作必须调用 `heysure.call_mcp`，不得猜测执行结果。普通工作用 `heysure.start_run` / `heysure.finish_run` 记录。对话消息用 `heysure.claim_message` 领取，长任务定期 `heysure.renew_message`，最后必须调用 `heysure.reply_message` 或 `heysure.fail_message` 进入终态。
 
 MCP 地址：`{endpoint}`
 
@@ -153,13 +161,40 @@ def controller_status(
             ExternalControllerRun.ai_config_id == ai_config_id,
         ).order_by(ExternalControllerRun.created_at.desc()).limit(20)
     ).all()
+    pending_messages = service.list_messages_for_owner(user.id, ai_config_id, status="queued", limit=100)
+    running_messages = service.list_messages_for_owner(user.id, ai_config_id, status="running", limit=100)
     return {
         "ai_config_id": ai_config_id,
         "execution_mode": cfg.execution_mode,
         "credentials": [_credential_payload(row) for row in credentials],
         "runs": [_run_payload(row) for row in runs],
         "events": service.list_events(user.id, ai_config_id, 100),
+        "message_queue": {
+            "queued": len(pending_messages),
+            "running": len(running_messages),
+        },
     }
+
+
+@router.post("/api/external-control/{ai_config_id}/messages")
+def enqueue_external_message(
+    ai_config_id: int,
+    body: ExternalMessageRequest,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    service = ExternalControlService(session)
+    turn = service.enqueue_message(
+        user.id,
+        ai_config_id,
+        content=body.content,
+        session_id=body.session_id,
+        session_name=body.session_name,
+        ai_kind=body.ai_kind,
+        tags=body.tags,
+    )
+    return service.turn_payload_for_owner(turn)
 
 
 @router.delete("/api/external-control/{ai_config_id}/credentials/{credential_id}")
@@ -176,6 +211,8 @@ def revoke_controller_credential(
 
 
 def _mcp_tool_definitions() -> list[dict]:
+    from .external_control_conversation_contract import conversation_tool_definitions
+
     return [
         {
             "name": "heysure.get_context",
@@ -234,6 +271,7 @@ def _mcp_tool_definitions() -> list[dict]:
                 "additionalProperties": False,
             },
         },
+        *conversation_tool_definitions(),
     ]
 
 
@@ -295,6 +333,52 @@ async def _tool_events(args, service, credential, user, cfg):
     return {"events": service.list_events(user.id, cfg.id, int(args.get("limit", 100)))}
 
 
+async def _tool_list_messages(args, service, credential, user, cfg):
+    return {
+        "messages": service.list_messages(
+            credential,
+            status=str(args.get("status") or "queued"),
+            limit=int(args.get("limit") or 20),
+        )
+    }
+
+
+async def _tool_claim_message(args, service, credential, user, cfg):
+    turn = service.claim_message(
+        credential,
+        turn_id=str(args.get("turn_id") or ""),
+        lease_seconds=int(args.get("lease_seconds") or 300),
+        history_limit=int(args.get("history_limit") or 30),
+    )
+    return {"message": turn}
+
+
+async def _tool_renew_message(args, service, credential, user, cfg):
+    return service.renew_message(
+        credential,
+        str(args.get("turn_id") or ""),
+        int(args.get("lease_seconds") or 300),
+    )
+
+
+async def _tool_reply_message(args, service, credential, user, cfg):
+    return service.reply_message(
+        credential,
+        str(args.get("turn_id") or ""),
+        str(args.get("content") or ""),
+        think=str(args.get("think") or ""),
+        model=str(args.get("model") or "external-codex"),
+    )
+
+
+async def _tool_fail_message(args, service, credential, user, cfg):
+    return service.fail_message(
+        credential,
+        str(args.get("turn_id") or ""),
+        str(args.get("error") or ""),
+    )
+
+
 async def _tool_call_mcp(args, service, credential, user, cfg):
     run_id = _valid_run_id(service.session, credential, args.get("run_id"))
     tool_name = str(args.get("tool") or "").strip()
@@ -330,6 +414,11 @@ _CONTROLLER_TOOL_HANDLERS = {
     "heysure.start_run": _tool_start_run,
     "heysure.finish_run": _tool_finish_run,
     "heysure.list_events": _tool_events,
+    "heysure.list_messages": _tool_list_messages,
+    "heysure.claim_message": _tool_claim_message,
+    "heysure.renew_message": _tool_renew_message,
+    "heysure.reply_message": _tool_reply_message,
+    "heysure.fail_message": _tool_fail_message,
     "heysure.call_mcp": _tool_call_mcp,
 }
 _CONTROLLER_TOOL_SCOPES = {
@@ -338,6 +427,11 @@ _CONTROLLER_TOOL_SCOPES = {
     "heysure.start_run": "run:write",
     "heysure.finish_run": "run:write",
     "heysure.list_events": "audit:read",
+    "heysure.list_messages": "context:read",
+    "heysure.claim_message": "run:write",
+    "heysure.renew_message": "run:write",
+    "heysure.reply_message": "run:write",
+    "heysure.fail_message": "run:write",
     "heysure.call_mcp": "mcp:call",
 }
 

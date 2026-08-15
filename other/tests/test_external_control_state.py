@@ -3,9 +3,9 @@ import pytest
 from pydantic import ValidationError
 
 from api.models import AssistantAIConfigUpdate
-from api.models.external_control import ExternalControllerRun
+from api.models.external_control import ExternalControllerRun, ExternalControllerTurn
 from api.services.external_control.service import _safe_value
-from api.services.external_control.state import RunTransitionError, transition_run
+from api.services.external_control.state import RunTransitionError, TurnTransitionError, transition_run, transition_turn
 from gateway.routers.external_control import _handoff_markdown, _mcp_tool_definitions, _run_payload
 
 
@@ -58,6 +58,11 @@ def test_remote_mcp_contract_exposes_only_stable_controller_tools() -> None:
         "heysure.start_run",
         "heysure.finish_run",
         "heysure.list_events",
+        "heysure.list_messages",
+        "heysure.claim_message",
+        "heysure.renew_message",
+        "heysure.reply_message",
+        "heysure.fail_message",
     }
     call_schema = next(item for item in _mcp_tool_definitions() if item["name"] == "heysure.call_mcp")
     assert call_schema["inputSchema"]["required"] == ["tool"]
@@ -88,3 +93,20 @@ def test_execution_mode_contract_rejects_unknown_modes() -> None:
 def test_journal_redacts_secret_shaped_result_fields() -> None:
     safe = _safe_value({"ok": True, "access_token": "secret", "nested": {"api-key": "secret"}})
     assert safe == {"ok": True, "access_token": "[redacted]", "nested": {"api-key": "[redacted]"}}
+
+
+def test_external_conversation_turn_can_recover_a_lease_but_not_a_terminal_state() -> None:
+    row = ExternalControllerTurn(
+        turn_id="xturn_test",
+        user_id=1,
+        ai_config_id=2,
+        user_message_id=3,
+        session_id="session-test",
+    )
+    transition_turn(row, "running", 10.0)
+    transition_turn(row, "queued", 20.0)
+    transition_turn(row, "running", 30.0)
+    transition_turn(row, "succeeded", 40.0)
+    assert row.finished_at == 40.0
+    with pytest.raises(TurnTransitionError):
+        transition_turn(row, "queued", 50.0)

@@ -29,4 +29,5 @@ def test_external_controller_schema_is_present_at_alembic_head() -> None:
         "externalcontrollercredential",
         "externalcontrollerrun",
         "externalcontrollerevent",
+        "externalcontrollerturn",
     }.issubset(tables)

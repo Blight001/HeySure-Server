@@ -65,6 +65,7 @@ def test_external_mcp_qq_inbound_registers_route_without_starting_model(monkeypa
         execution_mode="external_mcp",
     )
     registered = []
+    queued = []
     event = {
         "target_id": "qq-user-id",
         "target_type": "c2c",
@@ -90,8 +91,8 @@ def test_external_mcp_qq_inbound_registers_route_without_starting_model(monkeypa
     )
     monkeypatch.setattr(
         qq_router,
-        "_save_message",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("message must not persist")),
+        "enqueue_external_mcp_message",
+        lambda _session, _cfg, **kwargs: queued.append(kwargs) or SimpleNamespace(turn_id="xturn-1"),
     )
 
     result = qq_router.handle_qq_event_payload(19, {"op": 0, "t": "C2C_MESSAGE_CREATE"})
@@ -101,7 +102,10 @@ def test_external_mcp_qq_inbound_registers_route_without_starting_model(monkeypa
         "d": 0,
         "external_controlled": True,
         "route_registered": True,
+        "message_queued": True,
+        "turn_id": "xturn-1",
     }
     assert len(registered) == 1
     assert registered[0]["target_id"] == "qq-user-id"
     assert registered[0]["ai_config_id"] == 19
+    assert queued[0]["text"] == "hello"
