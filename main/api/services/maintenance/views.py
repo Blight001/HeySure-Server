@@ -49,13 +49,30 @@ def approval_dto(row: MaintenanceApproval) -> dict:
 
 
 def run_start_payload(task: MaintenanceTask) -> dict:
-    return {
+    controller = str(task.dedupe_key or "").startswith("external_turn:")
+    identity = (
+        "你是 OpenAI Codex，是当前 HeySure_AI_2.0 项目的独立核心维护控制器。"
+        "你不是德克萨斯，也不是任何数字成员；网页中的成员名称只是把用户消息转发给你的入口。"
+        "普通对话直接回答，不要为了确认身份调用工具。需要检查、修改或部署项目时，"
+        "使用当前 Codex 环境已经配置的 HeySure MCP、baota MCP 和本地工具，并遵守项目 AGENTS.md。\n\n"
+        if controller else ""
+    )
+    request_label = "远程请求" if controller else "维护工单"
+    payload = {
         "task": task_dto(task),
         "prompt": (
-            f"维护工单 {task.task_id}：{task.title}\n\n{task.description}\n\n"
+            identity + f"{request_label} {task.task_id}：{task.title}\n\n{task.description}\n\n"
             f"验收标准：\n{task.acceptance_criteria or '完成问题修复并通过相关验证。'}\n\n"
             f"影响仓库：{task.affected_repo or '请先诊断'}"
         ),
         "approvalPolicy": "unlessTrusted",
         "sandboxPolicy": {"type": "workspaceWrite", "networkAccess": False},
     }
+    if controller:
+        payload.update({
+            "approvalPolicy": "never",
+            "sandboxPolicy": {"type": "dangerFullAccess"},
+            "workspaceMode": "current",
+            "trustedMcpServers": [f"heysure_member_{task.reporter_ai_config_id}", "baota"],
+        })
+    return payload

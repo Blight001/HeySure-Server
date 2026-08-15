@@ -81,8 +81,8 @@ async def _dispatch_turn(turn_id: str, sid: str, device_id: str) -> bool:
         command_id = f"run_start:{task.run_id}"
         payload = {"command_id": command_id, "command": "run_start", **run_start_payload(task)}
         event = MaintenanceService(session).append_event(task, EventRecord(
-            "command.run_start", "member", payload,
-            event_id=f"cmd:{command_id}", actor_id=str(turn.ai_config_id),
+            "command.run_start", "controller", payload,
+            event_id=f"cmd:{command_id}", actor_id=device_id,
         ))
         session.commit()
         session.refresh(task)
@@ -105,15 +105,16 @@ def _conversation_task(
         f"{item['role']}: {item['content']}" for item in context.get("history", [])
     )[-80_000:]
     prompt = (
-        "这是用户在 HeySure 网页端与数字成员的直接对话。请直接回答最新用户消息；"
-        "若需要维护当前项目，可在隔离工作树中检查和修改。最终答案会自动回写原会话，"
-        "不要要求用户去其他页面查看。\n\n会话历史：\n" + history
+        "这是 HeySure 网页转发给本机 Codex 控制器的远程消息。网页入口只负责收发消息，"
+        "不定义你的身份。请直接处理最新用户请求；普通对话不要调用工具，项目维护请求可在"
+        "当前工作目录检查、修改、测试，并按用户明确授权使用 HeySure MCP 或 baota MCP 部署。"
+        "最终答案会自动回写原会话。\n\n会话历史：\n" + history
     )
     return MaintenanceService(session).create_task(turn.user_id, CreateTaskSpec(
         maintainer_ai_config_id=turn.ai_config_id,
         reporter_ai_config_id=turn.ai_config_id,
         device_id=device_id,
-        title=f"德克萨斯对话：{turn.session_name}"[:500],
+        title=f"Codex 远程对话：{turn.session_name}"[:500],
         description=prompt,
         acceptance_criteria="返回清晰的最终答复，并将结果写回原 HeySure 会话。",
         affected_repo="HeySure_AI_2.0",

@@ -77,6 +77,10 @@ def test_queued_external_message_dispatches_and_replies_to_original_chat(
 
     assert emitted[0][0] == "codex:run_start"
     assert emitted[0][1]["commandId"].startswith("run_start:")
+    assert emitted[0][1]["workspaceMode"] == "current"
+    assert emitted[0][1]["sandboxPolicy"] == {"type": "dangerFullAccess"}
+    assert emitted[0][1]["approvalPolicy"] == "never"
+    assert "baota" in emitted[0][1]["trustedMcpServers"]
     with Session(engine) as session:
         turn = session.get(ExternalControllerTurn, turn_id)
         task = session.exec(select(MaintenanceTask).where(
@@ -84,6 +88,7 @@ def test_queued_external_message_dispatches_and_replies_to_original_chat(
         )).one()
         assert turn.status == "running"
         assert "Please inspect the project" in task.description
+        assert "本机 Codex 控制器" in task.description
         task.status = "succeeded"
         task.summary = "Project inspection complete"
         session.add(task)
