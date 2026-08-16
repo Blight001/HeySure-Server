@@ -43,6 +43,39 @@ def test_compile_normalizes_and_hashes_valid_phase_one_definition():
     assert compiled["warnings"] == []
 
 
+def _linear_definition(step_count: int):
+    steps = {}
+    for index in range(step_count - 1):
+        step_id = f"step_{index}"
+        next_id = "finish" if index == step_count - 2 else f"step_{index + 1}"
+        steps[step_id] = {
+            "type": "condition",
+            "expression": {"op": "eq", "left": 1, "right": 1},
+            "onTrue": next_id,
+            "onFalse": next_id,
+        }
+    steps["finish"] = {"type": "end"}
+    return {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "step_0",
+        "steps": steps,
+        "output": {},
+    }
+
+
+def test_compile_accepts_up_to_200_steps_and_defaults_transition_limit():
+    compiled = compile_definition(_linear_definition(200))
+    assert len(compiled["definition"]["steps"]) == 200
+    assert compiled["definition"]["limits"]["maxTransitions"] == 200
+
+
+def test_compile_rejects_more_than_200_steps():
+    with pytest.raises(WorkflowValidationError) as raised:
+        compile_definition(_linear_definition(201))
+    assert "steps exceeds maximum of 200" in raised.value.errors
+
+
 def test_compile_rejects_unsupported_steps():
     definition = _definition()
     definition["steps"]["finish"] = {

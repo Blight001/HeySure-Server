@@ -10,6 +10,7 @@ from .recording_trace_browser import prepare_browser_calls, stabilize_browser_re
 
 
 SENSITIVE_KEYS = {"authorization", "cookie", "password", "secret", "token", "api_key", "apikey"}
+MAX_TRACE_CALLS = 200
 MAX_GENERATED_ID_LENGTH = 57  # Leaves room for the compiler-safe ``_result`` suffix.
 
 
@@ -83,8 +84,8 @@ def _tool_ref(call: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
 
 
 def _validate_calls(calls: list[Dict[str, Any]]) -> None:
-    if not calls or len(calls) > 50:
-        raise WorkflowValidationError(["trace must contain 1..50 MCP calls"])
+    if not calls or len(calls) > MAX_TRACE_CALLS:
+        raise WorkflowValidationError(["trace must contain 1..200 MCP calls"])
     for index, call in enumerate(calls, start=1):
         if not isinstance(call, dict):
             raise WorkflowValidationError([f"trace call {index} must be an object"])

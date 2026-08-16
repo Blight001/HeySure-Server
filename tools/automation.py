@@ -1025,7 +1025,7 @@ AUTOMATION_MANAGE_SCHEMA = {
             ),
         },
         "calls": {
-            "type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"},
+            "type": "array", "minItems": 1, "maxItems": 200, "items": {"type": "object"},
             "description": (
                 "仅供 from_trace 导入已真实执行、顺序明确的结构化调用轨迹；不要由 AI 猜测工具返回结构后伪造轨迹。"
             ),
