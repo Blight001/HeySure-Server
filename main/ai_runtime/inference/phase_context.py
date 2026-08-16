@@ -1,11 +1,10 @@
 """Phase-aware context compaction for the unified todo flow.
 
 When ``todo.manage(action=edit)`` finishes a phase, the inference loop folds that phase's
-turns out of the live conversation — the deep-thinking (reasoning) and the
-verbose MCP results are dropped, and only a compact line of "which tools ran and
-whether they succeeded" plus the phase summary is kept. The same turns are
-tagged ``compressed_away`` in the persisted history so a resumed run rebuilds
-the same compact context instead of replaying the full phase.
+turns out of the live conversation while retaining the original rows in persisted
+history. The live context keeps only a short phase title and summary; original
+assistant/tool records remain recoverable because compaction is represented by a
+reversible tag rather than deletion.
 
 This module is deliberately free of inference-loop state: it exposes pure
 helpers (status bookkeeping + text rendering) plus a persistence tagging
@@ -18,46 +17,34 @@ from sqlmodel import Session, select
 
 from api.models import ChatMessage
 
-# Flow-control tools are not "real work"; they should not appear in a phase's
-# MCP-status line (they are how the phase boundary itself is driven).
-_FLOW_TOOLS = {
-    "todo.manage",
-    "mcp.describe+tool",
-}
-
-
 def record_status(statuses: List[Tuple[str, bool]], tool: str, failed: bool) -> None:
-    """Append a tool's outcome to the current phase's status list (in place)."""
-    name = str(tool or "").strip()
-    if not name or name in _FLOW_TOOLS:
-        return
-    statuses.append((name, not failed))
-
-
-def render_status_lines(statuses: List[Tuple[str, bool]]) -> str:
-    if not statuses:
-        return "（本阶段无 MCP 工具调用）"
-    return "；".join(f"{tool} {'✓' if ok else '✗'}" for tool, ok in statuses)
+    """Retained for runtime compatibility; phase status is no longer rendered."""
+    # Tool status is useful for internal telemetry, but it is intentionally not
+    # injected into the user-visible or model-visible phase summary.
+    if str(tool or "").strip():
+        statuses.append((str(tool).strip(), not failed))
 
 
 def build_phase_compaction_text(
     finished_phase: Optional[dict],
-    statuses: List[Tuple[str, bool]],
+    statuses: Optional[List[Tuple[str, bool]]] = None,
 ) -> str:
-    """Compact replacement text for one finished phase's conversation slice."""
+    """Build the minimal phase boundary context.
+
+    ``statuses`` remains an optional argument for callers from older runtime
+    versions, but is deliberately ignored. Detailed MCP results and internal
+    compression explanations do not belong in the phase boundary message.
+    """
     phase = finished_phase or {}
     seq_human = int(phase.get("seq", 0)) + 1
     title = str(phase.get("title") or f"阶段{seq_human}")
     status = str(phase.get("status") or "completed")
-    badge = "已完成" if status == "completed" else "未达成(failed)"
+    badge = "已完成" if status == "completed" else "未达成"
     summary = str(phase.get("summary") or "").strip()
-    lines = [
-        f"[系统提示 · 阶段{seq_human} {badge}] {title}",
-        f"阶段小结：{summary}" if summary else "",
-        f"MCP 调用状态：{render_status_lines(statuses)}",
-        "（为节省上下文并保持方向清晰，本阶段的深度思考与 MCP 详细结果已隐藏，仅保留以上状态与小结。）",
-    ]
-    return "\n".join(line for line in lines if line)
+    lines = [f"[系统提示 · 阶段{seq_human} {badge}] {title}"]
+    if summary:
+        lines.append(f"阶段小结：{summary}")
+    return "\n".join(lines)
 
 
 def render_plan_required_notice() -> str:
@@ -173,11 +160,10 @@ def mark_phase_messages_compressed(
     since_ts: float,
     until_ts: float,
 ) -> int:
-    """Tag a phase's assistant turns + MCP tool bubbles ``compressed_away``.
+    """Mark phase details as compacted without deleting their persisted rows.
 
-    Mirrors :mod:`api.services.chat.conversation_compress`: ``compressed_away`` rows
-    are excluded from the model context on subsequent runs. User-visible turns
-    and the persisted phase-summary message are left intact.
+    The tag is reversible and the phase summary remains separately persisted.
+    User-visible turns and the original message content are left intact.
     """
     stmt = select(ChatMessage).where(
         ChatMessage.user_id == user_id,
