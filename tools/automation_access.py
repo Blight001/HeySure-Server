@@ -88,12 +88,17 @@ def _pending_ai_review_guidance(row: Any, ai_config_id: Optional[int]) -> dict[s
         and assigned_ai_id == int(ai_config_id)
         and confirmation_type == "ai_review"
     )
+    import time
+    expires_at = getattr(row, "expires_at", None)
+    expires_in = max(0, int(float(expires_at) - time.time())) if expires_at else None
     return {
         "id": str(getattr(row, "id", "") or ""),
         "step_id": str(getattr(row, "step_id", "") or ""),
         "type": confirmation_type,
         "risk_summary": str(getattr(row, "risk_summary", "") or ""),
-        "expires_at": getattr(row, "expires_at", None),
+        "expires_at": expires_at,
+        "expires_in_seconds": expires_in,
+        "recommended_response_deadline": expires_at,
         "assigned_ai_config_id": assigned_ai_id,
         "can_respond": can_respond,
         "required_action": "automation.manage:respond" if can_respond else "unavailable",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlmodel import Session, select
@@ -206,9 +207,145 @@ def _card_access(session: Session, user_id: int, scope: object, allowed_ids: obj
     return normalized_scope, requested if normalized_scope == "selected" else []
 
 
-def validate_card(row: WorkflowCard, session: Optional[Session] = None) -> Dict[str, Any]:
+def validate_card(
+    row: WorkflowCard,
+    session: Optional[Session] = None,
+    *,
+    contract_check: str = "live",
+    version_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate syntax and, by default, the frozen contracts against live devices."""
     compiled = compile_definition(_load(row.draft_definition_json, {}))
-    return {"valid": True, "digest": compiled["digest"], "warnings": compiled["warnings"]}
+    result: Dict[str, Any] = {
+        "valid": True,
+        "definition_valid": True,
+        "contracts_valid": None,
+        "device_online": None,
+        "runnable": True,
+        "digest": compiled["digest"],
+        "warnings": compiled["warnings"],
+    }
+    if contract_check == "definition" or session is None:
+        return result
+    if contract_check != "live":
+        raise WorkflowValidationError(["contract_check must be live or definition"])
+    selected_id = str(version_id or row.latest_version_id or "")
+    version = session.get(WorkflowCardVersion, selected_id)
+    if not version or version.card_id != row.id:
+        raise WorkflowValidationError(["card version does not exist"])
+    definition = _load(version.definition_json, {})
+    contracts = _load(version.tool_contracts_json, {})
+    incompatible: List[Dict[str, Any]] = []
+    offline: List[str] = []
+    snapshots: Dict[str, Tuple[DevicePresence, Dict[str, Any]]] = {}
+    for step_id, step in definition.get("steps", {}).items():
+        if not isinstance(step, dict) or step.get("type") != "mcp":
+            continue
+        ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
+        device_id = str(ref.get("deviceId") or definition.get("defaultDeviceId") or "").strip()
+        name = str(ref.get("name") or "").strip()
+        try:
+            if device_id not in snapshots:
+                snapshots[device_id] = _device_snapshot(session, row.user_id, device_id)
+            device, live_defs = snapshots[device_id]
+        except WorkflowValidationError:
+            offline.append(device_id)
+            continue
+        live = live_defs.get(name)
+        contract = contracts.get(step_id) if isinstance(contracts, dict) else None
+        contract = contract if isinstance(contract, dict) else {}
+        published = str(contract.get("schemaDigest") or ref.get("schemaDigest") or "")
+        current_schema = live.get("input_schema") if isinstance(live, dict) and isinstance(live.get("input_schema"), dict) else None
+        current = schema_digest(current_schema) if current_schema is not None else ""
+        if current_schema is None or not published or published != current:
+            incompatible.append({
+                "stepId": step_id, "tool": name, "deviceId": device_id,
+                "publishedDigest": published, "currentDigest": current or None,
+                "reason": "TOOL_NOT_AVAILABLE" if current_schema is None else "SCHEMA_CHANGED",
+            })
+    result.update({
+        "contracts_valid": not incompatible and not offline,
+        "device_online": not offline,
+        "runnable": not incompatible and not offline,
+        "incompatibleSteps": incompatible,
+        "offlineDeviceIds": list(dict.fromkeys(offline)),
+        "repairAvailable": bool(incompatible) and not offline,
+        "repairAction": "refresh_contracts" if incompatible and not offline else None,
+        "resolved_version_id": version.id,
+        "latest_version_id": row.latest_version_id,
+        "is_latest": version.id == row.latest_version_id,
+    })
+    if incompatible:
+        result.update({"valid": False, "errorCode": "TOOL_SCHEMA_INCOMPATIBLE"})
+    elif offline:
+        result.update({"valid": False, "errorCode": "DEVICE_OFFLINE"})
+    return result
+
+
+def refresh_tool_contracts(
+    session: Session,
+    *,
+    row: WorkflowCard,
+    user_id: int,
+    base_version_id: str,
+    tools: Optional[List[str]] = None,
+    step_ids: Optional[List[str]] = None,
+    only_incompatible: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Refresh frozen MCP schemas without requiring callers to patch every digest."""
+    if not base_version_id or row.latest_version_id != base_version_id:
+        raise WorkflowValidationError(["card changed since base_version_id; reload before refreshing contracts"])
+    base = session.get(WorkflowCardVersion, base_version_id)
+    if not base or base.card_id != row.id:
+        raise WorkflowValidationError(["base card version does not exist"])
+    definition = deepcopy(_load(base.definition_json, {}))
+    wanted_tools = {str(x) for x in (tools or []) if str(x)}
+    wanted_steps = {str(x) for x in (step_ids or []) if str(x)}
+    changed: List[str] = []
+    for step_id, step in definition.get("steps", {}).items():
+        if not isinstance(step, dict) or step.get("type") != "mcp":
+            continue
+        ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
+        if wanted_tools and str(ref.get("name") or "") not in wanted_tools:
+            continue
+        if wanted_steps and step_id not in wanted_steps:
+            continue
+        if only_incompatible:
+            live_digest = ""
+            try:
+                live_defs = tool_defs_for_agent(user_id, str(ref.get("deviceId") or definition.get("defaultDeviceId") or ""))
+                live = live_defs.get(str(ref.get("name") or ""))
+                schema = live.get("input_schema") if isinstance(live, dict) else None
+                live_digest = schema_digest(schema) if isinstance(schema, dict) else ""
+            except Exception:
+                live_digest = ""
+            if live_digest and live_digest == str(ref.get("schemaDigest") or ""):
+                continue
+        if ref.pop("schemaDigest", None) is not None:
+            changed.append(step_id)
+        ref.pop("provider", None)
+    if (wanted_tools or wanted_steps) and not changed:
+        raise WorkflowValidationError(["refresh scope did not match any step with a frozen contract"])
+    device_ids = _load(base.contract_device_ids_json, [])
+    contracts, bound_ids = _snapshot_contracts(session, user_id, definition, device_ids=device_ids)
+    refreshed = [
+        {"stepId": step_id, "tool": definition["steps"][step_id]["toolRef"]["name"],
+         "schemaDigest": definition["steps"][step_id]["toolRef"].get("schemaDigest")}
+        for step_id in changed
+    ]
+    result = {
+        "card_id": row.id, "base_version_id": base_version_id, "dry_run": dry_run,
+        "committed": False, "changed_step_ids": changed, "contracts_refreshed": refreshed,
+        "validation": {"valid": True}, "version_id": None,
+    }
+    if dry_run:
+        return result
+    row.draft_definition_json = _json(definition)
+    session.add(row)
+    created = _save_version(session, row, user_id, device_ids=bound_ids)
+    result.update({"committed": True, "version_id": created.id, "latest_version_id": created.id})
+    return result
 
 
 def _contract_device_ids(device_id: Optional[str], device_ids: Optional[List[str]]) -> List[str]:

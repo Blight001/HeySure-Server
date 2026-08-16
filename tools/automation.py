@@ -34,6 +34,7 @@ from api.services.workflows.card_service import (
     delete_card,
     update_card,
     validate_card,
+    refresh_tool_contracts,
     version_payload,
 )
 from api.services.workflows.compiler import WorkflowValidationError
@@ -296,7 +297,20 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             delete_card(session, card)
             return {"deleted": True, "card_id": card.id}
         if action == "validate":
-            return validate_card(card, session)
+            return validate_card(
+                card, session,
+                contract_check=str(args.get("contract_check") or "live"),
+                version_id=str(args.get("version_id") or "") or None,
+            )
+        if action == "refresh_contracts":
+            return refresh_tool_contracts(
+                session, row=card, user_id=user_id,
+                base_version_id=str(args.get("base_version_id") or ""),
+                tools=args.get("tools") if isinstance(args.get("tools"), list) else None,
+                step_ids=args.get("contract_step_ids") if isinstance(args.get("contract_step_ids"), list) else None,
+                only_incompatible=bool(args.get("only_incompatible")),
+                dry_run=bool(args.get("dry_run")),
+            )
         if action == "versions":
             rows = session.exec(select(WorkflowCardVersion).where(
                 WorkflowCardVersion.card_id == card.id,
@@ -741,7 +755,7 @@ def _automation_manage(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
     try:
         if action in {
             "list", "get", "create", "from_trace", "edit", "update", "patch", "replace_definition",
-            "delete", "validate", "versions", "get_version",
+            "delete", "validate", "refresh_contracts", "versions", "get_version",
         }:
             return _manage_card(user_id, args, ai_config_id)
         if action in {
@@ -776,7 +790,7 @@ AUTOMATION_MANAGE_SCHEMA = {
             "type": "string",
             "enum": [
                 "list", "get", "create", "from_trace", "edit", "patch", "replace_definition", "delete",
-                "validate", "versions", "get_version", "start",
+                "validate", "refresh_contracts", "versions", "get_version", "start",
                 "list_runs", "status", "pause", "resume", "cancel", "respond",
                 "record_start", "record_status", "record_stop", "record_cancel",
                 "debug_start", "debug_step", "debug_continue", "debug_restart",
@@ -826,6 +840,30 @@ AUTOMATION_MANAGE_SCHEMA = {
         "base_version_id": {
             "type": "string",
             "description": "action=patch/replace_definition 必填，必须等于最新版本 ID，用于防止 AI 覆盖其他人的新修改。",
+        },
+        "contract_check": {
+            "type": "string", "enum": ["live", "definition"], "default": "live",
+            "description": "validate 默认 live：同时检查当前设备在线状态与工具 Schema；definition 仅静态校验。",
+        },
+        "tools": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 100,
+            "description": "refresh_contracts 可选工具名范围；省略时刷新全卡片 MCP 契约。",
+        },
+        "contract_step_ids": {
+            "type": "array", "items": {"type": "string"}, "maxItems": 100,
+            "description": "refresh_contracts 可选步骤范围；省略时按 tools 或全卡片刷新。",
+        },
+        "only_incompatible": {
+            "type": "boolean", "default": False,
+            "description": "refresh_contracts 仅刷新实时摘要不兼容的步骤。",
+        },
+        "trace_mode": {
+            "type": "string", "enum": ["summary", "full", "none"], "default": "summary",
+            "description": "start/status/respond 的审核轨迹视图；默认 summary，完整轨迹需显式 full。",
+        },
+        "wait_until": {
+            "type": "string", "enum": ["created", "ai_or_terminal"], "default": "ai_or_terminal",
+            "description": "start 返回时机；created 仅创建运行，ai_or_terminal 等到 AI 审核或终态。",
         },
         "operations": {
             "type": "array", "minItems": 1, "maxItems": 100,
