@@ -431,6 +431,30 @@ def _wait_for_original_chat_run(
         time.sleep(max(0.1, poll_seconds))
 
 
+def _wait_for_debug_run(
+    run_id: str,
+    ai_config_id: Optional[int],
+    *,
+    poll_seconds: float = 0.25,
+) -> Dict[str, Any]:
+    """Wait until a continued debug run pauses, reaches AI review, or terminates."""
+    while True:
+        with Session(engine) as session:
+            row = session.get(WorkflowRun, run_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
+            payload = run_payload(row)
+            if row.status in TERMINAL_RUN_STATUSES or row.status == "paused":
+                return payload
+            pending = _pending_interaction(session, row.id)
+            if pending and pending.confirmation_type == "ai_review":
+                payload["pending_ai_review"] = _pending_ai_review_result(
+                    session, row, pending, ai_config_id
+                )
+                return payload
+        time.sleep(max(0.1, poll_seconds))
+
+
 def _start_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     origin = _chat_origin()
     with Session(engine) as session:
@@ -616,11 +640,31 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
     if action in {"debug_step", "debug_continue"}:
         resumed_args = dict(args)
         resumed_args["_debug_single_step"] = action == "debug_step"
-        return _resume_run(user_id, resumed_args, ai_config_id)
+        resumed = _resume_run(user_id, resumed_args, ai_config_id)
+        if action == "debug_continue":
+            return _wait_for_debug_run(str(resumed["run_id"]), ai_config_id)
+        return resumed
     if action == "debug_start":
         with Session(engine) as session:
             card = _accessible_card(session, user_id, str(args.get("card_id") or ""), ai_config_id)
             seed_steps = args.get("seed_steps") if isinstance(args.get("seed_steps"), dict) else {}
+            requested_start = str(args.get("start_step_id") or "")
+            prepare_environment = bool(args.get("prepare_environment"))
+            debug_state = {"pause_after_step": False}
+            actual_start = requested_start
+            if prepare_environment and requested_start:
+                version = session.get(WorkflowCardVersion, str(args.get("version_id") or card.latest_version_id))
+                definition = _load(version.definition_json, {}) if version else {}
+                initial = (definition.get("compatibility") or {}).get("initialEnvironment") or {}
+                reset_step = str(initial.get("resetStepId") or "")
+                ready_step = str(initial.get("readyStepId") or "")
+                if not reset_step or not ready_step:
+                    raise HTTPException(status_code=422, detail="DEBUG_INITIAL_ENVIRONMENT_NOT_DECLARED")
+                actual_start = reset_step
+                debug_state.update({
+                    "prepare_ready_step_id": ready_step,
+                    "prepare_target_step_id": requested_start,
+                })
             try:
                 row = create_validated_run(
                     session,
@@ -635,9 +679,9 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
                         actor_id=str(ai_config_id or user_id),
                         initial_variables={
                             "steps": seed_steps,
-                            "_debug": {"pause_after_step": False},
+                            "_debug": debug_state,
                             "_run_debug_options": {
-                                "start_step_id": str(args.get("start_step_id") or ""),
+                                "start_step_id": actual_start,
                                 "start_paused": True,
                             },
                         },
@@ -916,6 +960,13 @@ AUTOMATION_MANAGE_SCHEMA = {
         "seed_steps": {
             "type": "object",
             "description": "从中间步骤启动时注入此前步骤变量，结构为 {saveAs: {result: ...}}。模板依赖缺失会安全失败。",
+        },
+        "prepare_environment": {
+            "type": "boolean",
+            "description": (
+                "debug_start 从中间步骤调试浏览器卡片时设为 true：先执行 "
+                "compatibility.initialEnvironment 的 reset→ready 初始化链，完成后自动暂停在 start_step_id。"
+            ),
         },
         "name": {"type": "string"},
         "description": {"type": "string"},

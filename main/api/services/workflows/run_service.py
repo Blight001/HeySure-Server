@@ -61,7 +61,16 @@ def _pause_after_debug_step(run: WorkflowRun, now: float, completed_step_id: str
         return
     variables = _load(run.variables_json, {})
     debug = variables.get("_debug") if isinstance(variables, dict) else None
-    if not isinstance(debug, dict) or not debug.get("pause_after_step"):
+    if not isinstance(debug, dict):
+        return
+    prepare_ready = str(debug.get("prepare_ready_step_id") or "")
+    prepare_target = str(debug.get("prepare_target_step_id") or "")
+    preparing_done = bool(prepare_ready and prepare_target and completed_step_id == prepare_ready)
+    if preparing_done:
+        run.current_step_id = prepare_target
+        debug.pop("prepare_ready_step_id", None)
+        debug.pop("prepare_target_step_id", None)
+    if not debug.get("pause_after_step") and not preparing_done:
         return
     previous = run.status
     variables["_automation_control"] = {
