@@ -367,13 +367,36 @@ def _run_for_ai(
     raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
 
 
-def _chat_origin() -> Dict[str, str]:
+def _chat_origin(args: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Normalize origin context before creating a workflow run.
+
+    The MCP call may cross the AI/runtime boundary with only the explicit
+    current_session_id still available.  Do not require both fields from the
+    context, otherwise the notifier silently creates an isolated chat.
+    """
     context = get_run_session_context() or {}
-    run_id = str(context.get("run_id") or "").strip()
-    session_id = str(context.get("session_id") or "").strip()
-    if not run_id or not session_id:
+    args = args if isinstance(args, dict) else {}
+    run_id = str(
+        context.get("run_id")
+        or context.get("chat_run_id")
+        or args.get("origin_run_id")
+        or ""
+    ).strip()
+    session_id = str(
+        context.get("session_id")
+        or context.get("current_session_id")
+        or args.get("current_session_id")
+        or ""
+    ).strip()
+    ai_config_id = str(context.get("ai_config_id") or "").strip()
+    if not session_id:
         return {}
-    return {"run_id": run_id, "session_id": session_id}
+    origin = {"session_id": session_id}
+    if run_id:
+        origin["run_id"] = run_id
+    if ai_config_id:
+        origin["ai_config_id"] = ai_config_id
+    return origin
 
 
 def _pending_interaction(session: Session, run_id: str) -> Optional[WorkflowConfirmation]:
@@ -456,7 +479,7 @@ def _wait_for_debug_run(
 
 
 def _start_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
-    origin = _chat_origin()
+    origin = _chat_origin(args)
     with Session(engine) as session:
         _accessible_card(
             session,
@@ -960,6 +983,14 @@ AUTOMATION_MANAGE_SCHEMA = {
         "seed_steps": {
             "type": "object",
             "description": "从中间步骤启动时注入此前步骤变量，结构为 {saveAs: {result: ...}}。模板依赖缺失会安全失败。",
+        },
+        "current_session_id": {
+            "type": "string",
+            "description": "启动卡片的原始聊天会话 ID；跨 Runtime 时用于将 AI 控制节点回连到当前对话。",
+        },
+        "origin_run_id": {
+            "type": "string",
+            "description": "可选的原始 ChatRun ID；与 current_session_id 一起用于精确回连。",
         },
         "prepare_environment": {
             "type": "boolean",

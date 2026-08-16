@@ -12,6 +12,7 @@ from tools.automation import (
     _updated_tags,
     _edit_card,
     _created_card_reference,
+    _chat_origin,
 )
 import pytest
 from fastapi import HTTPException
@@ -160,3 +161,17 @@ def test_removed_human_confirmation_is_not_actionable_by_ai():
 def test_ai_edit_cannot_replace_an_entire_existing_definition():
     with pytest.raises(HTTPException, match="FULL_DEFINITION_REPLACE_DISABLED"):
         _edit_card(None, _card([]), {"definition": {"steps": {}}}, 1)
+
+
+def test_chat_origin_accepts_explicit_session_when_runtime_context_is_partial(monkeypatch):
+    monkeypatch.setattr(automation, "get_run_session_context", lambda: {"run_id": "ctx-run"})
+    assert _chat_origin({"current_session_id": "origin-session"}) == {
+        "run_id": "ctx-run", "session_id": "origin-session"
+    }
+
+
+def test_chat_origin_accepts_runtime_session_context_without_run_id(monkeypatch):
+    monkeypatch.setattr(automation, "get_run_session_context", lambda: {
+        "current_session_id": "origin-session", "ai_config_id": 4
+    })
+    assert _chat_origin({}) == {"session_id": "origin-session", "ai_config_id": "4"}
