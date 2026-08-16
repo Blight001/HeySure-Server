@@ -770,12 +770,26 @@ async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Opt
         wakeup = {"started": False, "error": str(exc)}
         target_active = False
 
+    # Always return the actual route selected by the server.  Previously the
+    # caller only got message_id, so a first contact that created a new target
+    # ChatSession was effectively invisible and a later message could appear to
+    # land in a different conversation.
+    actual_target_session_id = str(
+        (wakeup or {}).get("session_id") or msg.target_session_id or prebound_session_id or ""
+    ).strip()
     base_out: Dict[str, Any] = {
         "message_id": msg.message_id,
         "queued": True,
         "to_ai_config_id": to_id,
         "message_type": message_type,
         "require_reply": require_reply,
+        "ai_pair_channel_id": ai_message_service.ai_pair_channel_id(
+            user_id=user_id,
+            ai_config_id_a=int(ai_config_id),
+            ai_config_id_b=to_id,
+        ),
+        "target_session_id": actual_target_session_id,
+        "target_session_name": str((wakeup or {}).get("session_name") or "").strip() or None,
     }
 
     if not require_reply:

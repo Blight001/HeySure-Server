@@ -97,6 +97,20 @@ def _content_requests_response(content: str) -> bool:
     return bool(re.search(r"(回复|回信|回话|回应|答复|确认|收到|回我|回传|reply|respond|response|ack)", text))
 
 
+def ai_pair_channel_id(*, user_id: int, ai_config_id_a: int, ai_config_id_b: int) -> str:
+    """Return the stable human/debug identifier for an AI-to-AI channel.
+
+    The two AIs may have different ChatSession IDs (one session per AI), but
+    they still belong to one durable point-to-point channel.  Exposing this
+    identifier in the tool result makes the selected route unambiguous and
+    lets clients correlate later messages without guessing from session names.
+    """
+    left, right = sorted((int(ai_config_id_a), int(ai_config_id_b)))
+    seed = f"{int(user_id)}:{left}:{right}"
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+    return f"ai_pair_{left}_{right}_{digest}"
+
+
 def stable_peer_session_id(
     *,
     user_id: int,
