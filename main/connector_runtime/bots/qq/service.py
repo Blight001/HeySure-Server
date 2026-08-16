@@ -226,29 +226,55 @@ def upload_qq_media_file_info(
         raise HTTPException(status_code=400, detail="QQ file messages are supported for c2c or group targets")
     kind = infer_media_kind(source, media_type)
     file_type = {"image": 1, "video": 2, "audio": 3, "file": 4}[kind]
-    payload: Dict[str, Any] = {
+    base_payload: Dict[str, Any] = {
         "file_type": file_type,
         "srv_send_msg": False,
     }
-    if source.source_url:
-        payload["url"] = source.source_url
-    else:
-        with open(source.path, "rb") as fh:
-            payload["file_data"] = base64.b64encode(fh.read()).decode("ascii")
     token = get_qq_access_token(user_id, ai_config_id, connection_ref)
-    res = _qq_http_session().post(
-        _qq_media_file_endpoint(cfg, final_target_type, target_id),
-        headers=_qq_headers(cfg, token),
-        json=payload,
-        timeout=60,
-    )
-    data = parse_json_response(res)
-    if not res.ok or (isinstance(data, dict) and data.get("code") not in (None, 0)):
-        raise HTTPException(status_code=502, detail=f"QQ media upload failed: {data or res.text}")
-    file_info = str(data.get("file_info") or (data.get("data") or {}).get("file_info") or "").strip()
-    if not file_info:
-        raise HTTPException(status_code=502, detail="QQ media upload response missing file_info")
-    return file_info
+    endpoint = _qq_media_file_endpoint(cfg, final_target_type, target_id)
+
+    def _upload(payload: Dict[str, Any]) -> str:
+        res = _qq_http_session().post(
+            endpoint,
+            headers=_qq_headers(cfg, token),
+            json=payload,
+            timeout=60,
+        )
+        data = parse_json_response(res)
+        if not res.ok or (isinstance(data, dict) and data.get("code") not in (None, 0)):
+            raise HTTPException(status_code=502, detail=f"QQ media upload failed: {data or res.text}")
+        file_info = str(data.get("file_info") or (data.get("data") or {}).get("file_info") or "").strip()
+        if not file_info:
+            raise HTTPException(status_code=502, detail="QQ media upload response missing file_info")
+        return file_info
+
+    # QQ can fetch a public URL directly, which avoids base64 overhead. In
+    # practice its fetcher often cannot reach signed/CDN/redirecting URLs even
+    # though resolve_media_source has already downloaded them successfully.
+    # Try the URL first, then fall back to the validated local bytes.
+    url_error = ""
+    if source.source_url:
+        try:
+            return _upload({**base_payload, "url": source.source_url})
+        except HTTPException as exc:
+            url_error = str(exc.detail)
+
+    try:
+        with open(source.path, "rb") as fh:
+            file_data = base64.b64encode(fh.read()).decode("ascii")
+        return _upload({**base_payload, "file_data": file_data})
+    except HTTPException as exc:
+        if url_error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"QQ media URL upload failed ({url_error}); file_data fallback failed ({exc.detail})",
+            ) from exc
+        raise
+    except OSError as exc:
+        detail = f"QQ media local file read failed: {exc}"
+        if url_error:
+            detail = f"QQ media URL upload failed ({url_error}); {detail}"
+        raise HTTPException(status_code=502, detail=detail) from exc
 
 
 def send_qq_text_message(
