@@ -112,3 +112,28 @@ def test_other_user_cannot_mark_notification_read():
         assert mark_read(session, user_id=user.id + 1, notification_id=item.id) is None
         session.refresh(item)
         assert item.status == "unread"
+
+
+def test_external_delivery_is_archived_as_read_without_app_push():
+    engine = _database()
+    with Session(engine) as session:
+        user, agent = _seed(session)
+        item = create_notification(
+            session,
+            user_id=user.id,
+            ai_config_id=agent.id,
+            body="机器人已送达",
+            app_push_required=True,
+            external_channel="feishu",
+            external_delivered=True,
+        )
+
+        assert item.status == "read"
+        assert item.read_at is not None
+        assert item.app_push_required is False
+        assert item.push_status == "not_required"
+        assert list_notifications(session, user_id=user.id, unread_only=True) == []
+        assert pending_device_notifications(session, user_id=user.id) == []
+        archived = list_notifications(session, user_id=user.id)
+        assert archived[0]["status"] == "read"
+        assert archived[0]["external_delivered"] is True

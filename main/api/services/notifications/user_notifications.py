@@ -49,6 +49,12 @@ def create_notification(
 ) -> UserNotification:
     actor = session.get(AssistantAIConfig, ai_config_id) if ai_config_id else None
     actor_name = _clean_text(actor.name if actor else "数字成员", 80) or "数字成员"
+    now = time.time()
+    delivered_externally = bool(external_delivered)
+    # A successful bot delivery is still archived in the web inbox, but it has
+    # already reached the user. Treat it as read and never enqueue a second
+    # device/app push for the same message.
+    requires_app_push = bool(app_push_required) and not delivered_externally
     item = UserNotification(
         id=f"notice_{uuid.uuid4().hex}",
         user_id=int(user_id),
@@ -56,12 +62,16 @@ def create_notification(
         title=f"{actor_name}发来消息",
         body=_clean_text(body, 4000),
         attachments_json=json.dumps(_safe_attachments(attachments), ensure_ascii=False),
-        app_push_required=bool(app_push_required),
-        push_status="pending" if app_push_required else "not_required",
-        push_next_attempt_at=time.time() if app_push_required else 0.0,
+        status="read" if delivered_externally else "unread",
+        app_push_required=requires_app_push,
+        push_status="pending" if requires_app_push else "not_required",
+        push_next_attempt_at=now if requires_app_push else 0.0,
         external_channel=_clean_text(external_channel, 32),
-        external_delivered=bool(external_delivered),
+        external_delivered=delivered_externally,
         source="message.send+to",
+        created_at=now,
+        updated_at=now,
+        read_at=now if delivered_externally else None,
     )
     session.add(item)
     session.commit()
