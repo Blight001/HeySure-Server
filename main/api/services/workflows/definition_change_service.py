@@ -139,6 +139,14 @@ def prepare_definition_change(
     candidate.setdefault("schemaVersion", 1)
     compiled = compile_definition(candidate)
     normalized = compiled["definition"]
+    # A definition change is validated against the live contract snapshot. Frozen
+    # digests are publication artifacts, not caller input; retaining an expired
+    # digest on an untouched MCP step must not block an otherwise unrelated patch.
+    for step in normalized.get("steps", {}).values():
+        if isinstance(step, dict) and step.get("type") == "mcp":
+            ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
+            ref.pop("schemaDigest", None)
+            ref.pop("provider", None)
     contracts, bound_ids = _snapshot_contracts(
         session, user_id, normalized, device_ids=inherited_device_ids,
     )

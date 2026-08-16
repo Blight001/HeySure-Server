@@ -9,6 +9,10 @@ from .compiler import WorkflowValidationError
 
 
 MAX_SELECTED_STEPS = 100
+FIELD_ALIASES = {
+    "fields.card": {"card_id": "id", "version_id": "latest_version_id"},
+    "fields.version": {"version_id": "id"},
+}
 
 
 def _string_list(value: Any, path: str, *, allow_empty: bool = True) -> List[str]:
@@ -34,10 +38,19 @@ def _selected_fields(
     if requested is None:
         return deepcopy(source), list(source)
     fields = _string_list(requested, path)
-    unknown = [field for field in fields if field not in source]
+    aliases = FIELD_ALIASES.get(path, {})
+    resolved = [aliases.get(field, field) for field in fields]
+    unknown = [field for field, actual in zip(fields, resolved) if actual not in source]
     if unknown:
-        raise WorkflowValidationError([f"{path} contains unknown fields: {', '.join(unknown)}"])
-    return {field: deepcopy(source[field]) for field in fields}, fields
+        valid = sorted(set(source) | set(aliases))
+        raise WorkflowValidationError([
+            f"{path} contains unknown fields: {', '.join(unknown)}; valid fields: {', '.join(valid)}"
+        ])
+    projected = {
+        requested_name: deepcopy(source[actual])
+        for requested_name, actual in zip(fields, resolved)
+    }
+    return projected, fields
 
 
 def _step_mode(args: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:

@@ -326,3 +326,18 @@ def test_recording_does_not_reject_results_without_explicit_failure(result):
     assert outcome.transport_success is True
     assert outcome.business_success is True
     assert outcome.recordable is True
+
+
+def test_preview_token_round_trip_is_scoped(monkeypatch):
+    from api.services.workflows.preview_token import consume_preview_token, issue_preview_token
+    token = issue_preview_token(
+        action="patch", user_id=7, card_id="wcard_x", base_version_id="wver_x",
+        payload=[{"op": "replace", "path": "/name", "value": "new"}],
+    )
+    assert consume_preview_token(
+        token, action="patch", user_id=7, card_id="wcard_x", base_version_id="wver_x",
+    )[0]["value"] == "new"
+    with pytest.raises(WorkflowValidationError):
+        consume_preview_token(
+            token, action="patch", user_id=8, card_id="wcard_x", base_version_id="wver_x",
+        )

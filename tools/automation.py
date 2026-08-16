@@ -45,6 +45,7 @@ from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.patch_service import patch_card_definition
 from api.services.workflows.definition_replace_service import replace_card_definition
 from api.services.workflows.payload_selection import select_card_payload
+from api.services.workflows.preview_token import consume_preview_token
 from api.services.workflows.recording_service import (
     active_recording,
     recording_payload,
@@ -274,23 +275,31 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
         if action in {"edit", "update"}:
             return _edit_card(session, card, args, user_id)
         if action == "patch":
+            base_version_id = str(args.get("base_version_id") or "")
+            operations = args.get("operations") if isinstance(args.get("operations"), list) else []
+            if args.get("preview_token") and not args.get("dry_run"):
+                operations = consume_preview_token(
+                    str(args["preview_token"]), action="patch", user_id=user_id,
+                    card_id=card.id, base_version_id=base_version_id,
+                )
             return patch_card_definition(
-                session,
-                card=card,
-                user_id=user_id,
-                base_version_id=str(args.get("base_version_id") or ""),
-                operations=args.get("operations") if isinstance(args.get("operations"), list) else [],
+                session, card=card, user_id=user_id,
+                base_version_id=base_version_id, operations=operations,
                 dry_run=bool(args.get("dry_run")),
             )
         if action == "replace_definition":
-            if "definition" not in args:
-                raise WorkflowValidationError(["replace_definition requires definition"])
+            base_version_id = str(args.get("base_version_id") or "")
+            definition = args.get("definition")
+            if args.get("preview_token") and not args.get("dry_run"):
+                definition = consume_preview_token(
+                    str(args["preview_token"]), action="replace_definition", user_id=user_id,
+                    card_id=card.id, base_version_id=base_version_id,
+                )
+            if not isinstance(definition, dict):
+                raise WorkflowValidationError(["replace_definition requires definition or preview_token"])
             return replace_card_definition(
-                session,
-                card=card,
-                user_id=user_id,
-                base_version_id=str(args.get("base_version_id") or ""),
-                definition=args.get("definition"),
+                session, card=card, user_id=user_id,
+                base_version_id=base_version_id, definition=definition,
                 dry_run=bool(args.get("dry_run")),
             )
         if action == "delete":
@@ -315,9 +324,12 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             rows = session.exec(select(WorkflowCardVersion).where(
                 WorkflowCardVersion.card_id == card.id,
             ).order_by(WorkflowCardVersion.version_number.desc())).all()
-            return {"items": [version_payload(row) for row in rows]}
+            return {"items": [version_payload(row, include_contracts=args.get("trace_mode") == "full") for row in rows]}
         if action == "get_version":
-            return version_payload(_version(session, card, str(args.get("version_id") or "")), include_definition=True)
+            return version_payload(
+                _version(session, card, str(args.get("version_id") or "")), include_definition=True,
+                include_contracts=args.get("trace_mode") == "full",
+            )
     raise HTTPException(status_code=400, detail="unsupported card action")
 
 
@@ -813,7 +825,7 @@ AUTOMATION_MANAGE_SCHEMA = {
             "description": (
                 "仅用于 action=get 的结构化返回字段过滤；省略时保持原完整返回。card 选择卡片顶层字段，"
                 "definition 选择 definition 顶层字段，version 选择指定版本的顶层字段。步骤选择启用时，"
-                "card 必须包含 definition 或 version，对应 definition 字段必须包含 steps。"
+                "card 必须包含 definition 或 version，对应 definition 字段必须包含 steps。card 支持 card_id→id、version_id→latest_version_id 别名。"
             ),
             "properties": {
                 "card": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
@@ -855,7 +867,7 @@ AUTOMATION_MANAGE_SCHEMA = {
         },
         "only_incompatible": {
             "type": "boolean", "default": False,
-            "description": "refresh_contracts 仅刷新实时摘要不兼容的步骤。",
+            "description": "refresh_contracts 仅刷新实时摘要不兼容的步骤；为 true 时可省略 base_version_id，自动基于最新版刷新。",
         },
         "trace_mode": {
             "type": "string", "enum": ["summary", "full", "none"], "default": "summary",
@@ -864,6 +876,13 @@ AUTOMATION_MANAGE_SCHEMA = {
         "wait_until": {
             "type": "string", "enum": ["created", "ai_or_terminal"], "default": "ai_or_terminal",
             "description": "start 返回时机；created 仅创建运行，ai_or_terminal 等到 AI 审核或终态。",
+        },
+        "preview_token": {
+            "type": "string",
+            "description": (
+                "patch/replace_definition dry_run 返回的 15 分钟短期提交令牌；正式提交时可只传 "
+                "preview_token + base_version_id，无需重复 operations/definition。令牌绑定用户、卡片、动作和基础版本。"
+            ),
         },
         "operations": {
             "type": "array", "minItems": 1, "maxItems": 100,

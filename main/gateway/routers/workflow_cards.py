@@ -86,7 +86,7 @@ def list_cards(
             compatible = []
             for row in rows:
                 version = session.get(WorkflowCardVersion, row.latest_version_id) if row.latest_version_id else None
-                contracts = version_payload(version).get("tool_contracts", {}) if version else {}
+                contracts = version_payload(version, include_contracts=True).get("tool_contracts", {}) if version else {}
                 if all(not item.get("provider") or item.get("provider") == device.device_type for item in contracts.values()):
                     compatible.append(row)
             rows = compatible

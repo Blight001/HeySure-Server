@@ -13,6 +13,7 @@ from .card_service import update_card, version_payload
 from .compiler import WorkflowValidationError
 from .definition_change_service import change_status, definition_diff, prepare_definition_change
 from .schemas import CardUpdate
+from .preview_token import issue_preview_token
 
 
 def _load(raw: str, fallback: Any) -> Any:
@@ -38,7 +39,9 @@ def replace_card_definition(
         ).one()
     if not base_version_id or card.latest_version_id != base_version_id:
         raise WorkflowValidationError([
-            "card changed since base_version_id; reload before replacing the definition"
+            "card changed since base_version_id; "
+            f"supplied={base_version_id or '<missing>'}; current_latest_version_id={card.latest_version_id or '<none>'}; "
+            "reload and retry with base_version_id=<current_latest_version_id>"
         ])
     if not isinstance(definition, dict):
         raise WorkflowValidationError(["replace_definition requires definition to be an object"])
@@ -71,6 +74,11 @@ def replace_card_definition(
         **change_status(dry_run=dry_run),
     }
     if dry_run:
+        result["preview_token"] = issue_preview_token(
+            action="replace_definition", user_id=user_id, card_id=card.id,
+            base_version_id=base_version_id, payload=definition,
+        )
+        result["preview_expires_in_seconds"] = 15 * 60
         return result
     updated = update_card(
         session,

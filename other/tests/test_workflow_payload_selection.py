@@ -141,3 +141,17 @@ def test_automation_card_get_applies_selection_without_changing_legacy_card_payl
     assert list(selected["definition"]["steps"]) == ["one"]
     assert selected["pagination"]["definition"]["next_offset"] == 1
     assert len(source["definition"]["steps"]) == 4
+
+
+def test_card_get_accepts_friendly_id_aliases():
+    selected = select_card_payload(_payload(), {"fields": {"card": ["card_id", "version_id"]}})
+    assert selected["card_id"] == "wcard_1"
+    assert selected["version_id"] == "wver_1"
+
+
+def test_card_get_unknown_field_lists_valid_fields():
+    with pytest.raises(WorkflowValidationError) as raised:
+        select_card_payload(_payload(), {"fields": {"card": ["missing"]}})
+    error = raised.value.errors[0]
+    assert "valid fields:" in error
+    assert "card_id" in error and "latest_version_id" in error
