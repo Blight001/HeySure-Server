@@ -3,7 +3,7 @@ from api.services.device_tools import device_dynamic_tools
 from api.services.device_tools import device_runtime_tools
 
 
-def _legacy_python_tool(name: str = "clipboard.get", source: str = "result = 'legacy'\n"):
+def _legacy_python_tool(name: str = "mouse.click", source: str = "result = 'legacy'\n"):
     return device_dynamic_tools.validate_definition({
         "name": name,
         "description": "legacy factory tool",
@@ -15,7 +15,7 @@ def _legacy_python_tool(name: str = "clipboard.get", source: str = "result = 'le
     })
 
 
-def test_seed_defaults_upgrades_exact_legacy_python_tool(tmp_path, monkeypatch):
+def test_seed_defaults_retires_exact_legacy_python_tool(tmp_path, monkeypatch):
     tools_dir = tmp_path / "desktop"
     monkeypatch.setattr(workspace_tools, "_tools_dir", lambda _user_id, _dtype: str(tools_dir))
 
@@ -29,15 +29,12 @@ def test_seed_defaults_upgrades_exact_legacy_python_tool(tmp_path, monkeypatch):
     )
 
     created = workspace_tools.seed_defaults(1, "desktop")
-    upgraded = workspace_tools.get_tool(1, "desktop", legacy["name"])
+    retired = workspace_tools.get_tool(1, "desktop", legacy["name"])
 
     assert created >= 1
-    assert upgraded is not None
-    assert upgraded["runtime"] == "powershell"
-    assert upgraded["enabled"] is False
-    assert upgraded["status"] == "archived"
+    assert retired is None
     assert not (tools_dir / f"{legacy['name']}.py").exists()
-    assert (tools_dir / f"{legacy['name']}.ps1").is_file()
+    assert (tools_dir / ".deleted" / legacy["name"]).is_file()
 
 
 def test_seed_defaults_preserves_user_edited_python_tool(tmp_path, monkeypatch):

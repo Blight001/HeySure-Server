@@ -4,7 +4,7 @@ The source of truth for a user's device tools is now plain files under their
 workspace, NOT the database (设备端MCP代码下放长期方案；用户要求弃用 DB、改存工作区文件)：
 
     <workspace>/<user_id>/device_tools/<device_type>/
-        <name>.ps1       # runtime=powershell body（出厂默认；AI 可直接经工作区 MCP 读写）
+        <name>.ps1       # runtime=powershell body（用户/AI 编写的动态 MCP）
         <name>.py        # runtime=python body
         <name>.js        # code_kind=js body
         <name>.json      # 元数据：description / input_schema / code_kind / runtime /
@@ -13,9 +13,8 @@ workspace, NOT the database (设备端MCP代码下放长期方案；用户要求
 
 Public interface mirrors the old ``device_dynamic_tools`` so REST / AI manager /
 push only swap the import. ``validate_definition`` and friends are reused from
-that module (pure logic). Default desktop PowerShell tools are seeded from the
-``device_runtime_tools`` package on first use; existing DB rows are migrated to
-files once so nothing is lost.
+that module (pure logic). Desktop no longer seeds factory tools; existing DB
+rows are migrated to files once so nothing is lost.
 """
 
 import json
@@ -276,13 +275,7 @@ def set_status(user_id: int, device_type: str, name: str, status: str) -> Option
     return _read_tool(d, name)
 
 
-def delete_tool(user_id: int, device_type: str, name: str, actor: str = "web", ai_config_id: Optional[int] = None) -> bool:
-    d = _tools_dir(user_id, device_type)
-    name = str(name or "").strip()
-    current = _read_tool(d, name)
-    if not current:
-        return False
-    _record_version(d, name, current, "delete", actor, ai_config_id)
+def _purge_tool_files(d: str, name: str) -> None:
     for path in (
         _meta_path(d, name),
         os.path.join(d, f"{name}.py"),
@@ -295,6 +288,16 @@ def delete_tool(user_id: int, device_type: str, name: str, actor: str = "web", a
                 os.remove(path)
         except OSError:
             pass
+
+
+def delete_tool(user_id: int, device_type: str, name: str, actor: str = "web", ai_config_id: Optional[int] = None) -> bool:
+    d = _tools_dir(user_id, device_type)
+    name = str(name or "").strip()
+    current = _read_tool(d, name)
+    if not current:
+        return False
+    _record_version(d, name, current, "delete", actor, ai_config_id)
+    _purge_tool_files(d, name)
     # Tombstone so seed_defaults won't resurrect a deleted factory-default tool.
     _tombstone_add(d, name)
     return True
@@ -391,60 +394,70 @@ def device_payload(user_id: int, device_type: str) -> Dict[str, Any]:
     }
 
 
-def seed_defaults(user_id: int, device_type: str = "desktop") -> int:
-    """Seed factory-default tools into the user's workspace (idempotent: never
-    clobbers an existing user-edited file). Desktop → powershell/shell runtime
-    tools; browser → program wrappers for the plugin-advertised browser tools.
+def _retire_untouched_desktop_factory(d: str) -> int:
+    """Tombstone retired factory tools that the user never edited."""
+    from api.services.device_tools.device_runtime_tools import (
+        RETIRED_FACTORY_NAMES,
+        retired_factory_revisions,
+    )
 
-    Untouched Python factory defaults from the pre-PowerShell release are
-    upgraded in place. Their exact revisions are known, so a custom Python tool
-    with the same name remains untouched.
+    retired = 0
+    for name in sorted(RETIRED_FACTORY_NAMES):
+        current = _read_tool(d, name)
+        if not current or current.get("revision") not in retired_factory_revisions(name):
+            continue
+        _record_version(d, name, current, "delete", "web", None)
+        _purge_tool_files(d, name)
+        _tombstone_add(d, name)
+        retired += 1
+    return retired
+
+
+def _seed_one_factory_tool(d: str, spec: Dict[str, Any], legacy_python_revisions: Dict[str, str]) -> int:
+    name = spec["name"]
+    if os.path.isfile(_meta_path(d, name)):
+        current = _read_tool(d, name)
+        legacy_revision = legacy_python_revisions.get(name)
+        if not current or not legacy_revision or current.get("revision") != legacy_revision:
+            return 0
+        clean = validate_definition(spec)
+        status = str(current.get("status") or "active")
+        if status not in VALID_STATUSES:
+            status = "active"
+        _write_files(d, clean, enabled=bool(current.get("enabled", True)), status=status)
+        try:
+            os.remove(os.path.join(d, f"{name}.py"))
+        except OSError:
+            pass
+        return 1
+    if _is_tombstoned(d, name):
+        return 0
+    _write_files(d, validate_definition(spec), enabled=True, status="active")
+    return 1
+
+
+def seed_defaults(user_id: int, device_type: str = "desktop") -> int:
+    """Prepare the workspace tool directory for a device type.
+
+    Desktop no longer receives a factory catalog: Windows only runs
+    server-owned dynamic MCP. Untouched historical factory files are
+    tombstoned. Browser still seeds wrappers for plugin-advertised tools.
     """
     dtype = normalize_device_type(device_type)
-    if dtype == "desktop":
-        from api.services.device_tools.device_runtime_tools import (
-            LEGACY_PYTHON_DEFAULT_REVISIONS as _legacy_python_revisions,
-            load_default_tools as _load,
-        )
-    elif dtype == "browser":
-        from api.services.device_tools.device_browser_runtime_tools import (
-            load_default_tools as _load,
-            sync_workspace_after_catalog_change,
-        )
-        _legacy_python_revisions = {}
-    else:
-        return 0
     d = _tools_dir(user_id, dtype)
     _migrate_db_once(user_id, dtype, d)
+    if dtype == "desktop":
+        return _retire_untouched_desktop_factory(d)
+    if dtype != "browser":
+        return 0
+    from api.services.device_tools.device_browser_runtime_tools import (
+        load_default_tools as _load,
+        sync_workspace_after_catalog_change,
+    )
     created = 0
     for spec in _load():
-        name = spec["name"]
-        if os.path.isfile(_meta_path(d, name)):
-            current = _read_tool(d, name)
-            legacy_revision = _legacy_python_revisions.get(name)
-            if not current or not legacy_revision or current.get("revision") != legacy_revision:
-                continue
-            # This is byte-for-byte an old factory default, not a user edit.
-            # Preserve governance state while replacing the obsolete runtime.
-            clean = validate_definition(spec)
-            status = str(current.get("status") or "active")
-            if status not in VALID_STATUSES:
-                status = "active"
-            _write_files(d, clean, enabled=bool(current.get("enabled", True)), status=status)
-            try:
-                os.remove(os.path.join(d, f"{name}.py"))
-            except OSError:
-                pass
-            created += 1
-            continue
-        # Respect an explicit deletion: don't resurrect a tombstoned default.
-        if _is_tombstoned(d, name):
-            continue
-        clean = validate_definition(spec)
-        _write_files(d, clean, enabled=True, status="active")
-        created += 1
-    if dtype == "browser":
-        sync_workspace_after_catalog_change(user_id)
+        created += _seed_one_factory_tool(d, spec, {})
+    sync_workspace_after_catalog_change(user_id)
     return created
 
 

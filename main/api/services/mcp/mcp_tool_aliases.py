@@ -68,7 +68,6 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
     "message.send+to+ai": "message.send+to",
 }
 
-
 # Permission selectors shown as one logical toolbox capability may represent
 # several independently callable runtime tools.  Expand them at the shared
 # normalization boundary so config allowlists, per-message scopes, prompt
