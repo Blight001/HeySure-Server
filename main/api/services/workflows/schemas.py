@@ -36,7 +36,7 @@ class TraceDraftRequest(BaseModel):
     description: str = Field(default="", max_length=4000)
     tags: List[str] = Field(default_factory=list)
     risk_level: str = "normal"
-    calls: List[Dict[str, Any]] = Field(min_length=1, max_length=50)
+    calls: List[Dict[str, Any]] = Field(min_length=1, max_length=200)
 
 
 class RunCreate(BaseModel):

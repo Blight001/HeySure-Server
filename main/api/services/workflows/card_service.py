@@ -48,7 +48,9 @@ def card_payload(row: WorkflowCard) -> Dict[str, Any]:
     }
 
 
-def version_payload(row: WorkflowCardVersion, *, include_definition: bool = False) -> Dict[str, Any]:
+def version_payload(
+    row: WorkflowCardVersion, *, include_definition: bool = False, include_contracts: bool = False,
+) -> Dict[str, Any]:
     definition = _load(row.definition_json, {})
     payload = {
         "id": row.id,
@@ -56,12 +58,18 @@ def version_payload(row: WorkflowCardVersion, *, include_definition: bool = Fals
         "version_number": row.version_number,
         "schema_version": row.schema_version,
         "definition_digest": row.definition_digest,
-        "tool_contracts": _load(row.tool_contracts_json, {}),
         "contract_device_ids": _load(row.contract_device_ids_json, []),
         "default_device_id": str(definition.get("defaultDeviceId") or ""),
         "published_by": row.published_by,
         "published_at": row.published_at,
     }
+    contracts = _load(row.tool_contracts_json, {})
+    payload["tool_contract_summary"] = {
+        "count": len(contracts) if isinstance(contracts, dict) else 0,
+        "step_ids": list(contracts) if isinstance(contracts, dict) else [],
+    }
+    if include_contracts:
+        payload["tool_contracts"] = contracts
     if include_definition:
         payload["definition"] = definition
     return payload
@@ -294,8 +302,15 @@ def refresh_tool_contracts(
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Refresh frozen MCP schemas without requiring callers to patch every digest."""
+    if not base_version_id and only_incompatible:
+        base_version_id = str(row.latest_version_id or "")
     if not base_version_id or row.latest_version_id != base_version_id:
-        raise WorkflowValidationError(["card changed since base_version_id; reload before refreshing contracts"])
+        raise WorkflowValidationError([
+            "card changed since base_version_id; "
+            f"supplied={base_version_id or '<missing>'}; current_latest_version_id={row.latest_version_id or '<none>'}; "
+            "retry with action=refresh_contracts, base_version_id=<current_latest_version_id> "
+            "or omit base_version_id when only_incompatible=true"
+        ])
     base = session.get(WorkflowCardVersion, base_version_id)
     if not base or base.card_id != row.id:
         raise WorkflowValidationError(["base card version does not exist"])

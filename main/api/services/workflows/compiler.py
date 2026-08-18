@@ -22,7 +22,7 @@ EXPRESSION_OPS = {
     "startsWith", "endsWith", "and", "or", "not",
 }
 MAX_DEFINITION_BYTES = 256 * 1024
-MAX_STEPS = 100
+MAX_STEPS = 200
 MAX_DEPTH = 16
 SENSITIVE_FIELD_NAMES = {
     "authorization", "cookie", "password", "secret", "token", "api_key", "apikey",
@@ -456,7 +456,7 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
         errors.append("limits must be an object")
         limits = {}
     timeout = limits.get("timeoutSeconds", 300)
-    transitions = limits.get("maxTransitions", min(MAX_STEPS, 100))
+    transitions = limits.get("maxTransitions", MAX_STEPS)
     if not isinstance(timeout, int) or not 1 <= timeout <= 86400:
         errors.append("limits.timeoutSeconds must be 1..86400")
     if not isinstance(transitions, int) or not 1 <= transitions <= 500:
@@ -496,7 +496,7 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     normalized.setdefault("inputSchema", {"type": "object"})
     normalized.setdefault("limits", {})
     normalized["limits"].setdefault("timeoutSeconds", 300)
-    normalized["limits"].setdefault("maxTransitions", min(MAX_STEPS, 100))
+    normalized["limits"].setdefault("maxTransitions", MAX_STEPS)
     normalized["limits"].setdefault("maxResultBytes", 10 * 1024 * 1024)
     normalized.setdefault("output", {})
     return {"definition": normalized, "digest": definition_digest(normalized), "warnings": warnings}

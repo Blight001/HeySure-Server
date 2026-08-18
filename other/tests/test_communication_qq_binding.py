@@ -289,3 +289,27 @@ def test_bot_transport_failure_falls_back_without_raising(monkeypatch):
     assert result["delivery_status"] == "app_pending"
     assert result["fallback_reason"] == "RuntimeError"
     assert captured["external_delivered"] is False
+
+
+def test_qq_local_media_uses_temporary_public_url(monkeypatch, tmp_path):
+    from tools import communication
+
+    media = tmp_path / "video.mp4"
+    media.write_bytes(b"x" * 1024)
+    monkeypatch.setattr(communication, "get_project_root", lambda *_args: str(tmp_path))
+    monkeypatch.setattr(
+        communication, "register_workspace_file",
+        lambda **_kwargs: {"file_ref": "file_video"},
+    )
+    monkeypatch.setattr(communication, "configured_public_base_url", lambda: "https://public.example")
+    monkeypatch.setattr(
+        communication, "create_temporary_file_link",
+        lambda **_kwargs: {"url": "https://public.example/api/tmp-files/grant/token"},
+    )
+
+    payload = communication._legacy_media_payload(
+        1, 4, {"media_path": "video.mp4", "media_type": "video"}, channel="qq"
+    )
+
+    assert payload.path == str(media)
+    assert payload.url == "https://public.example/api/tmp-files/grant/token"

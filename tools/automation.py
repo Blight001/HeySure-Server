@@ -45,6 +45,7 @@ from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.patch_service import patch_card_definition
 from api.services.workflows.definition_replace_service import replace_card_definition
 from api.services.workflows.payload_selection import select_card_payload
+from api.services.workflows.preview_token import consume_preview_token
 from api.services.workflows.recording_service import (
     active_recording,
     recording_payload,
@@ -274,23 +275,31 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
         if action in {"edit", "update"}:
             return _edit_card(session, card, args, user_id)
         if action == "patch":
+            base_version_id = str(args.get("base_version_id") or "")
+            operations = args.get("operations") if isinstance(args.get("operations"), list) else []
+            if args.get("preview_token") and not args.get("dry_run"):
+                operations = consume_preview_token(
+                    str(args["preview_token"]), action="patch", user_id=user_id,
+                    card_id=card.id, base_version_id=base_version_id,
+                )
             return patch_card_definition(
-                session,
-                card=card,
-                user_id=user_id,
-                base_version_id=str(args.get("base_version_id") or ""),
-                operations=args.get("operations") if isinstance(args.get("operations"), list) else [],
+                session, card=card, user_id=user_id,
+                base_version_id=base_version_id, operations=operations,
                 dry_run=bool(args.get("dry_run")),
             )
         if action == "replace_definition":
-            if "definition" not in args:
-                raise WorkflowValidationError(["replace_definition requires definition"])
+            base_version_id = str(args.get("base_version_id") or "")
+            definition = args.get("definition")
+            if args.get("preview_token") and not args.get("dry_run"):
+                definition = consume_preview_token(
+                    str(args["preview_token"]), action="replace_definition", user_id=user_id,
+                    card_id=card.id, base_version_id=base_version_id,
+                )
+            if not isinstance(definition, dict):
+                raise WorkflowValidationError(["replace_definition requires definition or preview_token"])
             return replace_card_definition(
-                session,
-                card=card,
-                user_id=user_id,
-                base_version_id=str(args.get("base_version_id") or ""),
-                definition=args.get("definition"),
+                session, card=card, user_id=user_id,
+                base_version_id=base_version_id, definition=definition,
                 dry_run=bool(args.get("dry_run")),
             )
         if action == "delete":
@@ -315,9 +324,12 @@ def _manage_card(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
             rows = session.exec(select(WorkflowCardVersion).where(
                 WorkflowCardVersion.card_id == card.id,
             ).order_by(WorkflowCardVersion.version_number.desc())).all()
-            return {"items": [version_payload(row) for row in rows]}
+            return {"items": [version_payload(row, include_contracts=args.get("trace_mode") == "full") for row in rows]}
         if action == "get_version":
-            return version_payload(_version(session, card, str(args.get("version_id") or "")), include_definition=True)
+            return version_payload(
+                _version(session, card, str(args.get("version_id") or "")), include_definition=True,
+                include_contracts=args.get("trace_mode") == "full",
+            )
     raise HTTPException(status_code=400, detail="unsupported card action")
 
 
@@ -355,13 +367,36 @@ def _run_for_ai(
     raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
 
 
-def _chat_origin() -> Dict[str, str]:
+def _chat_origin(args: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """Normalize origin context before creating a workflow run.
+
+    The MCP call may cross the AI/runtime boundary with only the explicit
+    current_session_id still available.  Do not require both fields from the
+    context, otherwise the notifier silently creates an isolated chat.
+    """
     context = get_run_session_context() or {}
-    run_id = str(context.get("run_id") or "").strip()
-    session_id = str(context.get("session_id") or "").strip()
-    if not run_id or not session_id:
+    args = args if isinstance(args, dict) else {}
+    run_id = str(
+        context.get("run_id")
+        or context.get("chat_run_id")
+        or args.get("origin_run_id")
+        or ""
+    ).strip()
+    session_id = str(
+        context.get("session_id")
+        or context.get("current_session_id")
+        or args.get("current_session_id")
+        or ""
+    ).strip()
+    ai_config_id = str(context.get("ai_config_id") or "").strip()
+    if not session_id:
         return {}
-    return {"run_id": run_id, "session_id": session_id}
+    origin = {"session_id": session_id}
+    if run_id:
+        origin["run_id"] = run_id
+    if ai_config_id:
+        origin["ai_config_id"] = ai_config_id
+    return origin
 
 
 def _pending_interaction(session: Session, run_id: str) -> Optional[WorkflowConfirmation]:
@@ -419,8 +454,32 @@ def _wait_for_original_chat_run(
         time.sleep(max(0.1, poll_seconds))
 
 
+def _wait_for_debug_run(
+    run_id: str,
+    ai_config_id: Optional[int],
+    *,
+    poll_seconds: float = 0.25,
+) -> Dict[str, Any]:
+    """Wait until a continued debug run pauses, reaches AI review, or terminates."""
+    while True:
+        with Session(engine) as session:
+            row = session.get(WorkflowRun, run_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="RUN_NOT_FOUND")
+            payload = run_payload(row)
+            if row.status in TERMINAL_RUN_STATUSES or row.status == "paused":
+                return payload
+            pending = _pending_interaction(session, row.id)
+            if pending and pending.confirmation_type == "ai_review":
+                payload["pending_ai_review"] = _pending_ai_review_result(
+                    session, row, pending, ai_config_id
+                )
+                return payload
+        time.sleep(max(0.1, poll_seconds))
+
+
 def _start_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
-    origin = _chat_origin()
+    origin = _chat_origin(args)
     with Session(engine) as session:
         _accessible_card(
             session,
@@ -604,11 +663,31 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
     if action in {"debug_step", "debug_continue"}:
         resumed_args = dict(args)
         resumed_args["_debug_single_step"] = action == "debug_step"
-        return _resume_run(user_id, resumed_args, ai_config_id)
+        resumed = _resume_run(user_id, resumed_args, ai_config_id)
+        if action == "debug_continue":
+            return _wait_for_debug_run(str(resumed["run_id"]), ai_config_id)
+        return resumed
     if action == "debug_start":
         with Session(engine) as session:
             card = _accessible_card(session, user_id, str(args.get("card_id") or ""), ai_config_id)
             seed_steps = args.get("seed_steps") if isinstance(args.get("seed_steps"), dict) else {}
+            requested_start = str(args.get("start_step_id") or "")
+            prepare_environment = bool(args.get("prepare_environment"))
+            debug_state = {"pause_after_step": False}
+            actual_start = requested_start
+            if prepare_environment and requested_start:
+                version = session.get(WorkflowCardVersion, str(args.get("version_id") or card.latest_version_id))
+                definition = _load(version.definition_json, {}) if version else {}
+                initial = (definition.get("compatibility") or {}).get("initialEnvironment") or {}
+                reset_step = str(initial.get("resetStepId") or "")
+                ready_step = str(initial.get("readyStepId") or "")
+                if not reset_step or not ready_step:
+                    raise HTTPException(status_code=422, detail="DEBUG_INITIAL_ENVIRONMENT_NOT_DECLARED")
+                actual_start = reset_step
+                debug_state.update({
+                    "prepare_ready_step_id": ready_step,
+                    "prepare_target_step_id": requested_start,
+                })
             try:
                 row = create_validated_run(
                     session,
@@ -623,9 +702,9 @@ def _manage_run(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int])
                         actor_id=str(ai_config_id or user_id),
                         initial_variables={
                             "steps": seed_steps,
-                            "_debug": {"pause_after_step": False},
+                            "_debug": debug_state,
                             "_run_debug_options": {
-                                "start_step_id": str(args.get("start_step_id") or ""),
+                                "start_step_id": actual_start,
                                 "start_paused": True,
                             },
                         },
@@ -813,7 +892,7 @@ AUTOMATION_MANAGE_SCHEMA = {
             "description": (
                 "仅用于 action=get 的结构化返回字段过滤；省略时保持原完整返回。card 选择卡片顶层字段，"
                 "definition 选择 definition 顶层字段，version 选择指定版本的顶层字段。步骤选择启用时，"
-                "card 必须包含 definition 或 version，对应 definition 字段必须包含 steps。"
+                "card 必须包含 definition 或 version，对应 definition 字段必须包含 steps。card 支持 card_id→id、version_id→latest_version_id 别名。"
             ),
             "properties": {
                 "card": {"type": "array", "items": {"type": "string"}, "maxItems": 30},
@@ -855,7 +934,7 @@ AUTOMATION_MANAGE_SCHEMA = {
         },
         "only_incompatible": {
             "type": "boolean", "default": False,
-            "description": "refresh_contracts 仅刷新实时摘要不兼容的步骤。",
+            "description": "refresh_contracts 仅刷新实时摘要不兼容的步骤；为 true 时可省略 base_version_id，自动基于最新版刷新。",
         },
         "trace_mode": {
             "type": "string", "enum": ["summary", "full", "none"], "default": "summary",
@@ -864,6 +943,13 @@ AUTOMATION_MANAGE_SCHEMA = {
         "wait_until": {
             "type": "string", "enum": ["created", "ai_or_terminal"], "default": "ai_or_terminal",
             "description": "start 返回时机；created 仅创建运行，ai_or_terminal 等到 AI 审核或终态。",
+        },
+        "preview_token": {
+            "type": "string",
+            "description": (
+                "patch/replace_definition dry_run 返回的 15 分钟短期提交令牌；正式提交时可只传 "
+                "preview_token + base_version_id，无需重复 operations/definition。令牌绑定用户、卡片、动作和基础版本。"
+            ),
         },
         "operations": {
             "type": "array", "minItems": 1, "maxItems": 100,
@@ -898,6 +984,21 @@ AUTOMATION_MANAGE_SCHEMA = {
             "type": "object",
             "description": "从中间步骤启动时注入此前步骤变量，结构为 {saveAs: {result: ...}}。模板依赖缺失会安全失败。",
         },
+        "current_session_id": {
+            "type": "string",
+            "description": "启动卡片的原始聊天会话 ID；跨 Runtime 时用于将 AI 控制节点回连到当前对话。",
+        },
+        "origin_run_id": {
+            "type": "string",
+            "description": "可选的原始 ChatRun ID；与 current_session_id 一起用于精确回连。",
+        },
+        "prepare_environment": {
+            "type": "boolean",
+            "description": (
+                "debug_start 从中间步骤调试浏览器卡片时设为 true：先执行 "
+                "compatibility.initialEnvironment 的 reset→ready 初始化链，完成后自动暂停在 start_step_id。"
+            ),
+        },
         "name": {"type": "string"},
         "description": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
@@ -924,7 +1025,7 @@ AUTOMATION_MANAGE_SCHEMA = {
             ),
         },
         "calls": {
-            "type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "object"},
+            "type": "array", "minItems": 1, "maxItems": 200, "items": {"type": "object"},
             "description": (
                 "仅供 from_trace 导入已真实执行、顺序明确的结构化调用轨迹；不要由 AI 猜测工具返回结构后伪造轨迹。"
             ),

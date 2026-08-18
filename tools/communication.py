@@ -22,7 +22,11 @@ from api.database import engine
 from mcp_runtime.mcp.core import get_project_root
 from api.models import AssistantAIConfig, BotConnection, BotContact, BotSessionRoute
 from api.services.bot_directory import resolve_contact_target
-from api.services.storage.workspace_files import resolve_file_ref
+from api.services.storage.workspace_files import register_workspace_file, resolve_file_ref
+from api.services.storage.temporary_file_links import (
+    configured_public_base_url,
+    create_temporary_file_link,
+)
 from ai_runtime.inference import ai_message_service
 from api.runtime.run_context import get_run_session_context
 
@@ -56,7 +60,9 @@ def _resolve_server_media_path(user_id: int, ai_config_id: Optional[int], media_
     return candidate_real
 
 
-def _legacy_media_payload(user_id: int, ai_config_id: Optional[int], args: Dict[str, Any]) -> Optional[MediaPayload]:
+def _legacy_media_payload(
+    user_id: int, ai_config_id: Optional[int], args: Dict[str, Any], *, channel: str = ""
+) -> Optional[MediaPayload]:
     media_url = str(
         args.get("media_url") or args.get("image_url") or args.get("video_url") or args.get("file_url") or ""
     ).strip()
@@ -76,6 +82,28 @@ def _legacy_media_payload(user_id: int, ai_config_id: Optional[int], args: Dict[
         file_name = file_name or str(resolved["file_name"])
     elif media_path:
         media_path = _resolve_server_media_path(user_id, ai_config_id, media_path)
+    # QQ's file_data JSON upload becomes unreliable once base64 expands a
+    # multi-megabyte video. Give transports a short-lived public capability
+    # URL while retaining the local path as a fallback. The URL contains no
+    # workspace path and expires automatically after 15 minutes.
+    if channel == "qq" and media_path and not media_url and ai_config_id:
+        if not file_ref:
+            root = get_project_root(user_id, ai_config_id)
+            registered = register_workspace_file(
+                user_id=user_id,
+                ai_config_id=ai_config_id,
+                workspace_path=os.path.relpath(media_path, root).replace(os.sep, "/"),
+                file_name=file_name or os.path.basename(media_path),
+            )
+            file_ref = str(registered["file_ref"])
+        link = create_temporary_file_link(
+            user_id=user_id,
+            ai_config_id=int(ai_config_id),
+            file_ref=file_ref,
+            public_base_url=configured_public_base_url(),
+            ttl_seconds=900,
+        )
+        media_url = str(link["url"])
     if not media_url and not media_path:
         return None
     return MediaPayload(
@@ -87,10 +115,12 @@ def _legacy_media_payload(user_id: int, ai_config_id: Optional[int], args: Dict[
     )
 
 
-def _attachment_payloads(user_id: int, ai_config_id: Optional[int], args: Dict[str, Any]) -> List[MediaPayload]:
+def _attachment_payloads(
+    user_id: int, ai_config_id: Optional[int], args: Dict[str, Any], *, channel: str = ""
+) -> List[MediaPayload]:
     raw = args.get("attachments")
     if raw is None:
-        legacy = _legacy_media_payload(user_id, ai_config_id, args)
+        legacy = _legacy_media_payload(user_id, ai_config_id, args, channel=channel)
         return [legacy] if legacy else []
     if not isinstance(raw, list) or not raw:
         raise HTTPException(status_code=400, detail="attachments must be a non-empty array")
@@ -101,7 +131,7 @@ def _attachment_payloads(user_id: int, ai_config_id: Optional[int], args: Dict[s
         values = {"file_ref": item} if isinstance(item, str) else item
         if not isinstance(values, dict):
             raise HTTPException(status_code=400, detail="each attachment must be a file_ref string or object")
-        payload = _legacy_media_payload(user_id, ai_config_id, values)
+        payload = _legacy_media_payload(user_id, ai_config_id, values, channel=channel)
         if payload is None:
             raise HTTPException(status_code=400, detail="each attachment requires file_ref, media_url, or media_path")
         payloads.append(payload)
@@ -465,9 +495,6 @@ def _persist_user_notification(
 def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
     """Send through a bound bot, with the durable HeySure inbox as fallback."""
     text = str(args.get("text") or args.get("content") or args.get("message") or "").strip()
-    attachments = _attachment_payloads(user_id, ai_config_id, args)
-    if not text and not attachments:
-        raise HTTPException(status_code=400, detail="text or an attachment is required when message.send+to targets the user")
     attachment_records = _notification_attachment_records(user_id, ai_config_id, args)
     requested_channel = str(args.get("channel") or "").strip().lower()
     scoped_channel, scoped_recipient, binding_source, target_scoped = _scoped_external_recipient(
@@ -479,6 +506,9 @@ def _user_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Optiona
         _ensure_unambiguous_owner_channel(user_id, ai_config_id, requested_channel)
         channel = dispatcher.resolve_channel(requested_channel or None, ai_config_id, user_id)
         recipient, binding_source, unavailable = _external_recipient(user_id, ai_config_id, args, channel)
+    attachments = _attachment_payloads(user_id, ai_config_id, args, channel=channel)
+    if not text and not attachments:
+        raise HTTPException(status_code=400, detail="text or an attachment is required when message.send+to targets the user")
     deliveries: List[Any] = []
     external_error: Optional[Exception] = None
     if unavailable is None:
@@ -770,12 +800,26 @@ async def _ai_send_message(user_id: int, args: Dict[str, Any], ai_config_id: Opt
         wakeup = {"started": False, "error": str(exc)}
         target_active = False
 
+    # Always return the actual route selected by the server.  Previously the
+    # caller only got message_id, so a first contact that created a new target
+    # ChatSession was effectively invisible and a later message could appear to
+    # land in a different conversation.
+    actual_target_session_id = str(
+        (wakeup or {}).get("session_id") or msg.target_session_id or prebound_session_id or ""
+    ).strip()
     base_out: Dict[str, Any] = {
         "message_id": msg.message_id,
         "queued": True,
         "to_ai_config_id": to_id,
         "message_type": message_type,
         "require_reply": require_reply,
+        "ai_pair_channel_id": ai_message_service.ai_pair_channel_id(
+            user_id=user_id,
+            ai_config_id_a=int(ai_config_id),
+            ai_config_id_b=to_id,
+        ),
+        "target_session_id": actual_target_session_id,
+        "target_session_name": str((wakeup or {}).get("session_name") or "").strip() or None,
     }
 
     if not require_reply:

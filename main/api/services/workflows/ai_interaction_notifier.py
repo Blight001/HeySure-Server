@@ -56,20 +56,27 @@ def _origin_session(
     origin = variables.get("_chat_origin") if isinstance(variables, dict) else None
     origin_run_id = str(origin.get("run_id") or "").strip() if isinstance(origin, dict) else ""
     origin_session_id = str(origin.get("session_id") or "").strip() if isinstance(origin, dict) else ""
-    if not origin_run_id or not origin_session_id:
+    if not origin_session_id:
         return None
-    origin_run = session.exec(select(ChatRun).where(
-        ChatRun.run_id == origin_run_id,
-        ChatRun.user_id == item.requested_user_id,
-        ChatRun.ai_config_id == item.ai_config_id,
-        ChatRun.session_id == origin_session_id,
-    )).first()
-    if not origin_run:
-        return None
+    # A run id is the strongest match, but session-only context is valid when
+    # the originating ChatRun was not persisted across the runtime boundary.
+    if origin_run_id:
+        origin_run = session.exec(select(ChatRun).where(
+            ChatRun.run_id == origin_run_id,
+            ChatRun.user_id == item.requested_user_id,
+            ChatRun.ai_config_id == item.ai_config_id,
+            ChatRun.session_id == origin_session_id,
+        )).first()
+        if not origin_run:
+            return None
+        ai_kind = origin_run.ai_kind
+    else:
+        config = session.get(AssistantAIConfig, item.ai_config_id)
+        ai_kind = _ai_kind(config) if config else "core"
     return session.exec(select(ChatSession).where(
         ChatSession.user_id == item.requested_user_id,
         ChatSession.ai_config_id == item.ai_config_id,
-        ChatSession.ai_kind == origin_run.ai_kind,
+        ChatSession.ai_kind == ai_kind,
         ChatSession.session_id == origin_session_id,
     )).first()
 
