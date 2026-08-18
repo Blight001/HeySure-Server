@@ -416,11 +416,11 @@ Content-Type: application/json
 
 ### 8.4 返回图片的约定
 
-工具名为 `screen.capture` / `screen.capture_region` / `vision.capture` /
-`vision.capture_mouse`，或 result 带 `send_to_user: true` 时：result 里的
-`dataUrl`（`data:image/png;base64,...`）会被服务器持久化并作为图片发给用户。
-自建服务的截图/拍照/图表类工具可复用 `screen.capture` 名字或带
-`send_to_user: true`。注意 20 MB 单帧上限。
+工具名为 `desktop_screenshot` / `browser_screenshot` / `screen.capture` /
+`screen.capture_region` / `vision.capture` / `vision.capture_mouse`，或 result
+带 `send_to_user: true` 时：result 里的 `dataUrl`（`data:image/png;base64,...`）
+会被服务器持久化并作为图片发给用户。自建服务的截图/拍照/图表类工具可复用
+`desktop_screenshot` 名字或带 `send_to_user: true`。注意 20 MB 单帧上限。
 
 ---
 

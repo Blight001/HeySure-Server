@@ -1,0 +1,117 @@
+[
+  {
+    "name": "run_command",
+    "file": "run_command.sh",
+    "runtime": "shell",
+    "description": "在桌面设备工作区执行一条命令并返回输出。默认工作目录是设备工作区；cwd 可传工作区内相对或绝对路径。文件、进程、Git 等系统操作一律走这条命令，不要再找独立的 fs/process/git 工具。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "command": { "type": "string", "description": "要执行的命令行。" },
+        "cwd": { "type": "string", "description": "工作目录；相对路径按工作区解析。" },
+        "shell": { "type": "string", "description": "Windows 下解释器：cmd/powershell/pwsh，默认 cmd。" },
+        "timeout_ms": { "type": "number", "description": "硬超时（毫秒）。" }
+      },
+      "required": ["command"]
+    },
+    "permissions": []
+  },
+  {
+    "name": "desktop_observe",
+    "file": "desktop_observe.ps1",
+    "runtime": "powershell",
+    "description": "观察桌面：列出可见窗口、显示器，或读取前台/指定窗口的 UI Automation 控件树。先观察再 desktop_action。action=windows 返回窗口标题；action=displays 返回显示器分辨率；action=ui 返回控件 name/control_type/automation_id/rect，供随后 ui_click 使用。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["ui", "windows", "displays"],
+          "description": "ui=控件树（默认），windows=可见窗口标题，displays=显示器列表。"
+        },
+        "title": { "type": "string", "description": "action=ui 时按标题子串定位窗口；省略则读前台窗口。" },
+        "max": { "type": "number", "description": "action=ui 最多返回的控件数，默认 150。" },
+        "max_depth": { "type": "number", "description": "action=ui 遍历深度，默认 8。" }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "desktop_screenshot",
+    "file": "desktop_screenshot.ps1",
+    "runtime": "powershell",
+    "description": "截取桌面并返回 JPEG dataUrl，服务器会存到 Screenshots。action=full 整屏；action=region 截矩形；action=around_mouse 截鼠标周围。先截图理解画面，再 desktop_action。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["full", "region", "around_mouse"],
+          "description": "full=整屏（默认），region=矩形区域，around_mouse=鼠标周围。"
+        },
+        "display": { "type": "number", "description": "action=full 的显示器序号，默认 0。" },
+        "x": { "type": "number", "description": "action=region 的左上角 X。" },
+        "y": { "type": "number", "description": "action=region 的左上角 Y。" },
+        "width": { "type": "number", "description": "action=region 的宽度。" },
+        "height": { "type": "number", "description": "action=region 的高度。" },
+        "radius": { "type": "number", "description": "action=around_mouse 的半径像素，默认 200。" },
+        "send_to_user": { "type": "boolean", "description": "是否把截图发给用户，默认 true。" }
+      }
+    },
+    "permissions": []
+  },
+  {
+    "name": "desktop_action",
+    "file": "desktop_action.ps1",
+    "runtime": "powershell",
+    "description": "操作桌面：鼠标、键盘、窗口和 UI Automation 点击。先 desktop_observe / desktop_screenshot，再按观察结果调用。action=click/double_click/right_click/move/scroll/drag 控制鼠标；type/press/paste 输入；focus/close 按标题操作窗口；ui_click 按 desktop_observe 返回的 name/automation_id 点击控件。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "click", "double_click", "right_click", "move", "scroll", "drag",
+            "type", "press", "paste", "focus", "close", "ui_click"
+          ],
+          "description": "要执行的桌面动作。"
+        },
+        "x": { "type": "number", "description": "click/move 的屏幕 X。" },
+        "y": { "type": "number", "description": "click/move 的屏幕 Y。" },
+        "button": { "type": "string", "description": "click 的按键：left/right/middle。" },
+        "amount": { "type": "number", "description": "scroll 滚动量，正上负下，120 约一格。" },
+        "x1": { "type": "number", "description": "drag 起点 X。" },
+        "y1": { "type": "number", "description": "drag 起点 Y。" },
+        "x2": { "type": "number", "description": "drag 终点 X。" },
+        "y2": { "type": "number", "description": "drag 终点 Y。" },
+        "text": { "type": "string", "description": "type/paste 要输入的文本。" },
+        "keys": { "description": "press 的组合键，如 'ctrl+c' 或 ['ctrl','c']。" },
+        "title": { "type": "string", "description": "focus/close/ui_click 的窗口标题子串。" },
+        "name": { "type": "string", "description": "ui_click 的控件 Name 子串。" },
+        "automation_id": { "type": "string", "description": "ui_click 的 AutomationId。" },
+        "control_type": { "type": "string", "description": "ui_click 的控件类型，如 ButtonControl。" },
+        "max_depth": { "type": "number", "description": "ui_click 遍历深度，默认 8。" }
+      },
+      "required": ["action"]
+    },
+    "permissions": []
+  },
+  {
+    "name": "clipboard",
+    "file": "clipboard.ps1",
+    "runtime": "powershell",
+    "description": "读写剪贴板文本。action=get 读取；action=set 写入，text 为空则清空。",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["get", "set"],
+          "description": "get=读取（默认），set=写入。"
+        },
+        "text": { "type": "string", "description": "action=set 时写入的文本；空字符串清空剪贴板。" }
+      }
+    },
+    "permissions": []
+  }
+]

@@ -1,14 +1,18 @@
-"""Desktop dynamic-MCP factory history.
+"""Factory-default desktop dynamic MCP.
 
-Windows is a runner: it has no built-in tools. Desktop MCP exists only as
-server-owned dynamic tools in the user workspace, authored in the console or
-via ``device+mcp.manage``. This package no longer seeds a factory catalog.
-
-It only remembers fingerprints of older factory files so ``seed_defaults`` can
-tombstone untouched copies and leave user-authored tools alone.
+Windows has no built-in tools. This package is the server-owned seed that
+``seed_defaults`` writes into the user workspace and then pushes with
+``device:tool-config``. The published set is five action-grouped tools.
+Older one-action factory files are retired when their revision still matches
+an untouched fingerprint.
 """
 
+import json
+import os
 from typing import Any, Dict, List, Set
+
+_DIR = os.path.dirname(__file__)
+_BODIES = os.path.join(_DIR, "bodies")
 
 # Revisions of the Python factory defaults shipped before the Windows runtime
 # moved to PowerShell.
@@ -77,11 +81,6 @@ LEGACY_POWERSHELL_DEFAULT_REVISIONS = {
     "ui.inspect": "6832041ea53db11ed32aa6ebdf9ee3f24e199a1f309862d0c6c639c93e55dd99",
     "ui.click": "10d34e480a79e55819b7598b23e7365b6c3ff3c5e9080f67f04483accf447c36",
     "speech.speak": "ccc15f53867ac5f7706f2066fa5a3f85b8175d449b84a2994a2f4b4afa8121cc",
-    "run_command": "d651f585d2175414b1db6b8b45e9cac858ee3c21a7a388b583f3cc4c4e730a4a",
-    "desktop_observe": "d54de81905f9f1c278de9a28d6f449b997a40f3eda4e241f7778db72e06d2e2a",
-    "desktop_screenshot": "d601753239c70913238952263d0301e662da72d74a9e4683ec8e9ce4d9d00f59",
-    "desktop_action": "0e6ed00ed73d87cb20cb494f3ca7dbd80182e730bdb5c6af4bf9665ff47315c6",
-    "clipboard": "943d93b1f4f5fd2bdce973cc0228b3f66921d4f586303b80826ae676afb54c12",
 }
 
 RETIRED_FACTORY_NAMES = frozenset(LEGACY_POWERSHELL_DEFAULT_REVISIONS) | frozenset(
@@ -102,5 +101,21 @@ def retired_factory_revisions(name: str) -> Set[str]:
 
 
 def load_default_tools() -> List[Dict[str, Any]]:
-    """Desktop no longer ships a factory catalog."""
-    return []
+    with open(os.path.join(_DIR, "definitions.json"), encoding="utf-8") as handle:
+        defs = json.load(handle)
+    out: List[Dict[str, Any]] = []
+    for item in defs:
+        with open(os.path.join(_BODIES, item["file"]), encoding="utf-8") as body:
+            source = body.read()
+        out.append({
+            "name": item["name"],
+            "description": item["description"],
+            "input_schema": item["input_schema"],
+            "code_kind": "runtime",
+            "runtime": item.get("runtime", "powershell"),
+            "source": source,
+            "code": [],
+            "js": "",
+            "permissions": item.get("permissions", []),
+        })
+    return out

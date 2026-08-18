@@ -9,6 +9,7 @@ import re
 
 
 _SCREENSHOT_TOOL_KEYS = (
+    "desktop_screenshot",
     "screen_capture_region",
     "vision_capture_mouse",
     "browser_screenshot",

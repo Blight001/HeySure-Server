@@ -12,7 +12,7 @@
 """
 
 import re
-from typing import Dict, Iterable, Optional, Set
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 # Legacy granular MCP tool name -> unified ``*.manage`` tool. Single source shared
 # by the one-time migration (``api.core.migrations``) and runtime allow-list parsing.
@@ -68,6 +68,32 @@ LEGACY_TOOL_RENAMES: Dict[str, str] = {
     "message.send+to+ai": "message.send+to",
 }
 
+# Old one-action desktop factory names → current five-tool catalog.
+DESKTOP_LEGACY_CALLS: Dict[str, Tuple[str, Dict[str, str]]] = {
+    "shell.run": ("run_command", {}),
+    "mouse.click": ("desktop_action", {"action": "click"}),
+    "mouse.double_click": ("desktop_action", {"action": "double_click"}),
+    "mouse.right_click": ("desktop_action", {"action": "right_click"}),
+    "mouse.move": ("desktop_action", {"action": "move"}),
+    "mouse.scroll": ("desktop_action", {"action": "scroll"}),
+    "mouse.drag": ("desktop_action", {"action": "drag"}),
+    "keyboard.type": ("desktop_action", {"action": "type"}),
+    "keyboard.press": ("desktop_action", {"action": "press"}),
+    "text.input": ("desktop_action", {"action": "paste"}),
+    "ui.click": ("desktop_action", {"action": "ui_click"}),
+    "window.focus": ("desktop_action", {"action": "focus"}),
+    "window.close": ("desktop_action", {"action": "close"}),
+    "window.list": ("desktop_observe", {"action": "windows"}),
+    "ui.inspect": ("desktop_observe", {"action": "ui"}),
+    "screen.info": ("desktop_observe", {"action": "displays"}),
+    "screen.capture": ("desktop_screenshot", {"action": "full"}),
+    "screen.capture_region": ("desktop_screenshot", {"action": "region"}),
+    "vision.capture": ("desktop_screenshot", {"action": "full"}),
+    "vision.capture_mouse": ("desktop_screenshot", {"action": "around_mouse"}),
+    "clipboard.get": ("clipboard", {"action": "get"}),
+    "clipboard.set": ("clipboard", {"action": "set"}),
+}
+
 # Permission selectors shown as one logical toolbox capability may represent
 # several independently callable runtime tools.  Expand them at the shared
 # normalization boundary so config allowlists, per-message scopes, prompt
@@ -89,6 +115,42 @@ RETIRED_TOOL_NAMES: Set[str] = {
     "run_card",
     "write_card",
 }
+
+
+def _desktop_legacy_call(name: str) -> Optional[Tuple[str, Dict[str, str]]]:
+    key = str(name or "").strip()
+    if key in DESKTOP_LEGACY_CALLS:
+        return DESKTOP_LEGACY_CALLS[key]
+    folded = _tool_name_key(key)
+    for old_name, mapping in DESKTOP_LEGACY_CALLS.items():
+        if _tool_name_key(old_name) == folded:
+            return mapping
+    return None
+
+
+def _alias_candidate(name: str, cands: Set[str]) -> str:
+    aliased = LEGACY_TOOL_RENAMES.get(name)
+    if aliased and aliased in cands:
+        return aliased
+    desktop = _desktop_legacy_call(name)
+    if desktop and desktop[0] in cands:
+        return desktop[0]
+    return ""
+
+
+def apply_legacy_desktop_call(original_name: str, resolved_name: str, args: Any) -> Dict[str, Any]:
+    """Inject the merged ``action`` when an old desktop tool name is rewritten."""
+    mapping = _desktop_legacy_call(original_name)
+    out = dict(args or {}) if isinstance(args, dict) else {}
+    if not mapping:
+        return out
+    target, defaults = mapping
+    if resolved_name != target:
+        return out
+    for key, value in defaults.items():
+        if not out.get(key):
+            out[key] = value
+    return out
 
 
 def normalize_legacy_tool_name(name: str) -> str:
@@ -146,8 +208,8 @@ def resolve_tool_name(name: str, candidates: Iterable[str]) -> str:
     cands = {str(c or "").strip() for c in (candidates or ()) if str(c or "").strip()}
     if key in cands:
         return key
-    aliased = LEGACY_TOOL_RENAMES.get(key)
-    if aliased and aliased in cands:
+    aliased = _alias_candidate(key, cands)
+    if aliased:
         return aliased
     norm_map: Dict[str, Optional[str]] = {}
     for cand in cands:

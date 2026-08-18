@@ -179,13 +179,15 @@ async def call_mcp_tool(
     # 宽容解析工具名（mcp_xxx / mcp__xxx / 旧名 → 真实名），再做门禁与调用；
     # 模型/前端把 . 写成 _ 时不再直接报「未知工具」。
     try:
-        from api.services.mcp.mcp_tool_aliases import resolve_tool_name
+        from api.services.mcp.mcp_tool_aliases import apply_legacy_desktop_call, resolve_tool_name
 
         _cands = {str(t.get("name") or "").strip() for t in registry.list_tools() if t.get("name")}
         if req.ai_config_id is not None:
             _cands.update(endpoint_tools_for_config(req.ai_config_id, user.id))
             _cands.update(endpoint_bridge_tools_for_config(req.ai_config_id, user.id))
+        original_tool = req.tool
         req.tool = resolve_tool_name(req.tool, _cands)
+        req.arguments = apply_legacy_desktop_call(original_tool, req.tool, req.arguments or {})
     except Exception:
         pass
     if req.ai_config_id is not None:

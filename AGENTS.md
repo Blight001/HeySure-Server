@@ -148,7 +148,7 @@ server/
 | `device_tools/device_permission_policy.py` | 设备 MCP 工具权限管理 |
 | `device_tools/device_dynamic_tools.py` | 设备动态工具注册与管理 |
 | `device_tools/device_workspace_tools.py` | 设备工作区工具文件管理 |
-| `device_tools/device_runtime_tools/` | 桌面无出厂目录；仅保留历史出厂指纹，供 seed 回收未改过的旧文件 |
+| `device_tools/device_runtime_tools/` | 出厂桌面动态 MCP：`run_command` / `desktop_observe` / `desktop_screenshot` / `desktop_action` / `clipboard` |
 | `device_tools/device_browser_runtime_tools/` | 出厂默认浏览器工具体 |
 | **`access/`** | |
 | `access/governance.py` | AI 成员治理（状态/权限/生命周期） |

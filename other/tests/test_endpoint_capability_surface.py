@@ -10,8 +10,17 @@ def test_browser_defaults_do_not_generate_generic_dispatcher():
     assert "browser_action" in names
 
 
-def test_desktop_has_no_factory_catalog():
-    assert load_desktop_tools() == []
+def test_desktop_defaults_are_action_grouped():
+    names = {tool["name"] for tool in load_desktop_tools()}
+
+    assert names == {
+        "run_command",
+        "desktop_observe",
+        "desktop_screenshot",
+        "desktop_action",
+        "clipboard",
+    }
+    assert "mouse.click" not in names
 
 
 def test_remote_control_capability_is_not_an_mcp_tool():

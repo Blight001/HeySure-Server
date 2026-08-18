@@ -35,6 +35,7 @@ def test_seed_defaults_retires_exact_legacy_python_tool(tmp_path, monkeypatch):
     assert retired is None
     assert not (tools_dir / f"{legacy['name']}.py").exists()
     assert (tools_dir / ".deleted" / legacy["name"]).is_file()
+    assert workspace_tools.get_tool(1, "desktop", "desktop_action") is not None
 
 
 def test_seed_defaults_preserves_user_edited_python_tool(tmp_path, monkeypatch):

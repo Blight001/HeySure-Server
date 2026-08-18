@@ -61,6 +61,9 @@ ENDPOINT_BRIDGE_MCP_TOOLS: Set[str] = set()
 ENDPOINT_TOOL_PREFIXES = (
     "browser_",
     "card_",
+    "desktop_",
+    "run_command",
+    "clipboard",
     "fs.",
     "shell.",
     "git.",
@@ -68,7 +71,6 @@ ENDPOINT_TOOL_PREFIXES = (
     "mouse.",
     "screen.",
     "ui.",
-    "clipboard.",
     "window.",
     "process.",
     "display.",

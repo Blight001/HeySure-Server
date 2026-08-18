@@ -28,6 +28,7 @@ from ai_runtime.inference.tool_resolution import (
     resolve_mcp_tool_name,
     split_concatenated_native_tool_name,
 )
+from api.services.mcp.mcp_tool_aliases import apply_legacy_desktop_call
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,7 @@ class TurnCallMachine:
             self.context.native_tool_name_map,
             set(self.context.effective_tools),
         )
-        arguments = call.get("arguments") or {}
+        arguments = apply_legacy_desktop_call(raw_tool, tool, call.get("arguments") or {})
         call_id = str(call.get("id") or "call_0")
         if self.context.should_stop():
             self.context.stop_run()
