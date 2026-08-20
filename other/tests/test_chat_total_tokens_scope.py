@@ -73,3 +73,22 @@ def test_total_tokens_keeps_aggregate_mode_when_session_is_omitted(monkeypatch):
     live_sql = str(session.statements[1]).lower()
     assert "chatmessage.session_id =" not in persisted_sql
     assert "chatrun.session_id =" not in live_sql
+
+
+def test_total_tokens_sql_repairs_legacy_inconsistent_total_column(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(
+        chat_history_routes,
+        "get_current_user",
+        lambda *_args, **_kwargs: SimpleNamespace(id=9),
+    )
+
+    asyncio.run(chat_history_routes.get_total_tokens(
+        session=session,
+        authorization="Bearer test",
+    ))
+
+    persisted_sql = str(session.statements[0]).lower()
+    assert "case" in persisted_sql
+    assert "prompt_tokens" in persisted_sql
+    assert "completion_tokens" in persisted_sql

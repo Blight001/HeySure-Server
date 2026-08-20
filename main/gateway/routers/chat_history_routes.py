@@ -17,7 +17,12 @@ from api.database import get_session
 from api.models import ChatMessage, ChatMessageCreate, ChatSession
 from .auth import get_current_user
 from .chat_base import router
-from api.services.chat.chat_persistence import _rebuild_usage_snapshots, _save_message
+from api.services.chat.chat_persistence import (
+    _rebuild_usage_snapshots,
+    _save_message,
+    canonical_message_total,
+    canonical_total_sql,
+)
 from api.services.chat.chat_media import delete_message_media
 from api.chat_runtime.chat_prompt_utils import _build_mcp_display_result, _safe_json
 from api.chat_runtime.chat_runtime_helpers import _live_pending_tokens_for, build_effective_system_prompt
@@ -97,7 +102,7 @@ def _history_row_to_dict(msg: ChatMessage, attachments: Optional[list[dict]] = N
         "model": msg.model,
         "prompt_tokens": msg.prompt_tokens,
         "completion_tokens": msg.completion_tokens,
-        "total_tokens": msg.total_tokens,
+        "total_tokens": canonical_message_total(msg),
         "cache_read_tokens": msg.cache_read_tokens,
         "finish_reason": msg.finish_reason,
         "latency": msg.latency,
@@ -190,7 +195,7 @@ def get_sessions(
     # ChatMessage row (incl. large content/system_prompt text) into Python.
     token_stmt = select(
         ChatMessage.session_id,
-        func.coalesce(func.sum(ChatMessage.total_tokens), 0),
+        func.coalesce(func.sum(canonical_total_sql(ChatMessage)), 0),
     ).where(
         ChatMessage.user_id == user.id,
         ChatMessage.ai_kind == ai_kind,
@@ -389,7 +394,7 @@ async def get_total_tokens(
     agg_stmt = select(
         func.coalesce(func.sum(ChatMessage.prompt_tokens), 0),
         func.coalesce(func.sum(ChatMessage.completion_tokens), 0),
-        func.coalesce(func.sum(ChatMessage.total_tokens), 0),
+        func.coalesce(func.sum(canonical_total_sql(ChatMessage)), 0),
         func.count(ChatMessage.id),
     ).where(
         ChatMessage.user_id == user.id,

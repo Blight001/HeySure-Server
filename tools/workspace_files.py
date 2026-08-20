@@ -29,11 +29,11 @@ WORKSPACE_FILE_MANAGE_SCHEMA = {
         "action": {
             "type": "string",
             "enum": ["register", "import_chat_media", "view_image", "info", "list", "unregister", "create_temporary_link", "revoke_temporary_link"],
-            "description": "register 注册工作区文件；view_image 将工作区图片安全附加到下一轮模型输入；create_temporary_link 创建默认 5 分钟的公网临时下载链接；revoke_temporary_link 提前撤销；info/list 查看引用；unregister 仅删除引用、不删除原文件。",
+            "description": "仅操作服务器 AI 工作区：register 注册文件；view_image 将图片安全附加到下一轮模型输入；create_temporary_link 创建默认 5 分钟的公网临时下载链接；revoke_temporary_link 提前撤销；info/list 查看引用；unregister 仅删除引用、不删除原文件。端侧文件须先上传/同步到此工作区。",
         },
         "workspace_path": {
             "type": "string",
-            "description": "register 必填。相对当前 AI 工作区的文件路径；拒绝绝对路径和越界路径。",
+            "description": "register 必填。相对 HeySure 服务器当前 AI 工作区的文件路径；拒绝绝对路径和越界路径，也不能填写用户电脑、端侧设备或宝塔主机路径。",
         },
         "file_ref": {"type": "string", "description": "view_image/info/unregister 可用，格式 file_...。"},
         "grant_id": {"type": "string", "description": "revoke_temporary_link 必填，格式 fgrant_...。"},

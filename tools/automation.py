@@ -56,7 +56,6 @@ from tools.automation_access import (
     _admin_actor,
     _card_visible,
     _creation_tags,
-    _is_admin_role,
     _pending_ai_review_guidance,
     _public_card_creator,
     _updated_tags,

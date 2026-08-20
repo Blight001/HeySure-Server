@@ -468,7 +468,7 @@ def _send_inquiry_reply_reminder(*, message_id: str, user_id: int, elapsed_secon
         if not session_id:
             return {"reminded": False, "reason": "missing_target_session"}
         target_ai_config_id = int(row.to_ai_config_id)
-        ai_kind = "assistant" if target_cfg.ai_role == "assistant_admin" else "core"
+        ai_kind = "core"
         from api.services.knowledge import kb_store
 
         template = kb_store.effective_system_value(
@@ -1016,7 +1016,7 @@ def _wake_idle_target_for_message_locked(
         if not target_cfg:
             raise ValueError("target AI config not found")
 
-        ai_kind = "assistant" if target_cfg.ai_role == "assistant_admin" else "core"
+        ai_kind = "core"
         from_name = str(from_cfg.name or "").strip() if from_cfg else f"AI-{msg.from_ai_config_id}"
         target_name = str(target_cfg.name or "").strip() or f"AI-{target_id}"
         # ``send()`` 已经写好了 target_session_id；这里直接复用，

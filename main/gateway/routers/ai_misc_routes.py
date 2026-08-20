@@ -33,7 +33,7 @@ from api.services.access.access_guards import get_ai_config_or_404
 from api.sio import agents
 from api.devices.live import emit_agent_list_for_user
 from .auth import get_current_user
-from ai_runtime.inference.ai_service import ensure_default_ai_for_user
+from ai_runtime.inference.ai_service import ensure_default_members_for_user
 from api.services.model_presets import resolve_model_preset
 from api.services.tasks.task_system import decode_task_payload
 from .ai_base import router
@@ -234,6 +234,8 @@ def get_token_snapshots(
     if ai_config_id:
         statement = statement.where(TokenUsageSnapshot.ai_config_id == ai_config_id)
     rows = session.exec(statement).all()
+    for row in rows:
+        row.total_tokens = row.effective_total_tokens
     return rows
 
 @router.get("/cards")
@@ -242,7 +244,7 @@ async def list_ai_cards(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    ensure_default_ai_for_user(session, user.id)
+    ensure_default_members_for_user(session, user.id)
 
     cfgs = session.exec(
         select(AssistantAIConfig)
@@ -273,7 +275,7 @@ async def list_ai_cards(
     for row in snapshots:
         if row.ai_config_id is None:
             continue
-        token_totals[row.ai_config_id] = token_totals.get(row.ai_config_id, 0) + (row.total_tokens or 0)
+        token_totals[row.ai_config_id] = token_totals.get(row.ai_config_id, 0) + row.effective_total_tokens
 
     core_sessions = session.exec(
         select(ChatSession).where(
@@ -300,7 +302,7 @@ async def list_ai_cards(
     latest_task_assistant_by_session: Dict[tuple[int, str], ChatMessage] = {}
     for msg in core_messages:
         key = (msg.ai_config_id, msg.session_id)
-        core_session_tokens[key] = core_session_tokens.get(key, 0) + int(msg.total_tokens or 0)
+        core_session_tokens[key] = core_session_tokens.get(key, 0) + msg.effective_total_tokens
         session_id = str(msg.session_id or "")
         if (
             msg.ai_config_id is not None
@@ -473,7 +475,7 @@ async def list_ai_cards(
                 token_used = core_session_tokens.get((cfg.id, latest_session.session_id), 0)
             else:
                 token_used = 0
-        ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
+        ai_kind = "core"
         active_run = active_run_map.get((cfg.id, ai_kind))
         recent_user_chat = recent_user_chat_map.get((cfg.id, ai_kind))
         run_live = run_live_state.get(active_run.run_id, {}) if active_run else {}

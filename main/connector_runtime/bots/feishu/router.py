@@ -160,7 +160,7 @@ def handle_feishu_event_payload(
         chat_id = event.get("chat_id") or ""
         open_id = event.get("open_id") or ""
         feishu_message_id = event.get("message_id") or ""
-        ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
+        ai_kind = "core"
         session_key = chat_id or open_id or "unknown"
         receive_id = chat_id or open_id; receive_id_type = "chat_id" if chat_id else "open_id"
         identity_key, home_session_id = feishu_scope_keys(connection_ref, config_id, receive_id, session_key)

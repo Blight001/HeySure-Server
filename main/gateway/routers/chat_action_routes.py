@@ -25,7 +25,13 @@ from api.services.model_presets import resolve_model_preset
 from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, router
-from api.services.chat.chat_persistence import _append_usage_snapshot, _rebuild_usage_snapshots, _save_message, _upsert_session
+from api.services.chat.chat_persistence import (
+    _append_usage_snapshot,
+    _rebuild_usage_snapshots,
+    _save_message,
+    _upsert_session,
+    canonical_token_counts,
+)
 from api.chat_runtime.chat_prompt_utils import (
     _append_prompt_section,
     _build_mcp_stream_warning,
@@ -292,6 +298,9 @@ def save_chat_message(
     authorization: str = Header(None)
 ):
     user = get_current_user(authorization, session)
+    prompt_tokens, completion_tokens, total_tokens = canonical_token_counts(
+        msg.prompt_tokens, msg.completion_tokens, msg.total_tokens,
+    )
     db_msg = ChatMessage(
         user_id=user.id,
         ai_config_id=msg.ai_config_id,
@@ -303,12 +312,13 @@ def save_chat_message(
         think=msg.think,
         tags=msg.tags or "",
         model=msg.model,
-        prompt_tokens=msg.prompt_tokens,
-        completion_tokens=msg.completion_tokens,
-        total_tokens=msg.total_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cache_read_tokens=msg.cache_read_tokens,
         system_prompt=msg.system_prompt,
         finish_reason=msg.finish_reason,
-        latency=msg.latency
+        latency=msg.latency,
     )
     session.add(db_msg)
     session.commit()

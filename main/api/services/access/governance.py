@@ -43,12 +43,10 @@ def can_manage(
 
     scope = str(getattr(manager, "management_scope", "") or "self").strip().lower()
     is_manager_role = str(manager.digital_member_role or "").strip().lower() == "manager"
-    is_admin = str(manager.ai_role or "").strip() == "assistant_admin"
-
-    if not is_manager_role and not is_admin:
+    if not is_manager_role:
         return False
 
-    if scope == "global" or is_admin:
+    if scope == "global":
         return True
 
     # Direct child link always grants authority.

@@ -257,7 +257,7 @@ def handle_qq_event_payload(
         target_type = event.get("target_type") or "c2c"
         qq_message_id = event.get("message_id") or ""
         qq_event_id = event.get("event_id") or ""
-        ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
+        ai_kind = "core"
         session_key = f"{target_type}_{target_id}"
         identity_key, home_session_id = qq_scope_keys(connection_ref, config_id, target_id, session_key)
         # Resolve which session in the shared pool this user's message lands in.

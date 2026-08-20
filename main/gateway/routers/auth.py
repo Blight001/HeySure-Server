@@ -23,7 +23,7 @@ from api.core.config import (
 from api.database import get_session
 from api.models import Token, User, UserCreate, UserLogin, UserRead, UserUpdate
 from api.models.defaults import DEFAULT_MCP_NAMESPACE_HINTS
-from ai_runtime.inference.ai_service import ensure_default_ai_for_user
+from ai_runtime.inference.ai_service import ensure_default_members_for_user
 from api.services.access import auth_settings, ice_settings
 from api.services import email_service
 from api.services.model_presets import model_presets_json
@@ -274,7 +274,7 @@ def register(
 
     # 自动在 workspace 目录中创建对应用户的数据库 ID 目录名。
     ensure_user_workspace(db_user.id)
-    ensure_default_ai_for_user(session, db_user.id)
+    ensure_default_members_for_user(session, db_user.id)
     return _user_payload(db_user)
 
 @router.post("/login", response_model=Token)
@@ -290,7 +290,7 @@ def login(user_in: UserLogin, request: Request, session: Session = Depends(get_s
     
     # 登录时检查并确保用户的 workspace 目录存在
     ensure_user_workspace(user.id)
-    ensure_default_ai_for_user(session, user.id)
+    ensure_default_members_for_user(session, user.id)
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -325,7 +325,7 @@ def login_with_email(payload: EmailLoginPayload, request: Request, session: Sess
         raise HTTPException(status_code=401, detail="验证码错误或已过期")
 
     ensure_user_workspace(user.id)
-    ensure_default_ai_for_user(session, user.id)
+    ensure_default_members_for_user(session, user.id)
 
     access_token = create_access_token(
         data={

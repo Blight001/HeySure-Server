@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-20",
+  "products": [
+    {
+      "id": "windows-desktop",
+      "name": "HeySure Windows 设备",
+      "summary": "登录 HeySure 账号，把 Windows 桌面、命令行和浏览器原生输入接入 AI 成员。",
+      "device_type": "desktop",
+      "accent": "indigo",
+      "capabilities": ["桌面动态 MCP", "远程画面", "远程终端", "浏览器原生输入"],
+      "targets": [
+        {
+          "id": "windows-x86_64-stable",
+          "label": "Windows 10/11 · 64 位",
+          "platform": "windows",
+          "arch": "x86_64",
+          "channel": "stable",
+          "version": "0.1.0",
+          "artifact": "windows/HeySure-Device-Setup.exe",
+          "sha256": "",
+          "release_notes": "首个设备大厅发行通道。安装后填写当前服务器地址并使用 HeySure 账号登录。",
+          "install_steps": ["下载安装包并完成安装", "打开 HeySure Device", "确认服务器地址后使用网页账号登录", "回到网页作坊为设备分配 AI 成员"]
+        }
+      ]
+    },
+    {
+      "id": "linux-agent",
+      "name": "HeySure Linux Server Agent",
+      "summary": "把 Linux 服务器注册为可治理设备，支持运维 MCP 与远程终端。",
+      "device_type": "custom",
+      "accent": "emerald",
+      "capabilities": ["系统与服务运维", "Shell", "远程终端", "systemd 常驻"],
+      "targets": [
+        {
+          "id": "linux-x86_64-stable",
+          "label": "Linux · x86_64",
+          "platform": "linux",
+          "arch": "x86_64",
+          "channel": "stable",
+          "version": "0.1.0",
+          "artifact": "linux/heysure-linux-agent.tar.gz",
+          "sha256": "",
+          "release_notes": "解压后按 README 使用 systemd 安装，并在环境文件中配置服务器与账号。",
+          "install_steps": ["下载并解压发行包", "配置 HEYSURE_SERVER、账号和设备名", "运行 install.sh", "在网页作坊绑定 AI 与工具权限"]
+        }
+      ]
+    },
+    {
+      "id": "chrome-extension",
+      "name": "HeySure Chrome 浏览器设备",
+      "summary": "将网页观察、点击、输入和下载能力接入 HeySure。",
+      "device_type": "browser",
+      "accent": "cyan",
+      "capabilities": ["DOM 观察", "网页操作", "标签页管理", "下载"],
+      "targets": [
+        {
+          "id": "chrome-mv3-stable",
+          "label": "Chrome / Edge · Manifest V3",
+          "platform": "browser",
+          "arch": "universal",
+          "channel": "stable",
+          "version": "0.1.0",
+          "artifact": "browser/heysure-browser-mv3.zip",
+          "sha256": "",
+          "release_notes": "解压后在扩展管理页以开发者模式加载。",
+          "install_steps": ["下载并解压 ZIP", "打开扩展管理并启用开发者模式", "加载已解压的扩展目录", "在扩展弹窗登录当前 HeySure 服务器"]
+        }
+      ]
+    },
+    {
+      "id": "android-device",
+      "name": "HeySure Android 设备",
+      "summary": "通过无障碍与屏幕投影让 AI 成员操作 Android 手机。",
+      "device_type": "android",
+      "accent": "violet",
+      "capabilities": ["点击与滑动", "屏幕观察", "设备状态", "任务回执"],
+      "targets": [
+        {
+          "id": "android-arm64-stable",
+          "label": "Android 10+ · arm64",
+          "platform": "android",
+          "arch": "arm64",
+          "channel": "stable",
+          "version": "0.1.0",
+          "artifact": "android/HeySure-Device-arm64.apk",
+          "sha256": "",
+          "release_notes": "安装后按引导授予无障碍和屏幕投影权限。",
+          "install_steps": ["下载并安装 APK", "允许安装来自此来源的应用", "登录 HeySure 账号", "按引导授予无障碍与屏幕投影权限"]
+        }
+      ]
+    },
+    {
+      "id": "ai-free-app",
+      "name": "AI-FREE 浏览器工作台",
+      "summary": "集成 Chromium、多环境隔离和 HeySure 浏览器自动化的 Windows AI 工作台。",
+      "device_type": "custom",
+      "accent": "amber",
+      "capabilities": ["AI 浏览器工作台", "多环境隔离", "浏览器自动化", "OpenCut"],
+      "targets": [
+        {
+          "id": "windows-x86_64-stable",
+          "label": "Windows 10/11 · 64 位",
+          "platform": "windows",
+          "arch": "x86_64",
+          "channel": "stable",
+          "version": "2.6.43",
+          "artifact": "windows/AI-FREE-Setup.exe",
+          "sha256": "",
+          "release_notes": "由当前 HeySure 服务器统一发布；发现新版时只询问并打开设备大厅，不自动替换程序。",
+          "install_steps": ["下载安装包并完成安装", "打开 AI-FREE", "登录当前 HeySure 服务器", "在设备面板确认连接状态"]
+        }
+      ]
+    }
+  ]
+}

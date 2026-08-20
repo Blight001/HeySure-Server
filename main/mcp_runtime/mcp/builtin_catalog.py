@@ -102,8 +102,11 @@ BUILTIN_TOOLS = (
     MCPTool(
         name="workspace.run+command",
         description=(
-            "执行 shell 命令，用于开发或检查 AI 工作区。此工具运行在工作区执行环境中，不等同于另行连接的服务器或设备；"
-            "操作受管服务器/设备路径时应改用对应端点的 shell 工具。默认在当前 AI 可访问的工作区目录、使用正常进程环境运行。"
+            "在 HeySure 服务器上当前 AI 的独立工作区执行 shell 命令，可用于列目录、读取/搜索/创建/编辑/删除文本文件、"
+            "运行脚本和诊断工作区内容。它不是用户电脑、浏览器插件、桌面端设备或宝塔主机的 shell；"
+            "同名文件或相同相对路径也不代表两端文件相同。服务器/测试服/生产环境、Docker/Compose、宝塔路径和服务修改"
+            "必须使用 baota MCP（若本轮已提供）；本机、桌面、浏览器和下载目录必须使用对应端侧设备 MCP。"
+            "默认 cwd 是当前 AI 可访问的服务器工作区目录，并使用正常进程环境运行。"
             "普通成员只能在自己的 AI 工作区目录内选择 cwd；管理者可使用更宽的用户工作区。"
             "支持显式 shell=cmd/powershell/pwsh，或用 argv + shell=none 绕过 shell 转义。"
             "需要隔离环境时，设置 sandbox_env。"
@@ -124,7 +127,7 @@ BUILTIN_TOOLS = (
                 },
                 "cwd": {
                     "type": "string",
-                    "description": "可选，工作区执行环境中的目录。相对路径相对 AI 工作区解析；绝对路径也必须存在于该执行环境，不能填写另一台服务器/设备上的主机路径。",
+                    "description": "可选，HeySure 服务器 AI 工作区执行环境中的目录。相对路径相对当前 AI 工作区解析；绝对路径也必须存在于该执行环境。不能填写用户电脑、端侧设备或宝塔主机路径；服务器主机路径请改用 baota MCP。",
                 },
                 "timeout": {
                     "type": "integer",
@@ -151,13 +154,15 @@ BUILTIN_TOOLS = (
     MCPTool(
         name="workspace.file+manage",
         description=(
-            "查看工作区图片请调用 workspace.file+manage(action=view_image)，并传 file_ref 或 workspace_path；控制台列出路径不会把图片送入模型。"
+            "只管理 HeySure 服务器上当前 AI 工作区里的文件，不能直接读取用户电脑、浏览器、桌面端设备或宝塔主机路径。"
+            "端侧文件必须先通过对应设备工具上传/同步到服务器 AI 工作区，得到服务器侧 workspace_path 或 file_ref 后才能使用。"
+            "查看服务器工作区图片请调用 workspace.file+manage(action=view_image)，并传 file_ref 或 workspace_path；控制台列出路径不会把图片送入模型。"
             "支持 PNG/JPEG/WebP/GIF，并将图片安全附加到下一轮模型输入；"
             "register 将相对工作区路径注册为不暴露服务器绝对路径的 file_ref；"
             "import_chat_media 可把 /api/chat/media/{media_id}/{token} 对话图片保存到成员工作区；"
             "create_temporary_link 创建默认 5 分钟、最长 15 分钟的公网临时下载链接，供其它设备或命令行拉取；"
             "revoke_temporary_link 可提前撤销；info/list 查看引用；unregister 仅移除引用，不删除原文件。"
-            "保存结果会返回可直接调用 message.send+to 的示例。"
+            "保存结果会返回可直接调用 message.send+to 的示例；只有服务器 AI 工作区文件才能按此流程直接发送给用户。"
         ),
         input_schema=WORKSPACE_FILE_MANAGE_SCHEMA,
         handler=_workspace_file_manage,
@@ -196,7 +201,9 @@ BUILTIN_TOOLS = (
             "to=\"user\"：通过该 AI 已绑定的飞书、QQ 或微信发送。机器人会话中默认只回复当前联系人；"
             "网页/后台存在多个目标时必须使用 connection_ref + recipient_ref 明确选择。"
             "正常调用只需提供 text、file_ref 或 attachments；图片、视频、音频、文档、压缩包等统一按文件发送。"
-            "工作区文件先用 workspace.file+manage(action=register) 获取 file_ref；不要向用户询问会话 id、openid、target_id 等寻址参数。"
+            "只能直接发送 HeySure 服务器当前 AI 工作区里的文件；工作区文件先用 workspace.file+manage(action=register) 获取 file_ref。"
+            "用户电脑或端侧设备文件必须先通过对应设备工具上传/同步到服务器 AI 工作区，不能把端侧路径直接当 media_path。"
+            "不要向用户询问会话 id、openid、target_id 等寻址参数。"
             "QQ 会自动使用当前会话绑定、配置的默认接收目标或最近一次已绑定 QQ 会话；"
             "返回 accepted/pending/fallback_used 区分已接收、待客户端领取和是否启用兜底；delivered 只表示外部机器人已确认送达。\n"
             "to=成员 ID 或名字：给同一数字社会中的另一个 AI 发消息，"
@@ -241,7 +248,7 @@ BUILTIN_TOOLS = (
                     "description": "兼容性覆盖项；与 receive_id 一起人工指定目标时使用。",
                 },
                 "media_url": {"type": "string", "description": "图片或视频的 HTTP(S) 链接，服务端拉取后发送。"},
-                "media_path": {"type": "string", "description": "服务端本地的图片或视频路径。"},
+                "media_path": {"type": "string", "description": "兼容参数，仅允许 HeySure 服务器当前 AI 工作区内的文件路径；优先注册并传 file_ref。不能传用户电脑、端侧设备或宝塔主机路径。"},
                 "media_type": {"type": "string", "enum": ["image", "video", "audio", "file"], "description": "兼容参数；省略时按文件推断。"},
                 "file_name": {"type": "string", "description": "可选，上传媒体时使用的文件名。"},
                 "duration": {"type": "integer", "description": "可选，飞书视频上传时的时长（毫秒）。"},
@@ -261,7 +268,7 @@ BUILTIN_TOOLS = (
                                 "properties": {
                                     "file_ref": {"type": "string"},
                                     "media_url": {"type": "string"},
-                                    "media_path": {"type": "string"},
+                                    "media_path": {"type": "string", "description": "兼容参数，仅允许服务器当前 AI 工作区内路径；不能传端侧设备或宝塔主机路径。"},
                                     "media_type": {"type": "string", "enum": ["image", "video", "audio", "file"]},
                                     "file_name": {"type": "string"},
                                     "duration": {"type": "integer"},
@@ -381,7 +388,7 @@ BUILTIN_TOOLS = (
             "保存会冻结设备、工具 Schema 与摘要，运行前再次检查在线状态和 Schema。"
             + AUTOMATION_DEFINITION_GUIDANCE +
             "AI 创建的卡片会自动添加 ai_owner:<成员ID> 标签；普通成员只能访问自己的标签卡片或无所有者标签的公共卡片，"
-            "管理员与辅助管理员创建的卡片默认全员可调用；显式调用范围优先，辅助管理员仍可治理同一用户下的卡片。"
+            "数字成员管理者创建的卡片默认全员可调用；显式调用范围优先。"
         ),
         input_schema=AUTOMATION_MANAGE_SCHEMA,
         handler=_automation_manage,

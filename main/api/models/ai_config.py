@@ -32,7 +32,7 @@ class AssistantAIConfig(SQLModel, table=True):
     # （见 api.services.knowledge.kb_store）。Create/Update 仍接收 prompt 字段，落盘到文件。
     strip_markdown_symbols: bool = Field(default=False)
 
-    ai_role: str = Field(default="digital_member", index=True)  # assistant_admin / digital_member
+    ai_role: str = Field(default="digital_member", index=True)  # digital_member
     digital_member_role: str = Field(default="member")  # manager / member
     is_librarian: bool = Field(default=False, index=True)  # 图书管理员标志（同 user 下最多 1 个）
 

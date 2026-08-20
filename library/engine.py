@@ -5,7 +5,7 @@
 
 - **自动上线**：``ensure_presence_for_user(user_id)`` 给每个账号写一条
   ``DevicePresence``（device_type="workshop"，always online）并默认
-  放开 per-agent scope。该函数挂在 ``ensure_default_ai_for_user`` 上，
+  放开 per-agent scope。该函数挂在 ``ensure_default_members_for_user`` 上，
   用户登录/拉取 AI 列表时自动接入，设备面板与社会显示随之出现图书馆设备。
 - **专用绑定保留**：AI 仍通过兼容表 ``WorkshopAiBinding`` 与设备多对多绑定。
 - **图书馆 MCP**：注册表治理工具与内置工具统一进入该设备的成员 scope。

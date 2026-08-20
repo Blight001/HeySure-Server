@@ -474,28 +474,7 @@ def _resolve_task_runtime_owner(
             return _resolve_target(raw_target)
         return caller_cfg
 
-    if caller_role != "assistant_admin":
-        raise HTTPException(status_code=400, detail="Only digital_member or assistant_admin supports task scheduler")
-
-    if raw_target is not None:
-        return _resolve_target(raw_target)
-
-    candidates = session.exec(
-        select(AssistantAIConfig).where(
-            AssistantAIConfig.user_id == user_id,
-            AssistantAIConfig.ai_role == "digital_member",
-        ).order_by(AssistantAIConfig.sort_order.asc(), AssistantAIConfig.created_at.asc())
-    ).all()
-    if not candidates:
-        raise HTTPException(
-            status_code=400,
-            detail="No digital_member available for task scheduling; provide target_ai_config_id or create one",
-        )
-    manager = next(
-        (cfg for cfg in candidates if str(cfg.digital_member_role or "").strip().lower() == "manager"),
-        None,
-    )
-    return manager or candidates[0]
+    raise HTTPException(status_code=400, detail="Only digital_member supports task scheduler")
 
 def _load_task_job_for_owner(
     session: Session,

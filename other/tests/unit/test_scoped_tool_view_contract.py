@@ -155,29 +155,6 @@ def test_revision_is_stable_for_same_scoped_inputs(monkeypatch):
     assert first.revision == second.revision
 
 
-def test_legacy_role_policy_and_member_labels_do_not_change_tools(monkeypatch):
-    _patch_sources(monkeypatch)
-    request = ToolViewRequest(ai_config_id=9)
-    restrictive_user = SimpleNamespace(
-        id=7,
-        role_mcp_permissions='{"digital_member_member": []}',
-    )
-    member = SimpleNamespace(
-        id=9, user_id=7, mcp_enabled=True, mcp_tools="[]",
-        ai_role="digital_member", digital_member_role="member",
-    )
-    assistant = SimpleNamespace(
-        id=9, user_id=7, mcp_enabled=True, mcp_tools="[]",
-        ai_role="assistant_admin", digital_member_role="manager",
-    )
-
-    member_view = resolve_scoped_tool_view(_Session(), restrictive_user, member, request)
-    assistant_view = resolve_scoped_tool_view(_Session(), restrictive_user, assistant, request)
-
-    assert member_view.eligible_names == assistant_view.eligible_names
-    assert "workspace.search" in member_view.eligible_names
-
-
 def test_capability_schema_version_matches_describe_contract(monkeypatch):
     from tools.introspection import _with_schema_version
 

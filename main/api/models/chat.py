@@ -30,6 +30,13 @@ class ChatMessage(SQLModel, table=True):
 
     created_at: float = Field(default_factory=time.time)
 
+    @property
+    def effective_total_tokens(self) -> int:
+        """Canonical total for legacy rows whose stored total is inconsistent."""
+        prompt = max(0, int(self.prompt_tokens or 0))
+        completion = max(0, int(self.completion_tokens or 0))
+        return prompt + completion if prompt or completion else max(0, int(self.total_tokens or 0))
+
 
 class ChatMessageCreate(SQLModel):
     role: str
@@ -71,7 +78,6 @@ class ChatMessageMedia(SQLModel, table=True):
     data: builtins.bytes = Field(sa_column=Column(LargeBinary, nullable=False))
     bytes: builtins.int = Field(default=0)
     created_at: float = Field(default_factory=time.time)
-
 
 class ChatMessageAttachment(SQLModel, table=True):
     """A persisted reference to a file already stored in an AI workspace.

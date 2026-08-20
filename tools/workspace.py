@@ -65,7 +65,8 @@ def _resolve_command_cwd(project_root: str, cwd: Optional[str], *, strict_worksp
                 detail=(
                     f"cwd does not exist in the workspace execution environment: {resolved}. "
                     f"This tool runs in the AI workspace rooted at {os.path.abspath(project_root)}, "
-                    "not on a separately connected server/device; use that server/device's shell tool for host paths."
+                    "not on a separately connected server/device; use baota MCP for the managed server host "
+                    "or the matching endpoint MCP for a user device path."
                 ),
             )
         return resolved

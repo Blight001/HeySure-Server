@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from api.runtime.http_client import ai_http_post
+from api.services.chat.token_usage import normalize_usage
 from .chat_prompt_utils import (
     _extract_all_complete_mcp_calls,
     _extract_delta_text,
@@ -271,6 +272,22 @@ def _apply_anthropic_prefix_cache(
     return system_blocks, messages
 
 
+def _anthropic_input_usage(raw: Dict[str, Any]) -> Dict[str, int]:
+    cache_read = int(raw.get("cache_read_input_tokens") or 0)
+    cache_creation = int(raw.get("cache_creation_input_tokens") or 0)
+    return {
+        "prompt_tokens": int(raw.get("input_tokens") or 0) + cache_read + cache_creation,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_creation,
+    }
+
+
+def _anthropic_final_usage(current: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
+    usage = dict(current)
+    usage["completion_tokens"] = int(raw.get("output_tokens") or 0)
+    return normalize_usage(usage)
+
+
 def stream_turn_openai_compat(
     run_id: str,
     response: requests.Response,
@@ -321,7 +338,7 @@ def stream_turn_openai_compat(
             continue
 
         if isinstance(chunk.get("usage"), dict):
-            sr.usage = chunk["usage"]
+            sr.usage = normalize_usage(chunk["usage"])
             _set_run_live_usage(
                 run_id,
                 int(sr.usage.get("prompt_tokens") or 0),
@@ -478,10 +495,10 @@ def stream_turn_anthropic(
 
         if etype == "message_start":
             msg_data = event.get("message") or {}
-            usage_data = msg_data.get("usage") or {}
-            sr.usage["prompt_tokens"] = int(usage_data.get("input_tokens") or 0)
-            sr.usage["cache_read_input_tokens"] = int(usage_data.get("cache_read_input_tokens") or 0)
-            sr.usage["cache_creation_input_tokens"] = int(usage_data.get("cache_creation_input_tokens") or 0)
+            # Anthropic reports cached input separately from fresh input.  Store
+            # prompt_tokens as the complete input context so all providers share
+            # the same meaning; retain cache fields for cost analysis.
+            sr.usage.update(_anthropic_input_usage(msg_data.get("usage") or {}))
 
         elif etype == "content_block_start":
             block = event.get("content_block") or {}
@@ -523,11 +540,7 @@ def stream_turn_anthropic(
         elif etype == "message_delta":
             delta = event.get("delta") or {}
             sr.finish_reason = delta.get("stop_reason") or sr.finish_reason
-            usage_out = event.get("usage") or {}
-            sr.usage["completion_tokens"] = int(usage_out.get("output_tokens") or 0)
-            sr.usage["total_tokens"] = (
-                (sr.usage.get("prompt_tokens") or 0) + (sr.usage.get("completion_tokens") or 0)
-            )
+            sr.usage = _anthropic_final_usage(sr.usage, event.get("usage") or {})
             _set_run_live_usage(
                 run_id,
                 int(sr.usage.get("prompt_tokens") or 0),

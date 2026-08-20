@@ -140,3 +140,28 @@ def test_saved_message_notifies_open_browser_conversation(monkeypatch):
         "message_id": 42,
         "source": "persistence",
     }]
+
+
+def test_saved_message_normalizes_total_and_keeps_cache_usage(monkeypatch):
+    monkeypatch.setattr(chat_persistence, "_upsert_session", lambda *_args: None)
+    monkeypatch.setattr(chat_persistence, "_append_usage_snapshot", lambda **_kwargs: None)
+    monkeypatch.setattr(chat_realtime, "notify_history_changed", lambda **_kwargs: None)
+    monkeypatch.setattr(bot_notify, "notify_saved_assistant_message", lambda *_args: None)
+
+    saved = chat_persistence._save_message(
+        FakeSession(),
+        7,
+        ChatMessageCreate(
+            role="assistant",
+            content="reply",
+            prompt_tokens=20,
+            completion_tokens=4,
+            total_tokens=3,
+            cache_read_tokens=11,
+        ),
+    )
+
+    assert saved.prompt_tokens == 20
+    assert saved.completion_tokens == 4
+    assert saved.total_tokens == 24
+    assert saved.cache_read_tokens == 11

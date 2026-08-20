@@ -102,8 +102,6 @@ def _ai_kind_for_config(session: Session, user_id: int, ai_config_id: int) -> st
             AssistantAIConfig.id == int(ai_config_id),
         )
     ).first()
-    if row and row.ai_role == "assistant_admin":
-        return "assistant"
     return "core"
 
 

@@ -232,7 +232,7 @@ def get_ai_task_jobs(
         if not sid.startswith("session_task_"):
             continue
         prefix = sid.split("_g")[0] if "_g" in sid else sid
-        task_tokens_by_prefix[prefix] = task_tokens_by_prefix.get(prefix, 0) + int(msg.total_tokens or 0)
+        task_tokens_by_prefix[prefix] = task_tokens_by_prefix.get(prefix, 0) + msg.effective_total_tokens
 
     try:
         from api.chat_runtime.run_state import _RUN_LIVE_STATE, _RUN_STATE_LOCK  # type: ignore

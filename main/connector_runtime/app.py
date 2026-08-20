@@ -82,6 +82,14 @@ class BotVerifyCodeRequest(BaseModel):
     connection_ref: str = ""
 
 
+class DeviceUpdateBroadcastRequest(BaseModel):
+    product_id: str
+    target_id: str
+    latest_version: str
+    mandatory: bool = False
+    release_notes: str = ""
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     from api.runtime.health import state_for
@@ -301,6 +309,11 @@ def create_app() -> FastAPI:
     from connector_runtime.health_detail import connector_health_detail
 
     router.include_router(build_health_router("connector", detail_provider=connector_health_detail))
+
+    @router.post("/device-updates/broadcast")
+    async def broadcast_device_update(req: DeviceUpdateBroadcastRequest) -> Dict[str, Any]:
+        await sio.emit("device:update-available", req.model_dump())
+        return {"ok": True}
 
     @router.get("/bot/statuses")
     def bot_statuses() -> Dict[str, Any]:

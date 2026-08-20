@@ -1,0 +1,24 @@
+[Unit]
+Description=HeySure independent host recovery plane
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=/www/server/panel/data/compose/heysureai2
+Environment=PYTHONUNBUFFERED=1
+Environment=HEYSURE_COMPOSE_DIR=/www/server/panel/data/compose/heysureai2
+Environment=HEYSURE_RESCUE_HOST=0.0.0.0
+Environment=HEYSURE_RESCUE_PORT=58152
+ExecStart=/usr/bin/python3 /www/server/panel/data/compose/heysureai2/deploy/server/other/scripts/host_rescue.py
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

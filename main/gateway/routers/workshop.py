@@ -139,9 +139,9 @@ def update_workshop_binding(
     if (
         not is_toolbox
         and bool(payload.bound)
-        and str(cfg.ai_role or "") not in ("digital_member", "assistant_admin")
+        and str(cfg.ai_role or "") != "digital_member"
     ):
-        raise HTTPException(status_code=400, detail="图书馆只能绑定数字成员或辅助管理员")
+        raise HTTPException(status_code=400, detail="图书馆只能绑定数字成员")
     stored = set_workshop_binding(
         user.id, device_id, cfg.id, bound=bool(payload.bound), single=False
     )

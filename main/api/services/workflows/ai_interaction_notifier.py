@@ -23,7 +23,7 @@ from .ai_interaction import AI_REVIEW_TYPES, ai_review_payload
 
 
 def _ai_kind(config: AssistantAIConfig) -> str:
-    return "assistant" if config.ai_role == "assistant_admin" else "core"
+    return "core"
 
 
 def _notice_content(session: Session, run: WorkflowRun, item: WorkflowConfirmation) -> str:

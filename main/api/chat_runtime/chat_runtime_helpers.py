@@ -41,7 +41,7 @@ def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_
     rows = session.exec(
         select(AssistantAIConfig).where(
             AssistantAIConfig.user_id == user_id,
-            AssistantAIConfig.ai_role.in_(["digital_member", "assistant_admin"]),
+            AssistantAIConfig.ai_role == "digital_member",
         ).order_by(AssistantAIConfig.id.asc())
     ).all()
     lines = []
@@ -53,9 +53,7 @@ def _digital_society_roster_text(session: Session, user_id: int, self_ai_config_
         if cfg_id == int(self_ai_config_id):
             self_name = str(cfg.name or "").strip()
             continue
-        if str(cfg.ai_role or "").strip() == "assistant_admin":
-            label = "辅助管理员"
-        elif str(cfg.digital_member_role or "").strip() == "manager":
+        if str(cfg.digital_member_role or "").strip() == "manager":
             label = "数字成员·管理者"
         else:
             label = "数字成员·普通成员"
@@ -267,7 +265,7 @@ def build_runtime_system_prompt_and_tools(
     if merged_system_prompt:
         system_prompt = merged_system_prompt
     # 数字社会成员名单：让每个 AI 知道同伴的 ai_config_id / 名字，否则
-    # message.send+to 无从填目标 AI 的 ID（成员查询工具是辅助管理员门槛）。
+    # message.send+to 无从填目标 AI 的 ID（名单直接注入上下文）。
     if ai_config_id is not None:
         try:
             roster_text = _digital_society_roster_text(session, uid, int(ai_config_id))
@@ -516,7 +514,9 @@ def _session_total_tokens(
     if ai_config_id is not None:
         stmt = stmt.where(ChatMessage.ai_config_id == ai_config_id)
     rows = session.exec(stmt).all()
-    persisted_total = int(sum(int(r.total_tokens or 0) for r in rows))
+    from api.services.chat.token_usage import canonical_message_total
+
+    persisted_total = int(sum(canonical_message_total(row) for row in rows))
 
     active_runs = session.exec(
         select(ChatRun).where(

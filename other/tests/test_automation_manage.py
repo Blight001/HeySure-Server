@@ -7,7 +7,6 @@ from tools.automation import (
     AUTOMATION_MANAGE_SCHEMA,
     _card_visible,
     _creation_tags,
-    _is_admin_role,
     _pending_ai_review_guidance,
     _updated_tags,
     _edit_card,
@@ -30,13 +29,6 @@ def _scoped_card(scope, allowed_ids, tags=None):
         access_scope=scope,
         allowed_ai_config_ids_json=json.dumps(allowed_ids),
     )
-
-
-def test_only_admin_and_assistant_admin_roles_have_global_card_access():
-    assert _is_admin_role("admin")
-    assert _is_admin_role("assistant_admin")
-    assert not _is_admin_role("digital_member")
-    assert not _is_admin_role("manager")
 
 
 def test_ai_created_card_gets_stable_owner_tag():

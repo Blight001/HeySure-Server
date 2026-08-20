@@ -10,7 +10,7 @@ from api.models import AIRuntimeStatus, AssistantAIConfig, ChatMessage, TokenUsa
 from api.core.config import DATA_DIR
 
 
-GENERIC_ASSISTANT_PROMPT = "你是一个辅助管理员，帮助用户处理项目任务。"
+GENERIC_MEMBER_PROMPT = "你是 HeySure 数字成员，帮助用户完成项目任务。"
 
 
 def _legacy_switch_file_paths(user_id: int) -> list[str]:
@@ -124,22 +124,6 @@ def _default_ai_specs():
             "sort_order": 1,
         },
         {
-            "switch_key": "assistant_worker_file",
-            "name": "辅助管理员·总督",
-            "description": "辅助主脑进行项目治理、归档与流程巡检。",
-            "ai_role": "assistant_admin",
-            "digital_member_role": "member",
-            "platform": "服务器",
-            "generation": 1,
-            "token_limit": 0,
-            "lifecycle_status": "working",
-            "current_behavior": "正在向主脑同步知识库...",
-            "project_id": "p-files",
-            "project_name": "文件项目管理系统",
-            "prompt": "",
-            "sort_order": 10,
-        },
-        {
             "switch_key": "assistant_beta_browser",
             "name": "贝塔",
             "description": "普通数字成员，负责浏览器端任务、网页操作与信息采集。",
@@ -209,7 +193,7 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
             )
             session.add(row)
             created.append(row)
-            _seed_persona_prompts.append((row, spec.get("prompt", GENERIC_ASSISTANT_PROMPT)))
+            _seed_persona_prompts.append((row, spec.get("prompt", GENERIC_MEMBER_PROMPT)))
 
     if created:
         session.commit()
@@ -241,7 +225,7 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
     ).all()
 
 
-def ensure_default_ai_for_user(session: Session, user_id: int) -> None:
+def ensure_default_members_for_user(session: Session, user_id: int) -> None:
     cfgs = ensure_default_configs(session, user_id)
     changed = False
     for cfg in cfgs:

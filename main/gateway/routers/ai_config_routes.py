@@ -25,7 +25,7 @@ from api.models import (
 )
 from api.services.access.access_guards import get_ai_config_or_404
 from .auth import get_current_user
-from ai_runtime.inference.ai_service import ensure_default_ai_for_user
+from ai_runtime.inference.ai_service import ensure_default_members_for_user
 from api.services.model_presets import normalize_model_presets
 from api.services.tasks.task_system import compact_system_auto_control
 from .ai_base import (
@@ -99,7 +99,7 @@ def list_ai_configs(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    ensure_default_ai_for_user(session, user.id)
+    ensure_default_members_for_user(session, user.id)
     rows = session.exec(
         select(AssistantAIConfig)
         .where(AssistantAIConfig.user_id == user.id)
@@ -148,10 +148,7 @@ def create_ai_config(
 ):
     user = get_current_user(authorization, session)
     switch_key = body.switch_key or f"assistant_{int(time.time() * 1000)}"
-    # 角色扁平化：不再支持新建辅助管理员——注册时系统已默认创建一个
-    # （ensure_default_configs），其余 AI 一律按数字成员对待。请求里传
-    # assistant_admin 会被静默归一为 digital_member；已存在的辅助管理员
-    # 不受影响（更新路径仍保留其角色）。
+    # 所有新建角色统一为数字成员。
     role = "digital_member"
     member_role = _normalize_digital_member_role(body.digital_member_role)
     token_limit = body.token_limit or 10000
@@ -305,10 +302,6 @@ def update_ai_config(
         )
     if "ai_role" in updates:
         updates["ai_role"] = _normalize_ai_role(updates.get("ai_role"))
-        # 角色扁平化：不允许把普通数字成员提升为辅助管理员（系统默认创建的
-        # 那一个保持原角色不受影响）。
-        if updates["ai_role"] == "assistant_admin" and str(cfg.ai_role or "") != "assistant_admin":
-            updates["ai_role"] = "digital_member"
     next_ai_role = updates.get("ai_role", cfg.ai_role)
     if "digital_member_role" in updates or next_ai_role == "digital_member":
         updates["digital_member_role"] = _normalize_digital_member_role(
@@ -322,8 +315,6 @@ def update_ai_config(
     updates.pop("mcp_tools", None)
     if "system_auto_control" in updates:
         updates["system_auto_control"] = compact_system_auto_control(updates["system_auto_control"])
-    if next_ai_role == "assistant_admin":
-        updates["token_limit"] = 0
     updates.pop("enabled", None)
     for key, value in updates.items():
         setattr(cfg, key, value)

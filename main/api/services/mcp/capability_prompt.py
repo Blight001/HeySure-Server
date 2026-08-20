@@ -8,6 +8,24 @@ from typing import Iterable
 from api.services.mcp.capability_types import DevicePromptMetadata, ScopedToolView
 
 
+TOOLBOX_WORKSPACE_GUIDANCE = (
+    "执行位置：工具箱中的 workspace.* 只操作 HeySure 服务器上当前 AI 的独立工作区，"
+    "不是用户电脑、浏览器插件、桌面端设备或宝塔主机的工作目录。"
+    "同名文件或相同相对路径也不代表两端文件相同，必须根据用户提到的设备、主机和路径自主选择对应工具组。"
+    "用户说“AI 工作区/工作区附件/Uploads/Screenshots/file_ref”或给出相对工作区路径时使用 workspace.*；"
+    "用户说“服务器主机/测试服/生产环境/宝塔/Docker/Compose/服务配置”或给出服务器绝对路径时，"
+    "使用 baota MCP（若本轮已提供）查看和修改，禁止用 workspace.run+command 猜测或代替服务器操作；"
+    "用户说“本机/电脑/桌面/浏览器/下载目录/设备端”时使用对应端侧设备 MCP。"
+    "只有已经进入服务器 AI 工作区的文件，才能由 AI 直接读取、用 workspace.file+manage 查看图片、"
+    "注册 file_ref 或通过 message.send+to 发给用户；设备端文件必须先用端侧上传/同步能力复制到服务器工作区。"
+)
+
+DEVICE_WORKSPACE_GUIDANCE = (
+    "执行位置：本组工具运行在该端侧设备；其 cwd、文件路径和工具箱中的服务器 AI 工作区彼此独立。"
+    "端侧文件不能直接交给 workspace.file+manage 或 message.send+to，需先上传/同步到服务器 AI 工作区。"
+)
+
+
 def render_scoped_tool_catalog(
     view: ScopedToolView,
     *,
@@ -20,7 +38,14 @@ def render_scoped_tool_catalog(
     library_names = set(LIBRARY_BOUND_TOOLS) & set(view.eligible_names)
     device_names = set().union(*view.device_tool_names.values()) if view.device_tool_names else set()
     toolbox_names = set(view.eligible_names) - library_names - device_names
-    sections = [_section("工具箱 MCP", toolbox_names, view)]
+    sections = [
+        _section(
+            "工具箱 MCP（服务器 AI 工作区）",
+            toolbox_names,
+            view,
+            guidance=TOOLBOX_WORKSPACE_GUIDANCE,
+        )
+    ]
     sections.extend(_device_sections(view))
     if library_names:
         sections.append(_section("图书馆 MCP", library_names, view))
@@ -47,6 +72,7 @@ def _device_sections(view: ScopedToolView) -> list[str]:
             names,
             view,
             description=metadata.purpose,
+            guidance=DEVICE_WORKSPACE_GUIDANCE,
         ))
     return sections
 
@@ -57,12 +83,16 @@ def _section(
     view: ScopedToolView,
     *,
     description: str = "",
+    guidance: str = "",
 ) -> str:
     lines = [_tool_line(name, view) for name in sorted(set(names)) if name in view.eligible]
     heading = [label]
     normalized_description = " ".join(str(description or "").split())
     if normalized_description:
         heading.append(f"  设备说明：{normalized_description}")
+    normalized_guidance = " ".join(str(guidance or "").split())
+    if normalized_guidance:
+        heading.append(f"  工作目录边界：{normalized_guidance}")
     heading.append("\n".join(lines) if lines else "- （当前无可用工具）")
     return "\n".join(heading)
 

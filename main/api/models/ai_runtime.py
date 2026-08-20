@@ -15,6 +15,12 @@ class TokenUsageSnapshot(SQLModel, table=True):
     total_tokens: int = Field(default=0)
     updated_at: float = Field(default_factory=time.time)
 
+    @property
+    def effective_total_tokens(self) -> int:
+        prompt = max(0, int(self.prompt_tokens or 0))
+        completion = max(0, int(self.completion_tokens or 0))
+        return prompt + completion if prompt or completion else max(0, int(self.total_tokens or 0))
+
 
 class AIRuntimeStatus(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

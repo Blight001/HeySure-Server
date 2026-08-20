@@ -238,7 +238,7 @@ def _resolve_qq_notification_recipient(
 
         ai_kind = str(run_ctx.get("ai_kind") or "").strip()
         if ai_kind not in {"assistant", "core"}:
-            ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
+            ai_kind = "core"
 
         if current_session_id:
             current = find_qq_bound_target(
@@ -611,7 +611,7 @@ def _resolve_target_ai_id_by_name(user_id: int, name: str) -> int:
         rows = session.exec(
             select(AssistantAIConfig).where(
                 AssistantAIConfig.user_id == user_id,
-                AssistantAIConfig.ai_role.in_(["digital_member", "assistant_admin"]),
+                AssistantAIConfig.ai_role == "digital_member",
             ).order_by(AssistantAIConfig.id.asc())
         ).all()
     alive = [row for row in rows if str(row.lifecycle_status or "") != "dead"]

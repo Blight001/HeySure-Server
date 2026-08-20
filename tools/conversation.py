@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import AssistantAIConfig, BotSessionRoute, ChatMessage, ChatSession, User
 from api.services.chat.chat_media import delete_message_media
-from api.services.chat.chat_persistence import _rebuild_usage_snapshots
+from api.services.chat.chat_persistence import _rebuild_usage_snapshots, canonical_total_sql
 from api.runtime.run_context import get_run_session_context
 
 
@@ -135,7 +135,7 @@ def _conversation_detail(user_id: int, args: Dict[str, Any], ai_config_id: Optio
         stats_stmt = _message_filter(
             select(
                 func.count(ChatMessage.id),
-                func.coalesce(func.sum(ChatMessage.total_tokens), 0),
+                func.coalesce(func.sum(canonical_total_sql(ChatMessage)), 0),
             ).where(ChatMessage.session_id == session_id),
             user_id,
             scope["ai_kind"],
@@ -473,7 +473,7 @@ def _list_conversations(user_id: int, args: Dict[str, Any], ai_config_id: Option
             select(
                 ChatMessage.session_id,
                 func.count(ChatMessage.id),
-                func.coalesce(func.sum(ChatMessage.total_tokens), 0),
+                func.coalesce(func.sum(canonical_total_sql(ChatMessage)), 0),
             ),
             user_id,
             scope["ai_kind"],

@@ -24,6 +24,8 @@ class WorkspaceFileToolTests(unittest.TestCase):
         self.assertIn(missing, detail)
         self.assertIn(self.root, detail)
         self.assertIn("workspace execution environment", detail)
+        self.assertIn("baota MCP", detail)
+        self.assertIn("endpoint MCP", detail)
         self.assertIn("server/device", detail)
 
     def test_missing_relative_cwd_reports_resolved_workspace_path(self):

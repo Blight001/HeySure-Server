@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlmodel import SQLModel, Session, select
 
-from ai_runtime.inference.ai_service import ensure_default_ai_for_user
+from ai_runtime.inference.ai_service import ensure_default_members_for_user
 from api.auth import get_password_hash
 from api.core.config import user_workspace_dir
 from api.database import get_session
@@ -114,7 +114,7 @@ def create_user(
 def _bootstrap_user(session: Session, user: User) -> None:
     try:
         ensure_user_workspace(user.id)
-        ensure_default_ai_for_user(session, user.id)
+        ensure_default_members_for_user(session, user.id)
     except Exception:
         logger.exception("post-create bootstrap failed for user %s", user.id)
 

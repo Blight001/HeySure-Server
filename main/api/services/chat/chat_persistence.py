@@ -12,6 +12,11 @@ from typing import Dict, Optional, Tuple
 from sqlmodel import Session, select
 
 from ...models import ChatMessage, ChatMessageCreate, ChatSession, TokenUsageSnapshot
+from .token_usage import (
+    canonical_message_total,
+    canonical_token_counts,
+    canonical_total_sql,
+)
 import logging
 
 
@@ -23,6 +28,11 @@ def _save_message(
     user_id: int,
     payload: ChatMessageCreate,
 ) -> ChatMessage:
+    prompt_tokens, completion_tokens, total_tokens = canonical_token_counts(
+        payload.prompt_tokens,
+        payload.completion_tokens,
+        payload.total_tokens,
+    )
     db_msg = ChatMessage(
         user_id=user_id,
         ai_config_id=payload.ai_config_id,
@@ -34,9 +44,10 @@ def _save_message(
         think=payload.think,
         tags=payload.tags or "",
         model=payload.model,
-        prompt_tokens=payload.prompt_tokens,
-        completion_tokens=payload.completion_tokens,
-        total_tokens=payload.total_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+        cache_read_tokens=payload.cache_read_tokens,
         system_prompt=payload.system_prompt,
         finish_reason=payload.finish_reason,
         latency=payload.latency,
@@ -103,9 +114,9 @@ def _rebuild_usage_snapshots(
 
     buckets: Dict[Tuple[Optional[int], str], Dict[str, int]] = {}
     for msg in messages:
-        prompt = int(msg.prompt_tokens or 0)
-        completion = int(msg.completion_tokens or 0)
-        total = int(msg.total_tokens or 0)
+        prompt, completion, total = canonical_token_counts(
+            msg.prompt_tokens, msg.completion_tokens, msg.total_tokens,
+        )
         if prompt <= 0 and completion <= 0 and total <= 0:
             continue
         bucket = datetime.utcfromtimestamp(msg.created_at).strftime("%Y-%m-%d")
@@ -170,6 +181,9 @@ def _append_usage_snapshot(
     completion_tokens: int,
     total_tokens: int,
 ) -> None:
+    prompt_tokens, completion_tokens, total_tokens = canonical_token_counts(
+        prompt_tokens, completion_tokens, total_tokens,
+    )
     if total_tokens <= 0 and prompt_tokens <= 0 and completion_tokens <= 0:
         return
     bucket = datetime.utcnow().strftime("%Y-%m-%d")

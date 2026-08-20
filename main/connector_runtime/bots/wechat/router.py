@@ -84,7 +84,7 @@ def _enabled_config(session: Session, config_id: int, connection_ref: str) -> Op
 
 
 def _session_identity(session: Session, cfg: AssistantAIConfig, config_id: int, incoming: IncomingMessage, connection_ref: str) -> tuple[str, str, str]:
-    ai_kind = "assistant" if cfg.ai_role == "assistant_admin" else "core"
+    ai_kind = "core"
     home_session_id = f"wechat_{config_id}_{connection_ref}_{incoming.sender}"
     session_id = get_active_session_id(
         session,

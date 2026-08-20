@@ -62,3 +62,34 @@ def test_openai_compat_accepts_buffered_native_tool_calls(monkeypatch):
     assert result.tool_calls[0]["id"] == "call_real"
     assert result.tool_calls[0]["tool"] == "todo.manage"
     assert result.tool_calls[0]["arguments"] == {"action": "list"}
+
+
+def test_openai_compat_repairs_inconsistent_provider_total(monkeypatch):
+    live_usage = []
+    _patch_live_state(monkeypatch, lambda *args: live_usage.append(args[1:]))
+    response = _Response({
+        "choices": [{
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 9, "total_tokens": 40},
+    })
+
+    result = chat_stream.stream_turn_openai_compat("run-bad-total", response, {})
+
+    assert result.usage["total_tokens"] == 109
+    assert (100, 9, 109) in live_usage
+
+
+def test_anthropic_usage_includes_cached_input_in_prompt_total():
+    usage = chat_stream._anthropic_input_usage({
+        "input_tokens": 12,
+        "cache_read_input_tokens": 80,
+        "cache_creation_input_tokens": 6,
+    })
+    usage = chat_stream._anthropic_final_usage(usage, {"output_tokens": 7})
+
+    assert usage["prompt_tokens"] == 98
+    assert usage["completion_tokens"] == 7
+    assert usage["total_tokens"] == 105
+    assert usage["cache_read_input_tokens"] == 80

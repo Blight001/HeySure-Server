@@ -20,18 +20,9 @@ def _load(raw: str, fallback: Any) -> Any:
         return fallback
 
 
-def _is_admin_role(role: Any) -> bool:
-    return str(role or "").strip() in {"admin", "assistant_admin"}
-
-
 def _admin_actor(session: Session, user_id: int, ai_config_id: Optional[int]) -> bool:
-    if not ai_config_id:
-        return True
-    config = session.exec(select(AssistantAIConfig).where(
-        AssistantAIConfig.id == int(ai_config_id),
-        AssistantAIConfig.user_id == user_id,
-    )).first()
-    return bool(config and _is_admin_role(config.ai_role))
+    _ = (session, user_id)
+    return not ai_config_id
 
 
 def _public_card_creator(session: Session, user_id: int, ai_config_id: Optional[int]) -> bool:
@@ -41,10 +32,7 @@ def _public_card_creator(session: Session, user_id: int, ai_config_id: Optional[
         AssistantAIConfig.id == int(ai_config_id),
         AssistantAIConfig.user_id == user_id,
     )).first()
-    return bool(config and (
-        _is_admin_role(config.ai_role)
-        or str(config.digital_member_role or "").strip().lower() == "manager"
-    ))
+    return bool(config and str(config.digital_member_role or "").strip().lower() == "manager")
 
 
 def _card_visible(card: WorkflowCard, ai_config_id: Optional[int]) -> bool:

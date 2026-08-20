@@ -185,6 +185,11 @@ class Settings(BaseSettings):
         default=10 * 1024 * 1024,
         description="Maximum size accepted by the temporary image upload endpoints.",
     )
+    device_release_max_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=1024,
+        description="Maximum installer size accepted by Device Hall admin uploads.",
+    )
     huawei_push_client_id: str = Field(
         default="",
         description="AppGallery Connect OAuth client/app ID for HMS Push Kit.",
