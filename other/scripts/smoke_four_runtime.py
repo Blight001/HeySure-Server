@@ -24,6 +24,7 @@ from other.tests.fixtures.simulated_agent import (
 
 
 TERMINAL = {"completed", "error", "timeout", "cancelled"}
+SIMULATED_DEVICE_ID = "ci-simulated-browser"
 
 
 def _request(method: str, url: str, **kwargs) -> requests.Response:
@@ -61,6 +62,69 @@ def _login_or_register(gateway: str, account: str, password: str) -> Dict[str, A
     return response.json()
 
 
+async def _disconnect_quietly(agent: SimulatedAgent) -> None:
+    try:
+        await agent.disconnect()
+    except Exception:
+        pass
+
+
+async def _connect_simulated_agent(
+    config: SimulatedAgentConfig,
+    connector: str,
+    token: str,
+    timeout: float,
+) -> SimulatedAgent:
+    agent = SimulatedAgent(config)
+    try:
+        await agent.connect(connector, token=token)
+        await agent.wait_until_registered(timeout=min(timeout, 10.0))
+        return agent
+    except Exception:
+        await _disconnect_quietly(agent)
+        raise
+
+
+async def _successful_dispatch(
+    config: SimulatedAgentConfig,
+    connector: str,
+    token: str,
+    internal_headers: Dict[str, str],
+    user_id: int,
+    ai_config_id: int,
+    timeout: float,
+) -> None:
+    agent = await _connect_simulated_agent(config, connector, token, timeout)
+    try:
+        payload = await _dispatch_and_wait(
+            connector, internal_headers, user_id, ai_config_id, timeout,
+        )
+        _assert_success(payload)
+    finally:
+        await _disconnect_quietly(agent)
+
+
+async def _timeout_dispatch(
+    config: SimulatedAgentConfig,
+    connector: str,
+    token: str,
+    internal_headers: Dict[str, str],
+    user_id: int,
+    ai_config_id: int,
+    timeout: float,
+) -> None:
+    silent_config = replace(config, behavior=AgentBehavior.NO_RESPONSE)
+    agent = await _connect_simulated_agent(silent_config, connector, token, timeout)
+    try:
+        payload = await _dispatch_and_wait(
+            connector, internal_headers, user_id, ai_config_id, timeout, expire=True,
+        )
+        if payload["status"] != "timeout" or payload["success"] is not False:
+            raise RuntimeError(f"silent dispatch did not time out: {payload}")
+    finally:
+        await _disconnect_quietly(agent)
+
+
 async def _agent_round_trip(
     gateway: str,
     connector: str,
@@ -77,74 +141,37 @@ async def _agent_round_trip(
     ai_config_id = int(configs.json()[0]["id"])
 
     config = SimulatedAgentConfig(
-        device_id="ci-simulated-browser",
+        device_id=SIMULATED_DEVICE_ID,
         platform="browser-extension-ci",
         capabilities=("browser_navigate",),
     )
-    first = SimulatedAgent(config)
-    await first.connect(connector, token=token)
-    await first.wait_until_registered(timeout=min(timeout, 10.0))
-
-    bound = await asyncio.to_thread(
-        _request,
-        "POST",
-        f"{gateway}/api/devices/bind",
-        headers=auth,
-        json={"deviceId": config.device_id, "aiConfigId": ai_config_id},
-    )
-    bound.raise_for_status()
-    await first.disconnect()
+    first = await _connect_simulated_agent(config, connector, token, timeout)
+    try:
+        bound = await asyncio.to_thread(
+            _request,
+            "POST",
+            f"{gateway}/api/devices/bind",
+            headers=auth,
+            json={"deviceId": config.device_id, "aiConfigId": ai_config_id},
+        )
+        bound.raise_for_status()
+    finally:
+        await _disconnect_quietly(first)
 
     # Binding is shared through PostgreSQL; reconnect proves the Connector
     # process independently observes it instead of relying on Gateway memory.
-    agent = SimulatedAgent(config)
-    await agent.connect(connector, token=token)
-    await agent.wait_until_registered(timeout=min(timeout, 10.0))
-    try:
-        payload = await _dispatch_and_wait(
-            connector,
-            internal_headers,
-            user_id,
-            ai_config_id,
-            timeout,
-        )
-        _assert_success(payload)
-    finally:
-        await agent.disconnect()
+    await _successful_dispatch(
+        config, connector, token, internal_headers, user_id, ai_config_id, timeout,
+    )
 
     if not fault_matrix:
         return
-    silent = SimulatedAgent(replace(config, behavior=AgentBehavior.NO_RESPONSE))
-    await silent.connect(connector, token=token)
-    await silent.wait_until_registered(timeout=min(timeout, 10.0))
-    try:
-        timed_out = await _dispatch_and_wait(
-            connector,
-            internal_headers,
-            user_id,
-            ai_config_id,
-            timeout,
-            expire=True,
-        )
-        if timed_out["status"] != "timeout" or timed_out["success"] is not False:
-            raise RuntimeError(f"silent dispatch did not time out: {timed_out}")
-    finally:
-        await silent.disconnect()
-
-    recovered = SimulatedAgent(config)
-    await recovered.connect(connector, token=token)
-    await recovered.wait_until_registered(timeout=min(timeout, 10.0))
-    try:
-        payload = await _dispatch_and_wait(
-            connector,
-            internal_headers,
-            user_id,
-            ai_config_id,
-            timeout,
-        )
-        _assert_success(payload)
-    finally:
-        await recovered.disconnect()
+    await _timeout_dispatch(
+        config, connector, token, internal_headers, user_id, ai_config_id, timeout,
+    )
+    await _successful_dispatch(
+        config, connector, token, internal_headers, user_id, ai_config_id, timeout,
+    )
 
 
 async def _dispatch_and_wait(
@@ -205,6 +232,26 @@ def _assert_success(payload: Dict[str, Any]) -> None:
         raise RuntimeError(f"unexpected dispatch result: {payload}")
 
 
+def _cleanup_simulated_device(gateway: str, token: str, timeout: float) -> None:
+    auth = {"Authorization": f"Bearer {token}"}
+    deadline = time.monotonic() + max(1.0, min(timeout, 10.0))
+    last_error = "not attempted"
+    while time.monotonic() < deadline:
+        try:
+            response = _request(
+                "DELETE",
+                f"{gateway}/api/devices/{SIMULATED_DEVICE_ID}",
+                headers=auth,
+            )
+            if response.status_code == 200:
+                return
+            last_error = f"HTTP {response.status_code}: {response.text[:200]}"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(0.25)
+    raise RuntimeError(f"simulated device cleanup failed: {last_error}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gateway", default="http://127.0.0.1:3000")
@@ -218,6 +265,8 @@ def main() -> int:
     gateway = args.gateway.rstrip("/")
     connector = args.connector.rstrip("/")
     headers = {"Authorization": f"Bearer {args.internal_token}"}
+    login = None
+    failure = None
     try:
         _wait_ready(f"{gateway}/internal/health/ready", headers, args.timeout)
         _wait_ready(f"{connector}/internal/health/ready", headers, args.timeout)
@@ -233,7 +282,19 @@ def main() -> int:
             )
         )
     except Exception as exc:
-        print(f"four-runtime smoke failed: {exc}")
+        failure = exc
+    finally:
+        if login:
+            try:
+                _cleanup_simulated_device(
+                    gateway, str(login["access_token"]), args.timeout,
+                )
+            except Exception as cleanup_exc:
+                failure = RuntimeError(
+                    f"{failure}; {cleanup_exc}" if failure else str(cleanup_exc)
+                )
+    if failure:
+        print(f"four-runtime smoke failed: {failure}")
         return 1
     suffix = " + timeout/disconnect/reconnect" if args.fault_matrix else ""
     print(f"four-runtime smoke passed: login + simulated endpoint dispatch{suffix}")
