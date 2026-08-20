@@ -35,6 +35,7 @@ import tkinter as tk  # 仅用于少量兼容（如 clipboard、after）
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+WORKSPACE_DIR = ROOT_DIR.parent
 SERVER_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
 ENV_FILE = ROOT_DIR / ".env"
@@ -47,11 +48,14 @@ POSTGRES_RECOMMENDED = "PostgreSQL 16"
 PYTHON_RECOMMENDED = "Python 3.11 或 3.12"
 NODE_RECOMMENDED = "Node.js 22 LTS 或更新的 LTS 版本"
 
-# 5 个服务面板在“全部启动”时会同时在各自后台线程里调用 netstat/tasklist/taskkill
+# 7 个服务面板在“全部启动”时会同时在各自后台线程里调用 netstat/tasklist/taskkill
 # 探测端口占用。并发 subprocess.Popen 曾在实测中偶发把启动器自身进程带崩（Windows 下
 # 这批 Python/venv 组合对多线程同时创建子进程不够稳固），因此这里把所有端口探测/
 # 结束进程相关的 subprocess 调用串行化，避免多线程同时 spawn 子进程。
 _PORT_TOOL_LOCK = threading.Lock()
+_SCHEMA_MIGRATION_LOCK = threading.Lock()
+_SCHEMA_MIGRATION_READY = False
+_SCHEMA_MIGRATION_ERROR = ""
 
 
 def _parse_env_file(path: Path) -> Dict[str, str]:
@@ -91,6 +95,14 @@ def build_env() -> Dict[str, str]:
     env.setdefault("AI_RUNTIME_URL", "http://127.0.0.1:3003")
     env.setdefault("HEYSURE_API_GATEWAY_URL", "http://127.0.0.1:3000")
     env.setdefault("SERVER_URL", "http://127.0.0.1:3000")
+    env.setdefault("HEYSURE_REPO_ROOT", str(WORKSPACE_DIR))
+    env.setdefault("HEYSURE_REPO_UPDATER_HOST", "127.0.0.1")
+    env.setdefault("HEYSURE_REPO_UPDATER_PORT", "58151")
+    if not env.get("HEYSURE_REPO_UPDATER_TOKEN"):
+        env["HEYSURE_REPO_UPDATER_TOKEN"] = env.get("HEYSURE_INTERNAL_TOKEN", "")
+    env.setdefault("HEYSURE_COMPOSE_DIR", str(WORKSPACE_DIR))
+    env.setdefault("HEYSURE_RESCUE_HOST", "127.0.0.1")
+    env.setdefault("HEYSURE_RESCUE_PORT", "58152")
     env.setdefault("AI_DISPATCH_MODE", "remote")
     env.setdefault("HEYSURE_SERVER_RELOAD", "0")
     env["PYTHONUNBUFFERED"] = "1"
@@ -102,6 +114,58 @@ def build_env() -> Dict[str, str]:
 
 def get_python_executable() -> str:
     return str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
+
+
+def reset_schema_migration_state() -> None:
+    global _SCHEMA_MIGRATION_READY, _SCHEMA_MIGRATION_ERROR
+    with _SCHEMA_MIGRATION_LOCK:
+        _SCHEMA_MIGRATION_READY = False
+        _SCHEMA_MIGRATION_ERROR = ""
+
+
+def ensure_schema_current(env: Dict[str, str]) -> Tuple[bool, str]:
+    """Run the deployment-time Alembic step once before any Runtime starts."""
+    global _SCHEMA_MIGRATION_READY, _SCHEMA_MIGRATION_ERROR
+    with _SCHEMA_MIGRATION_LOCK:
+        if _SCHEMA_MIGRATION_READY:
+            return True, "数据库结构已是最新版本"
+        if _SCHEMA_MIGRATION_ERROR:
+            return False, _SCHEMA_MIGRATION_ERROR
+        try:
+            backup = subprocess.run(
+                [get_python_executable(), "-u", "-m", "other.scripts.backup_postgres", "--if-pending"],
+                cwd=str(SERVER_DIR),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+                check=False,
+            )
+            if backup.returncode:
+                _SCHEMA_MIGRATION_ERROR = "数据库备份失败，已停止迁移"
+                return False, _SCHEMA_MIGRATION_ERROR
+            result = subprocess.run(
+                [get_python_executable(), "-u", "-m", "api.db", "migrate"],
+                cwd=str(SERVER_DIR),
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            _SCHEMA_MIGRATION_ERROR = "数据库备份或迁移命令不可用/执行超时"
+            return False, _SCHEMA_MIGRATION_ERROR
+        if result.returncode:
+            tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:]
+            _SCHEMA_MIGRATION_ERROR = "数据库迁移失败" + (f"：{tail[0]}" if tail else "")
+            return False, _SCHEMA_MIGRATION_ERROR
+        _SCHEMA_MIGRATION_READY = True
+        return True, "Alembic 数据库迁移完成"
 
 
 def _command_exists(name: str) -> bool:
@@ -400,6 +464,7 @@ class ServiceSpec:
     requires_database: bool = True
     open_url: Optional[str] = None
     port: Optional[str] = None
+    required_env: Optional[str] = None
 
 
 SERVICES: tuple[ServiceSpec, ...] = (
@@ -417,6 +482,28 @@ SERVICES: tuple[ServiceSpec, ...] = (
         requires_database=False,
         open_url=WEB_URL,
         port="58150",
+    ),
+    ServiceSpec(
+        "updater",
+        "📦 宿主更新器",
+        "#06b6d4",
+        launch_mode="command",
+        command=(sys.executable, "-u", str(SERVER_DIR / "other" / "scripts" / "repo-updater.py")),
+        cwd=WORKSPACE_DIR,
+        requires_database=False,
+        port="58151",
+        required_env="HEYSURE_REPO_UPDATER_TOKEN",
+    ),
+    ServiceSpec(
+        "rescue",
+        "🛟 宿主恢复",
+        "#ef4444",
+        launch_mode="command",
+        command=(sys.executable, "-u", str(SERVER_DIR / "other" / "scripts" / "host_rescue.py")),
+        cwd=WORKSPACE_DIR,
+        requires_database=False,
+        port="58152",
+        required_env="HEYSURE_RESCUE_TOKEN",
     ),
 )
 
@@ -679,7 +766,9 @@ class ServicePane:
             self.append("服务已经在运行", "warning")
             return
 
-        self.append("正在准备启动（检查环境/DB/端口）...", "meta")
+        if self.spec.key == "gateway":
+            reset_schema_migration_state()
+        self.append("正在准备启动（检查环境/DB/迁移/端口）...", "meta")
         self.set_status("启动中...", "#d97706")
         # Offload potentially blocking DB check, node check, port release/wait to a thread
         # so the launcher UI does not freeze ("卡死").
@@ -695,6 +784,11 @@ class ServicePane:
             self.controller.root.after(0, self._update_toggle_button)
 
         env = build_env()
+        if self.spec.required_env and not env.get(self.spec.required_env):
+            ui_set_status("缺少配置", "#b91c1c")
+            ui_append(f"缺少 {self.spec.required_env}，该独立服务未启动。", "error")
+            ui_update_toggle()
+            return
         if self.spec.requires_database:
             ok, detail = _database_is_reachable(env.get("DATABASE_URL", ""))
             if not ok:
@@ -708,6 +802,14 @@ class ServicePane:
                 ))
                 ui_update_toggle()
                 return
+            ui_append("正在检查并应用 Alembic 数据库迁移...", "meta")
+            migrated, migration_detail = ensure_schema_current(env)
+            if not migrated:
+                ui_set_status("迁移失败", "#b91c1c")
+                ui_append(migration_detail, "error")
+                ui_update_toggle()
+                return
+            ui_append(migration_detail, "success")
 
         if self.spec.key == "web":
             missing = []

@@ -128,6 +128,21 @@ def _apply(document: Dict[str, Any], operation: Dict[str, Any]) -> str:
     return str(operation.get("path"))
 
 
+def _patch_base(session: Session, card: WorkflowCard, base_version_id: str, operation_count: int) -> WorkflowCardVersion:
+    if not base_version_id or card.latest_version_id != base_version_id:
+        raise WorkflowValidationError([
+            "card changed since base_version_id; "
+            f"supplied={base_version_id or '<missing>'}; current_latest_version_id={card.latest_version_id or '<none>'}; "
+            "reload and retry with base_version_id=<current_latest_version_id>"
+        ])
+    if not 1 <= operation_count <= 100:
+        raise WorkflowValidationError(["patch requires 1..100 operations"])
+    version = session.get(WorkflowCardVersion, base_version_id)
+    if not version or version.card_id != card.id:
+        raise WorkflowValidationError(["base card version does not exist"])
+    return version
+
+
 def patch_card_definition(
     session: Session,
     *,
@@ -139,17 +154,7 @@ def patch_card_definition(
 ) -> Dict[str, Any]:
     ops = list(operations)
     card = _card_for_change(session, card, dry_run=dry_run)
-    if not base_version_id or card.latest_version_id != base_version_id:
-        raise WorkflowValidationError([
-            "card changed since base_version_id; "
-            f"supplied={base_version_id or '<missing>'}; current_latest_version_id={card.latest_version_id or '<none>'}; "
-            "reload and retry with base_version_id=<current_latest_version_id>"
-        ])
-    if not 1 <= len(ops) <= 100:
-        raise WorkflowValidationError(["patch requires 1..100 operations"])
-    version = session.get(WorkflowCardVersion, base_version_id)
-    if not version or version.card_id != card.id:
-        raise WorkflowValidationError(["base card version does not exist"])
+    version = _patch_base(session, card, base_version_id, len(ops))
     definition = _load(version.definition_json)
     changed_paths = [_apply(definition, item) for item in ops if isinstance(item, dict)]
     if len(changed_paths) != len(ops):

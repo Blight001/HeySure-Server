@@ -215,108 +215,113 @@ def _card_access(session: Session, user_id: int, scope: object, allowed_ids: obj
     return normalized_scope, requested if normalized_scope == "selected" else []
 
 
+def _mcp_tool_ref(step: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(step, dict):
+        return None
+    if step.get("type") != "mcp":
+        return None
+    ref = step.get("toolRef")
+    return ref if isinstance(ref, dict) else {}
+
+
+def _live_contract_issue(
+    session: Session, user_id: int, definition: Dict[str, Any], contracts: Dict[str, Any],
+    step_id: str, step: Any, snapshots: Dict[str, Tuple[DevicePresence, Dict[str, Any]]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    ref = _mcp_tool_ref(step)
+    if ref is None:
+        return None, None
+    device_id = str(ref.get("deviceId") or definition.get("defaultDeviceId") or "").strip()
+    try:
+        if device_id not in snapshots:
+            snapshots[device_id] = _device_snapshot(session, user_id, device_id)
+        _, live_defs = snapshots[device_id]
+    except WorkflowValidationError:
+        return None, device_id
+    live = live_defs.get(str(ref.get("name") or "").strip())
+    contract = contracts.get(step_id) if isinstance(contracts, dict) else None
+    contract = contract if isinstance(contract, dict) else {}
+    published = str(contract.get("schemaDigest") or ref.get("schemaDigest") or "")
+    schema = live.get("input_schema") if isinstance(live, dict) and isinstance(live.get("input_schema"), dict) else None
+    current = schema_digest(schema) if schema is not None else ""
+    return _schema_issue(step_id, ref, device_id, published, current, schema), None
+
+
+def _schema_issue(step_id: str, ref: Dict[str, Any], device_id: str, published: str, current: str, schema: Any) -> Optional[Dict[str, Any]]:
+    if schema is not None and bool(published) and published == current:
+        return None
+    return {
+        "stepId": step_id, "tool": str(ref.get("name") or "").strip(), "deviceId": device_id,
+        "publishedDigest": published, "currentDigest": current or None,
+        "reason": "TOOL_NOT_AVAILABLE" if schema is None else "SCHEMA_CHANGED",
+    }
+
+
+def _live_contract_status(session: Session, row: WorkflowCard, version: WorkflowCardVersion) -> Dict[str, Any]:
+    definition = _load(version.definition_json, {})
+    contracts = _load(version.tool_contracts_json, {})
+    snapshots: Dict[str, Tuple[DevicePresence, Dict[str, Any]]] = {}
+    incompatible: List[Dict[str, Any]] = []
+    offline: List[str] = []
+    for step_id, step in definition.get("steps", {}).items():
+        issue, offline_id = _live_contract_issue(session, row.user_id, definition, contracts, step_id, step, snapshots)
+        if issue:
+            incompatible.append(issue)
+        if offline_id:
+            offline.append(offline_id)
+    offline = list(dict.fromkeys(offline))
+    return {
+        "contracts_valid": not incompatible and not offline, "device_online": not offline,
+        "runnable": not incompatible and not offline, "incompatibleSteps": incompatible,
+        "offlineDeviceIds": offline, "repairAvailable": bool(incompatible) and not offline,
+        "repairAction": "refresh_contracts" if incompatible and not offline else None,
+        "valid": not incompatible and not offline,
+        "errorCode": "TOOL_SCHEMA_INCOMPATIBLE" if incompatible else ("DEVICE_OFFLINE" if offline else None),
+    }
+
+
 def validate_card(
-    row: WorkflowCard,
-    session: Optional[Session] = None,
-    *,
-    contract_check: str = "live",
-    version_id: Optional[str] = None,
+    row: WorkflowCard, session: Optional[Session] = None, *,
+    contract_check: str = "live", version_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Validate syntax and, by default, the frozen contracts against live devices."""
     compiled = compile_definition(_load(row.draft_definition_json, {}))
     result: Dict[str, Any] = {
-        "valid": True,
-        "definition_valid": True,
-        "contracts_valid": None,
-        "device_online": None,
-        "runnable": True,
-        "digest": compiled["digest"],
+        "valid": True, "definition_valid": True, "contracts_valid": None,
+        "device_online": None, "runnable": True, "digest": compiled["digest"],
         "warnings": compiled["warnings"],
     }
     if contract_check == "definition" or session is None:
         return result
     if contract_check != "live":
         raise WorkflowValidationError(["contract_check must be live or definition"])
-    selected_id = str(version_id or row.latest_version_id or "")
-    version = session.get(WorkflowCardVersion, selected_id)
+    version = session.get(WorkflowCardVersion, str(version_id or row.latest_version_id or ""))
     if not version or version.card_id != row.id:
         raise WorkflowValidationError(["card version does not exist"])
-    definition = _load(version.definition_json, {})
-    contracts = _load(version.tool_contracts_json, {})
-    incompatible: List[Dict[str, Any]] = []
-    offline: List[str] = []
-    snapshots: Dict[str, Tuple[DevicePresence, Dict[str, Any]]] = {}
-    for step_id, step in definition.get("steps", {}).items():
-        if not isinstance(step, dict) or step.get("type") != "mcp":
-            continue
-        ref = step.get("toolRef") if isinstance(step.get("toolRef"), dict) else {}
-        device_id = str(ref.get("deviceId") or definition.get("defaultDeviceId") or "").strip()
-        name = str(ref.get("name") or "").strip()
-        try:
-            if device_id not in snapshots:
-                snapshots[device_id] = _device_snapshot(session, row.user_id, device_id)
-            device, live_defs = snapshots[device_id]
-        except WorkflowValidationError:
-            offline.append(device_id)
-            continue
-        live = live_defs.get(name)
-        contract = contracts.get(step_id) if isinstance(contracts, dict) else None
-        contract = contract if isinstance(contract, dict) else {}
-        published = str(contract.get("schemaDigest") or ref.get("schemaDigest") or "")
-        current_schema = live.get("input_schema") if isinstance(live, dict) and isinstance(live.get("input_schema"), dict) else None
-        current = schema_digest(current_schema) if current_schema is not None else ""
-        if current_schema is None or not published or published != current:
-            incompatible.append({
-                "stepId": step_id, "tool": name, "deviceId": device_id,
-                "publishedDigest": published, "currentDigest": current or None,
-                "reason": "TOOL_NOT_AVAILABLE" if current_schema is None else "SCHEMA_CHANGED",
-            })
+    result.update(_live_contract_status(session, row, version))
     result.update({
-        "contracts_valid": not incompatible and not offline,
-        "device_online": not offline,
-        "runnable": not incompatible and not offline,
-        "incompatibleSteps": incompatible,
-        "offlineDeviceIds": list(dict.fromkeys(offline)),
-        "repairAvailable": bool(incompatible) and not offline,
-        "repairAction": "refresh_contracts" if incompatible and not offline else None,
-        "resolved_version_id": version.id,
-        "latest_version_id": row.latest_version_id,
+        "resolved_version_id": version.id, "latest_version_id": row.latest_version_id,
         "is_latest": version.id == row.latest_version_id,
     })
-    if incompatible:
-        result.update({"valid": False, "errorCode": "TOOL_SCHEMA_INCOMPATIBLE"})
-    elif offline:
-        result.update({"valid": False, "errorCode": "DEVICE_OFFLINE"})
+    if result.get("errorCode") is None:
+        result.pop("errorCode", None)
     return result
 
-
-def refresh_tool_contracts(
-    session: Session,
-    *,
-    row: WorkflowCard,
-    user_id: int,
-    base_version_id: str,
-    tools: Optional[List[str]] = None,
-    step_ids: Optional[List[str]] = None,
-    only_incompatible: bool = False,
-    dry_run: bool = False,
-) -> Dict[str, Any]:
-    """Refresh frozen MCP schemas without requiring callers to patch every digest."""
-    if not base_version_id and only_incompatible:
-        base_version_id = str(row.latest_version_id or "")
-    if not base_version_id or row.latest_version_id != base_version_id:
+def _refresh_base(session: Session, row: WorkflowCard, base_version_id: str, only_incompatible: bool) -> Tuple[str, WorkflowCardVersion]:
+    selected = base_version_id or (str(row.latest_version_id or "") if only_incompatible else "")
+    if not selected or row.latest_version_id != selected:
         raise WorkflowValidationError([
             "card changed since base_version_id; "
-            f"supplied={base_version_id or '<missing>'}; current_latest_version_id={row.latest_version_id or '<none>'}; "
+            f"supplied={selected or '<missing>'}; current_latest_version_id={row.latest_version_id or '<none>'}; "
             "retry with action=refresh_contracts, base_version_id=<current_latest_version_id> "
             "or omit base_version_id when only_incompatible=true"
         ])
-    base = session.get(WorkflowCardVersion, base_version_id)
+    base = session.get(WorkflowCardVersion, selected)
     if not base or base.card_id != row.id:
         raise WorkflowValidationError(["base card version does not exist"])
-    definition = deepcopy(_load(base.definition_json, {}))
-    wanted_tools = {str(x) for x in (tools or []) if str(x)}
-    wanted_steps = {str(x) for x in (step_ids or []) if str(x)}
+    return selected, base
+
+
+def _clear_refresh_contracts(definition: Dict[str, Any], user_id: int, wanted_tools: set[str], wanted_steps: set[str], only_incompatible: bool) -> List[str]:
     changed: List[str] = []
     for step_id, step in definition.get("steps", {}).items():
         if not isinstance(step, dict) or step.get("type") != "mcp":
@@ -326,29 +331,42 @@ def refresh_tool_contracts(
             continue
         if wanted_steps and step_id not in wanted_steps:
             continue
-        if only_incompatible:
-            live_digest = ""
-            try:
-                live_defs = tool_defs_for_agent(user_id, str(ref.get("deviceId") or definition.get("defaultDeviceId") or ""))
-                live = live_defs.get(str(ref.get("name") or ""))
-                schema = live.get("input_schema") if isinstance(live, dict) else None
-                live_digest = schema_digest(schema) if isinstance(schema, dict) else ""
-            except Exception:
-                live_digest = ""
-            if live_digest and live_digest == str(ref.get("schemaDigest") or ""):
-                continue
+        if only_incompatible and _contract_is_current(user_id, definition, ref):
+            continue
         if ref.pop("schemaDigest", None) is not None:
             changed.append(step_id)
         ref.pop("provider", None)
+    return changed
+
+
+def _contract_is_current(user_id: int, definition: Dict[str, Any], ref: Dict[str, Any]) -> bool:
+    try:
+        live_defs = tool_defs_for_agent(user_id, str(ref.get("deviceId") or definition.get("defaultDeviceId") or ""))
+        live = live_defs.get(str(ref.get("name") or ""))
+        schema = live.get("input_schema") if isinstance(live, dict) else None
+        live_digest = schema_digest(schema) if isinstance(schema, dict) else ""
+    except Exception:
+        return False
+    return bool(live_digest and live_digest == str(ref.get("schemaDigest") or ""))
+
+
+def refresh_tool_contracts(
+    session: Session, *, row: WorkflowCard, user_id: int, base_version_id: str,
+    tools: Optional[List[str]] = None, step_ids: Optional[List[str]] = None,
+    only_incompatible: bool = False, dry_run: bool = False,
+) -> Dict[str, Any]:
+    base_version_id, base = _refresh_base(session, row, base_version_id, only_incompatible)
+    definition = deepcopy(_load(base.definition_json, {}))
+    wanted_tools = {str(x) for x in (tools or []) if str(x)}
+    wanted_steps = {str(x) for x in (step_ids or []) if str(x)}
+    changed = _clear_refresh_contracts(definition, user_id, wanted_tools, wanted_steps, only_incompatible)
     if (wanted_tools or wanted_steps) and not changed:
         raise WorkflowValidationError(["refresh scope did not match any step with a frozen contract"])
-    device_ids = _load(base.contract_device_ids_json, [])
-    contracts, bound_ids = _snapshot_contracts(session, user_id, definition, device_ids=device_ids)
-    refreshed = [
-        {"stepId": step_id, "tool": definition["steps"][step_id]["toolRef"]["name"],
-         "schemaDigest": definition["steps"][step_id]["toolRef"].get("schemaDigest")}
-        for step_id in changed
-    ]
+    contracts, bound_ids = _snapshot_contracts(session, user_id, definition, device_ids=_load(base.contract_device_ids_json, []))
+    refreshed = [{
+        "stepId": step_id, "tool": definition["steps"][step_id]["toolRef"]["name"],
+        "schemaDigest": definition["steps"][step_id]["toolRef"].get("schemaDigest"),
+    } for step_id in changed]
     result = {
         "card_id": row.id, "base_version_id": base_version_id, "dry_run": dry_run,
         "committed": False, "changed_step_ids": changed, "contracts_refreshed": refreshed,
@@ -356,157 +374,15 @@ def refresh_tool_contracts(
     }
     if dry_run:
         return result
-    row.draft_definition_json = _json(definition)
-    session.add(row)
+    row.draft_definition_json = _json(definition); session.add(row)
     created = _save_version(session, row, user_id, device_ids=bound_ids)
     result.update({"committed": True, "version_id": created.id, "latest_version_id": created.id})
     return result
 
 
-def _contract_device_ids(device_id: Optional[str], device_ids: Optional[List[str]]) -> List[str]:
-    values = [str(item).strip() for item in (device_ids or []) if str(item).strip()]
-    legacy = str(device_id or "").strip()
-    if legacy:
-        values.append(legacy)
-    return list(dict.fromkeys(values))
-
-
-def _device_snapshot(session: Session, user_id: int, device_id: str) -> Tuple[DevicePresence, Dict[str, Any]]:
-    device = session.exec(select(DevicePresence).where(
-        DevicePresence.user_id == user_id,
-        DevicePresence.device_id == device_id,
-    )).first()
-    if not device:
-        raise WorkflowValidationError([
-            f"contract device is not connected or not owned by the current user: {device_id}; "
-            "connect the bound device so toolRef.schemaDigest can be resolved and verified automatically"
-        ])
-    if not device.online:
-        raise WorkflowValidationError([
-            f"contract device is offline: {device_id}; bring it online so toolRef.schemaDigest "
-            "can be resolved and verified automatically"
-        ])
-    return device, tool_defs_for_agent(user_id, device_id)
-
-
-def _step_device_id(
-    step_id: str,
-    ref: Dict[str, Any],
-    bound_ids: List[str],
-    errors: List[str],
-) -> str:
-    target = str(ref.get("deviceId") or "").strip()
-    if not target and len(bound_ids) == 1:
-        target = bound_ids[0]
-    if not target:
-        errors.append(f"step {step_id}: select a contract device for this MCP node")
-        return ""
-    if bound_ids and target not in bound_ids:
-        errors.append(f"step {step_id}: device {target} is not selected as a contract device")
-        return ""
-    ref["deviceId"] = target
-    return target
-
-
-def _frozen_step_contract(
-    *,
-    name: str,
-    ref: Dict[str, Any],
-    target_id: str,
-    snapshot: Optional[Tuple[DevicePresence, Dict[str, Any]]],
-    errors: List[str],
-    step_id: str,
-) -> Optional[Dict[str, Any]]:
-    supplied = str(ref.get("schemaDigest") or "").strip()
-    if snapshot is None:
-        if not supplied:
-            errors.append(
-                f"step {step_id}: schemaDigest cannot be resolved; bind an online contract device "
-                "so toolRef.schemaDigest can be filled and verified automatically"
-            )
-            return None
-        return {
-            "namespace": "device", "name": name, "deviceId": target_id,
-            "schemaDigest": supplied, "inputSchema": ref.get("inputSchema", {}),
-            "destructive": False, "provider": str(ref.get("provider") or ""),
-            "providers": [], "publishedDeviceId": target_id,
-            "publishedDeviceIds": [target_id] if target_id else [],
-        }
-    device, live_defs = snapshot
-    live = live_defs.get(name)
-    if not isinstance(live, dict):
-        errors.append(f"step {step_id}: tool {name} is not reported by device {target_id}")
-        return None
-    input_schema = live.get("input_schema") if isinstance(live.get("input_schema"), dict) else {}
-    digest = schema_digest(input_schema)
-    if supplied and supplied != digest:
-        errors.append(f"step {step_id}: supplied schema digest does not match device {target_id}")
-        return None
-    provider = str(device.device_type or "custom")
-    ref["schemaDigest"] = digest
-    ref["provider"] = provider
-    return {
-        "namespace": "device", "name": name, "deviceId": target_id,
-        "schemaDigest": digest, "inputSchema": input_schema,
-        "destructive": bool(live.get("destructive")), "provider": provider,
-        "providers": [provider], "publishedDeviceId": target_id,
-        "publishedDeviceIds": [target_id],
-    }
-
-
-def _snapshot_contracts(
-    session: Session,
-    user_id: int,
-    definition: Dict[str, Any],
-    *,
-    device_id: Optional[str] = None,
-    device_ids: Optional[List[str]] = None,
-) -> Tuple[Dict[str, Any], List[str]]:
-    fallback_ids = _contract_device_ids(device_id, device_ids)
-    declared_ids = [
-        str(step.get("toolRef", {}).get("deviceId") or "").strip()
-        for step in definition["steps"].values()
-        if step.get("type") == "mcp" and isinstance(step.get("toolRef"), dict)
-    ]
-    declared_ids = list(dict.fromkeys(item for item in declared_ids if item))
-    device_steps = [
-        step_id for step_id, step in definition["steps"].items()
-        if step.get("type") == "mcp"
-    ]
-    all_nodes_bound = all(
-        str(definition["steps"][step_id].get("toolRef", {}).get("deviceId") or "").strip()
-        for step_id in device_steps
-    )
-    bound_ids = declared_ids if all_nodes_bound else list(dict.fromkeys(fallback_ids + declared_ids))
-    if device_steps and not bound_ids:
-        raise WorkflowValidationError([
-            "each device MCP node must declare toolRef.deviceId, or provide one fallback device"
-        ])
-    snapshots = {item: _device_snapshot(session, user_id, item) for item in bound_ids}
-    contracts: Dict[str, Any] = {}
-    errors: List[str] = []
-    for step_id, step in definition["steps"].items():
-        if step.get("type") != "mcp":
-            continue
-        ref = step["toolRef"]
-        name = str(ref["name"]).strip()
-        target_id = _step_device_id(step_id, ref, bound_ids, errors)
-        if not target_id:
-            continue
-        contract = _frozen_step_contract(
-            name=name,
-            ref=ref,
-            target_id=target_id,
-            snapshot=snapshots.get(target_id),
-            errors=errors,
-            step_id=step_id,
-        )
-        if contract is not None:
-            contracts[step_id] = contract
-    if errors:
-        raise WorkflowValidationError(errors)
-    return contracts, bound_ids
-
+from .workflow_contracts import (
+    _contract_device_ids, _device_snapshot, _snapshot_contracts,
+)
 
 def _save_version(
     session: Session,

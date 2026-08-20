@@ -8,6 +8,7 @@ import os
 import threading
 import uuid
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -31,6 +32,16 @@ ALLOWED_SUFFIXES = {
     "android": (".apk",),
 }
 _CATALOG_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class PublishReleaseInput:
+    product_id: str
+    target_id: str
+    version: str
+    filename: str
+    release_notes: str = ""
+    mandatory: bool = False
 
 
 def _utc_now() -> str:
@@ -104,29 +115,60 @@ def admin_catalog(root: Path = RELEASE_ROOT) -> dict[str, Any]:
     return catalog
 
 
-def publish_release(
-    *, product_id: str, target_id: str, version: str, filename: str,
-    stream: BinaryIO, release_notes: str = "", mandatory: bool = False,
-    root: Path = RELEASE_ROOT, max_bytes: int | None = None,
-) -> dict[str, Any]:
-    version = str(version or "").strip()
+def _prepare_publish(catalog, request: PublishReleaseInput, root: Path):
+    version = str(request.version or "").strip()
     if not version or version_key(version) == (0,):
         raise DeviceReleaseError("invalid release version")
+    product, target = _find_refs(catalog, request.product_id, request.target_id)
+    releases = target.setdefault("releases", [])
+    current_artifact = _artifact_path(root, target.get("artifact"))
+    duplicate = any(str(item.get("version")) == version for item in releases)
+    duplicate = duplicate or bool(
+        str(target.get("version")) == version and current_artifact and current_artifact.is_file()
+    )
+    if duplicate:
+        raise DeviceReleaseError("release version already exists")
+    platform = str(target.get("platform") or "").lower()
+    suffix = _allowed_suffix(request.filename, platform)
+    relative = f"{platform}/{product['id']}-{target['id']}-{version}{suffix}"
+    final_path = _artifact_path(root, relative)
+    assert final_path is not None
+    return product, target, releases, relative, final_path, version
+
+
+def _apply_uploaded_release(target, releases, request, version, relative, sha256, size):
+    previous = _snapshot_current(target)
+    known_previous = previous and any(
+        item.get("version") == previous["version"] for item in releases
+    )
+    if previous and previous["version"] != version and not known_previous:
+        releases.append(previous)
+    published_at = _utc_now()
+    release = _release_entry(
+        version, relative, sha256, size, request.release_notes,
+        request.mandatory, published_at,
+    )
+    releases.append(release)
+    target.update(release)
+    target.pop("withdrawn_at", None)
+    return published_at
+
+
+def _cleanup_failed_publish(temp: Path, final_path: Path, relative: str, root: Path):
+    temp.unlink(missing_ok=True)
+    if final_path.exists() and not _catalog_references(root, relative):
+        final_path.unlink(missing_ok=True)
+
+
+def _publish_release(
+    request: PublishReleaseInput, stream: BinaryIO,
+    root: Path = RELEASE_ROOT, max_bytes: int | None = None,
+) -> dict[str, Any]:
     upload_limit = int(max_bytes or settings.device_release_max_bytes)
     with _CATALOG_LOCK:
         catalog = deepcopy(load_catalog(root))
-        product, target = _find_refs(catalog, product_id, target_id)
-        releases = target.setdefault("releases", [])
-        if any(str(item.get("version")) == version for item in releases):
-            raise DeviceReleaseError("release version already exists")
-        current_artifact = _artifact_path(root, target.get("artifact"))
-        if str(target.get("version")) == version and current_artifact and current_artifact.is_file():
-            raise DeviceReleaseError("release version already exists")
-        platform = str(target.get("platform") or "").lower()
-        suffix = _allowed_suffix(filename, platform)
-        relative = f"{platform}/{product['id']}-{target['id']}-{version}{suffix}"
-        final_path = _artifact_path(root, relative)
-        assert final_path is not None
+        prepared = _prepare_publish(catalog, request, root)
+        product, target, releases, relative, final_path, version = prepared
         final_path.parent.mkdir(parents=True, exist_ok=True)
         temp = root / f".upload.{uuid.uuid4().hex}.tmp"
         try:
@@ -134,24 +176,24 @@ def publish_release(
             if final_path.exists():
                 raise DeviceReleaseError("release artifact already exists")
             os.replace(temp, final_path)
-            previous = _snapshot_current(target)
-            if previous and previous["version"] != version and not any(
-                item.get("version") == previous["version"] for item in releases
-            ):
-                releases.append(previous)
-            published_at = _utc_now()
-            releases.append(_release_entry(version, relative, sha256, size, release_notes, mandatory, published_at))
-            target.update(releases[-1])
-            target.pop("withdrawn_at", None)
-            catalog["updated_at"] = published_at
+            catalog["updated_at"] = _apply_uploaded_release(
+                target, releases, request, version, relative, sha256, size,
+            )
             backup = _atomic_catalog(catalog, root)
         except Exception:
-            temp.unlink(missing_ok=True)
-            if final_path.exists() and not _catalog_references(root, relative):
-                final_path.unlink(missing_ok=True)
+            _cleanup_failed_publish(temp, final_path, relative, root)
             raise
     return {"ok": True, "product_id": product["id"], "target_id": target["id"],
             "release": deepcopy(releases[-1]), "catalog_backup": backup.name}
+
+
+def publish_release(
+    stream: BinaryIO, root: Path = RELEASE_ROOT, max_bytes: int | None = None,
+    request: PublishReleaseInput | None = None, **fields,
+) -> dict[str, Any]:
+    """Publish a release; keyword fields remain compatible with the original API."""
+    release = request or PublishReleaseInput(**fields)
+    return _publish_release(release, stream, root, max_bytes)
 
 
 def _release_entry(version, artifact, sha256, size, notes, mandatory, published_at):
@@ -182,30 +224,8 @@ def withdraw_release(product_id: str, target_id: str, *, version: str | None = N
     with _CATALOG_LOCK:
         catalog = deepcopy(load_catalog(root))
         _product, target = _find_refs(catalog, product_id, target_id)
-        wanted = version or str(target.get("version") or "")
-        if not wanted:
-            raise DeviceReleaseError("no published release to withdraw")
-        releases = target.setdefault("releases", [])
-        current = _snapshot_current(target)
-        if current and not any(item.get("version") == current["version"] for item in releases):
-            releases.append(current)
-        match = next((item for item in releases if str(item.get("version")) == wanted), None)
-        if not match:
-            raise DeviceReleaseError("release version not found")
-        match.update({"status": "withdrawn", "withdrawn_at": _utc_now()})
-        if str(target.get("version")) == wanted:
-            replacement = _latest_published(releases, root)
-            _apply_replacement(target, replacement)
-        artifact = _artifact_path(root, match.get("artifact"))
-        trash = None
-        can_delete = (
-            delete_artifact and artifact and artifact.is_file()
-            and str(target.get("artifact")) != match.get("artifact")
-        )
-        if can_delete:
-            trash = root / f".withdraw.{uuid.uuid4().hex}.tmp"
-            os.replace(artifact, trash)
-            match["artifact_deleted"] = True
+        wanted, match = _mark_withdrawn(target, version, root)
+        artifact, trash = _stage_artifact_delete(target, match, delete_artifact, root)
         catalog["updated_at"] = _utc_now()
         try:
             backup = _atomic_catalog(catalog, root)
@@ -216,6 +236,35 @@ def withdraw_release(product_id: str, target_id: str, *, version: str | None = N
         if trash:
             trash.unlink(missing_ok=True)
     return {"ok": True, "version": wanted, "status": "withdrawn", "catalog_backup": backup.name}
+
+
+def _mark_withdrawn(target, version: str | None, root: Path):
+    wanted = version or str(target.get("version") or "")
+    if not wanted:
+        raise DeviceReleaseError("no published release to withdraw")
+    releases = target.setdefault("releases", [])
+    current = _snapshot_current(target)
+    known = current and any(item.get("version") == current["version"] for item in releases)
+    if current and not known:
+        releases.append(current)
+    match = next((item for item in releases if str(item.get("version")) == wanted), None)
+    if not match:
+        raise DeviceReleaseError("release version not found")
+    match.update({"status": "withdrawn", "withdrawn_at": _utc_now()})
+    if str(target.get("version")) == wanted:
+        _apply_replacement(target, _latest_published(releases, root))
+    return wanted, match
+
+
+def _stage_artifact_delete(target, match, delete_artifact: bool, root: Path):
+    artifact = _artifact_path(root, match.get("artifact"))
+    is_active = str(target.get("artifact")) == match.get("artifact")
+    if not delete_artifact or not artifact or not artifact.is_file() or is_active:
+        return artifact, None
+    trash = root / f".withdraw.{uuid.uuid4().hex}.tmp"
+    os.replace(artifact, trash)
+    match["artifact_deleted"] = True
+    return artifact, trash
 
 
 def _latest_published(releases: list[dict[str, Any]], root: Path):

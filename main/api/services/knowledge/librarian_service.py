@@ -87,6 +87,10 @@ from .librarian_thoughts import (
     _sync_skill_to_knowledge_entry,
     create_inheritance_thought,
     delete_inheritance_thought,
+)
+
+
+from .librarian_skill_packages import (
     _SAFE_SKILLS_PACKAGE,
     _normalize_skills_package,
     _global_agent_skills_root,
@@ -99,7 +103,6 @@ from .librarian_thoughts import (
     _import_global_skill_snapshot,
     install_npx_skill_package,
 )
-
 from .librarian_builtins import (
     _builtin_entries,
     _builtin_entry,

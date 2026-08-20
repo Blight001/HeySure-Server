@@ -12,7 +12,6 @@ from api.models import AssistantAIConfig
 from api.database import engine
 from api.services.bot_directory import config_view_for_connection, resolve_connection
 from sqlmodel import Session
-from ..text_format import strip_markdown_to_plain
 from ..transport import TokenCache, load_active_config, parse_json_response
 from ._config import read_qq_config
 
@@ -31,10 +30,6 @@ def _qq_http_session() -> requests.Session:
         session.trust_env = False
         _HTTP_LOCAL.session = session
     return session
-
-
-def normalize_qq_text(text: str) -> str:
-    return strip_markdown_to_plain(text, collapse_tables=False)
 
 
 def _normalize_target_type(raw: str) -> str:
@@ -210,6 +205,18 @@ def _qq_media_file_endpoint(cfg: AssistantAIConfig, target_type: str, target_id:
     raise HTTPException(status_code=400, detail="QQ media upload currently supports c2c or group targets")
 
 
+def _upload_qq_payload(cfg: AssistantAIConfig, token: str, endpoint: str, payload: Dict[str, Any]) -> str:
+    res = _qq_http_session().post(endpoint, headers=_qq_headers(cfg, token), json=payload, timeout=60)
+    data = parse_json_response(res)
+    failed_code = isinstance(data, dict) and data.get("code") not in (None, 0)
+    if not res.ok or failed_code:
+        raise HTTPException(status_code=502, detail=f"QQ media upload failed: {data or res.text}")
+    file_info = str(data.get("file_info") or (data.get("data") or {}).get("file_info") or "").strip()
+    if not file_info:
+        raise HTTPException(status_code=502, detail="QQ media upload response missing file_info")
+    return file_info
+
+
 def upload_qq_media_file_info(
     user_id: int,
     ai_config_id: Optional[int],
@@ -233,21 +240,6 @@ def upload_qq_media_file_info(
     token = get_qq_access_token(user_id, ai_config_id, connection_ref)
     endpoint = _qq_media_file_endpoint(cfg, final_target_type, target_id)
 
-    def _upload(payload: Dict[str, Any]) -> str:
-        res = _qq_http_session().post(
-            endpoint,
-            headers=_qq_headers(cfg, token),
-            json=payload,
-            timeout=60,
-        )
-        data = parse_json_response(res)
-        if not res.ok or (isinstance(data, dict) and data.get("code") not in (None, 0)):
-            raise HTTPException(status_code=502, detail=f"QQ media upload failed: {data or res.text}")
-        file_info = str(data.get("file_info") or (data.get("data") or {}).get("file_info") or "").strip()
-        if not file_info:
-            raise HTTPException(status_code=502, detail="QQ media upload response missing file_info")
-        return file_info
-
     # QQ can fetch a public URL directly, which avoids base64 overhead. In
     # practice its fetcher often cannot reach signed/CDN/redirecting URLs even
     # though resolve_media_source has already downloaded them successfully.
@@ -255,14 +247,14 @@ def upload_qq_media_file_info(
     url_error = ""
     if source.source_url:
         try:
-            return _upload({**base_payload, "url": source.source_url})
+            return _upload_qq_payload(cfg, token, endpoint, {**base_payload, "url": source.source_url})
         except HTTPException as exc:
             url_error = str(exc.detail)
 
     try:
         with open(source.path, "rb") as fh:
             file_data = base64.b64encode(fh.read()).decode("ascii")
-        return _upload({**base_payload, "file_data": file_data})
+        return _upload_qq_payload(cfg, token, endpoint, {**base_payload, "file_data": file_data})
     except HTTPException as exc:
         if url_error:
             raise HTTPException(
@@ -305,46 +297,7 @@ def send_qq_text_message(
     return _qq_send_result(final_target_id, final_target_type, data)
 
 
-def _prepare_markdown_text(text: str) -> str:
-    """Light cleanup that *keeps* markdown syntax (unlike ``normalize_qq_text``).
-
-    QQ native markdown renders the body as-is, so we only normalize line
-    endings and collapse runs of blank lines — headings, lists, links, code
-    fences, emphasis, etc. are preserved.
-    """
-    body = str(text or "")
-    if not body:
-        return ""
-    body = body.replace("\r\n", "\n").replace("\r", "\n")
-    body = re.sub(r"\n{3,}", "\n\n", body)
-    return body.strip()
-
-
-def _prepare_stream_markdown_text(text: str) -> str:
-    """Normalize line endings without stripping incremental whitespace."""
-    return str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-
-
-def _qq_markdown_field(content: str, markdown_mode: str, template_id: str) -> Dict[str, Any]:
-    """Build the ``markdown`` object for a ``msg_type=2`` message.
-
-    Two mutually exclusive shapes (per QQ open-platform spec):
-      - native:   ``{"content": "<raw markdown>"}``
-      - template: ``{"custom_template_id": "<id>", "params": [{key, values}]}``
-
-    Template mode assumes the approved template exposes a single ``content``
-    placeholder; bots with multi-field templates should send via the explicit
-    MCP tool instead.
-    """
-    mode = str(markdown_mode or "native").strip().lower()
-    tpl = str(template_id or "").strip()
-    if mode == "template" and tpl:
-        return {
-            "custom_template_id": tpl,
-            "params": [{"key": "content", "values": [content]}],
-        }
-    return {"content": content}
-
+from .markdown import normalize_qq_text, _prepare_markdown_text, _prepare_stream_markdown_text, _qq_markdown_field
 
 def send_qq_markdown_message(
     user_id: int,
