@@ -14,6 +14,24 @@ def test_invalid_registration_payload_is_rejected(monkeypatch):
     assert payload["error_code"] == "AGENT_PAYLOAD_INVALID"
 
 
+def test_retired_cli_adapter_registration_is_rejected_and_disconnected(monkeypatch):
+    emitted = AsyncMock()
+    disconnected = AsyncMock()
+    monkeypatch.setattr(registration.sio, "emit", emitted)
+    monkeypatch.setattr(registration.sio, "disconnect", disconnected)
+
+    asyncio.run(registration.handle_agent_register("retired-sid", {
+        "id": "old-cli-adapter",
+        "platform": "heysure-cli-adapter",
+        "deviceType": "custom",
+        "capabilities": ["cli.run"],
+    }))
+
+    payload = emitted.await_args.args[1]
+    assert payload["error_code"] == "AGENT_PLATFORM_RETIRED"
+    disconnected.assert_awaited_once_with("retired-sid")
+
+
 def test_invalid_result_payload_has_stable_error_code():
     response = asyncio.run(tasks.result("sid", {"deviceId": "device-without-task"}))
     assert response == {"received": False, "error_code": "AGENT_TASK_PAYLOAD_INVALID"}

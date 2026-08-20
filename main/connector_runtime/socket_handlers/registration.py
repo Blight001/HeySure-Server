@@ -20,6 +20,7 @@ from connector_runtime.socket_handlers.schemas import AgentRegistrationPayload, 
 
 
 logger = logging.getLogger(__name__)
+RETIRED_AGENT_PLATFORMS = frozenset({"heysure-cli-adapter"})
 
 
 @dataclass
@@ -66,6 +67,23 @@ async def _authenticate(sid: str, info: Dict[str, Any]) -> tuple[bool, Optional[
         to=sid,
     )
     return False, None, None
+
+
+async def _reject_retired_platform(sid: str, info: Dict[str, Any]) -> bool:
+    platform = str(info.get("platform") or "").strip().lower()
+    if platform not in RETIRED_AGENT_PLATFORMS:
+        return False
+    logger.info("Retired agent platform rejected: platform=%s sid=%s", platform, sid)
+    await sio.emit(
+        "device:register_rejected",
+        {
+            "reason": "this device platform has been retired",
+            "error_code": "AGENT_PLATFORM_RETIRED",
+        },
+        to=sid,
+    )
+    await sio.disconnect(sid)
+    return True
 
 
 async def _registration(sid: str, info: Dict[str, Any]) -> Optional[Registration]:
@@ -309,6 +327,8 @@ async def handle_agent_register(sid: str, raw_info: object) -> None:
             {"reason": "invalid registration payload", "error_code": "AGENT_PAYLOAD_INVALID"},
             to=sid,
         )
+        return
+    if await _reject_retired_platform(sid, info):
         return
     ctx = await _registration(sid, info)
     if ctx is None:
