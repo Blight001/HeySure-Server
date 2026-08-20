@@ -37,7 +37,6 @@ if _override_db_url:
 
 # Importing the models package populates ``SQLModel.metadata`` as a side effect.
 from api import models  # noqa: E402,F401
-from api.models import maintenance  # noqa: E402,F401
 from api.core.settings import settings  # noqa: E402
 from api.core.logging_config import is_configured as _app_logging_configured  # noqa: E402
 

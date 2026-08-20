@@ -144,6 +144,32 @@ def service_statuses() -> list[dict[str, str]]:
     return statuses
 
 
+def all_runtimes_unavailable(statuses: list[dict[str, str]] | None = None) -> bool:
+    """Return a fail-closed, detail-free signal for the public rescue entry."""
+    resolved = service_statuses() if statuses is None else statuses
+    if len(resolved) != len(SERVICES):
+        return False
+    for service in resolved:
+        state = service.get("state", "").strip().lower()
+        health = service.get("health", "").strip().lower()
+        if state == "running" and health != "unhealthy":
+            return False
+    return True
+
+
+def public_health_status() -> dict[str, Any]:
+    try:
+        outage = all_runtimes_unavailable()
+    except RescueError:
+        outage = False
+    return {
+        "ok": True,
+        "service": "host-rescue",
+        "auto_recover": AUTO_RECOVER,
+        "all_runtimes_unavailable": outage,
+    }
+
+
 def _recover_worker(action: str, automatic: bool) -> None:
     services = ACTION_SERVICES[action]
     try:
@@ -253,7 +279,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":
-            self._json(200, {"ok": True, "service": "host-rescue", "auto_recover": AUTO_RECOVER})
+            self._json(200, public_health_status())
             return
         if not self._authorized():
             self._json(401, {"ok": False, "error": "unauthorized"})

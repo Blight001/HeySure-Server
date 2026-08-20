@@ -270,13 +270,6 @@ async def _resume_owned_work(ctx: Registration) -> None:
         await resume_device_dispatch_queue(ctx.device_id)
     except Exception:
         logger.exception("Failed to resume endpoint MCP queue: %s", ctx.device_id)
-    if str(ctx.info.get("platform") or "").strip().lower() == "codex-maintainer" and ctx.user_id is not None:
-        try:
-            from connector_runtime.maintenance import resume_codex_maintenance
-
-            await resume_codex_maintenance(ctx.device_id, ctx.user_id, ctx.ai_config_ids)
-        except Exception:
-            logger.exception("Failed to resume Codex maintenance runs: %s", ctx.device_id)
     if ctx.user_id is None:
         return
     try:

@@ -61,40 +61,6 @@ def send_qq_text_safely(**values) -> bool:
         return False
 
 
-def external_mcp_route_response(cfg: Any) -> Optional[Dict[str, Any]]:
-    """Return the no-model acknowledgement for externally controlled members."""
-    if str(getattr(cfg, "execution_mode", "") or "").strip().lower() != "external_mcp":
-        return None
-    return {
-        "op": 12,
-        "d": 0,
-        "external_controlled": True,
-        "route_registered": True,
-    }
-
-
-def enqueue_external_mcp_message(
-    session: "Session",
-    cfg: Any,
-    *,
-    text: str,
-    session_id: str,
-    session_name: str,
-    ai_kind: str,
-) -> Any:
-    """Persist a QQ inbound into the external controller's reliable queue."""
-    from api.services.external_control import ExternalControlService
-
-    return ExternalControlService(session).enqueue_message(
-        int(cfg.user_id),
-        int(cfg.id),
-        content=text,
-        session_id=session_id,
-        session_name=session_name,
-        ai_kind=ai_kind,
-    )
-
-
 def qq_session_name(existing_session: Any, session_key: str) -> str:
     name = str(getattr(existing_session, "session_name", "") or "").strip()
     return name or f"QQ对话 {session_key}"

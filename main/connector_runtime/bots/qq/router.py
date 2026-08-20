@@ -20,7 +20,7 @@ from ai_runtime.inference.core import _run_worker
 from api.services.chat.chat_persistence import _save_message
 from ._config import read_qq_config
 from .long_connection import get_qq_long_connection_state
-from .routes_store import enqueue_external_mcp_message, external_mcp_route_response, qq_scope_keys, qq_session_name, register_qq_session_route, scope_qq_inbound, send_qq_text_safely as _send_qq_text
+from .routes_store import qq_scope_keys, qq_session_name, register_qq_session_route, scope_qq_inbound, send_qq_text_safely as _send_qq_text
 from .service import diagnose_qq_config, parse_qq_text_event
 from connector_runtime.bots.session_cursor import get_active_session_id
 from connector_runtime.bots.commands import handle_bot_command
@@ -290,21 +290,6 @@ def handle_qq_event_payload(
             next_msg_seq=1,
             connection_ref=connection_ref,
         )
-
-        external_response = external_mcp_route_response(cfg)
-        if external_response is not None:
-            turn = enqueue_external_mcp_message(
-                session,
-                cfg,
-                text=event["text"],
-                session_id=session_id,
-                session_name=session_name,
-                ai_kind=ai_kind,
-            )
-            external_response["message_queued"] = True
-            external_response["turn_id"] = turn.turn_id
-            logger.info("registered QQ route for external MCP member config_id=%s event_type=%s", config_id, event_type)
-            return external_response
 
         user = session.get(User, cfg.user_id)
         if not user:

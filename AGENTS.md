@@ -77,7 +77,7 @@ server/
 | `core/settings.py` | **配置总入口**，环境变量的真实清单 |
 | `core/config.py` | 历史别名转发层（`DATABASE_URL` 等旧名称），新代码用 `settings` |
 | `models/` | SQLModel/ORM 数据模型（约 20 个，见下表） |
-| `services/` | 业务逻辑，按域分子包：`knowledge/` `tasks/` `maintenance/` `mcp/` `device_tools/` `chat/` `access/` `storage/`，孤立单例留根部 |
+| `services/` | 业务逻辑，按域分子包：`knowledge/` `tasks/` `mcp/` `device_tools/` `chat/` `access/` `storage/`，孤立单例留根部 |
 | `devices/` | 设备相关 helper：`bindings`/`live`/`mcp_permissions`/`presence`/`workshop_bindings` |
 | `chat_runtime/` | 聊天编排：`chat_scheduler`（任务调度）、`chat_stream`（流式）、prompt 组装、MCP 解析、`run_state` |
 | `runtime/` | 进程控制、心跳、内部 HTTP（`internal_http` 调其它 runtime；`http_client` 出站 AI 请求） |
@@ -102,7 +102,6 @@ server/
 | `DeviceDynamicToolVersion` | `models/device_dynamic_tool_version.py` | 动态工具版本 |
 | `DevicePermissionPolicy` | `models/device_permission_policy.py` | 设备 MCP 工具权限策略 |
 | `DeviceMcpPermission` | `models/device_mcp_permission.py` | 设备级 MCP 权限 |
-| `MaintenanceTask` / `MaintenanceEvent` / `MaintenanceApproval` | `models/maintenance.py` | Codex 维护工单、可审计事件与审批 |
 | `Memory` / `KnowledgeEntry` | `models/knowledge.py` | 记忆与知识条目（检索为纯文件关键词，无向量索引） |
 | MCP 统计 | `models/mcp_call_stat.py` | MCP 调用统计 |
 | `BotSessionRoute` | `models/bot_session_route.py` | 机器人会话路由 |
@@ -122,8 +121,6 @@ server/
 | `tasks/task_schedule.py` | 定时规则解析/校验/续期（**REST/MCP/调度器唯一权威**） |
 | `tasks/task_plan.py` | 任务计划阶段管理 |
 | `tasks/task_completion_notify.py` | 任务完成通知推送 |
-| **`maintenance/`** | |
-| `maintenance/service.py` | Codex 维护工单状态机、命令持久化与事件接收 |
 | **`chat/`** | |
 | `chat/chat_persistence.py` | 聊天消息与 ChatRun 持久化 |
 | `chat/chat_media.py` | 聊天媒体文件处理 |
@@ -186,7 +183,6 @@ server/
 | `world.py` | `/world` | 世界观数据（角色 / 知识快照） |
 | `rtc.py` | `/rtc` 等 | WebRTC / ICE 相关 |
 | `socket_relay.py` | `/socket` | Socket.IO 中继 |
-| `maintenance.py` | `/maintenance` | Codex 维护工单创建、查看、干预、审批与事件增量查询 |
 
 ## "改 X 去哪里"
 
@@ -195,7 +191,6 @@ server/
 | 新增 REST 接口 | `main/gateway/routers/<域>.py`，文件名即域；在 `gateway/app.py` 注册 |
 | 新增 / 改数据模型 | `main/api/models/`，同时加 Alembic 迁移 `other/migrations/` |
 | 业务逻辑 | `main/api/services/` |
-| Codex 维护工单 | `main/api/services/maintenance/` + `main/connector_runtime/maintenance.py` + `main/gateway/routers/maintenance.py` |
 | 设备在线状态/绑定/权限 | `main/api/devices/`（直接 `from api.devices.* import`） |
 | 新增 MCP 工具（服务端固定） | `server/tools/`（handler）→ `mcp_runtime/mcp/registry.py`（注册） |
 | 聊天流式 / 任务调度编排 | `main/api/chat_runtime/chat_stream.py` / `chat_scheduler.py` |

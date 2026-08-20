@@ -64,14 +64,6 @@ class FeishuSendRequest(BaseModel):
     receive_id_type: Optional[str] = None
 
 
-def _start_conversation_bridge(stop_event: asyncio.Event) -> asyncio.Task:
-    from connector_runtime.maintenance_conversation_bridge import run_conversation_bridge
-
-    return asyncio.create_task(
-        run_conversation_bridge(stop_event), name="codex-conversation-bridge"
-    )
-
-
 class BotLoginRequest(BaseModel):
     user_id: int
     connection_ref: str = ""
@@ -168,7 +160,6 @@ async def _lifespan(app: FastAPI):
     push_task = asyncio.create_task(
         run_user_push_scheduler(stop_event), name="user-push-scheduler"
     )
-    conversation_bridge_task = _start_conversation_bridge(stop_event)
     workflow_task = None
     if settings.workflow_scheduler_enabled:
         from connector_runtime.dispatch.workflow_scheduler import run_workflow_scheduler
@@ -184,7 +175,7 @@ async def _lifespan(app: FastAPI):
     finally:
         health.begin_draining()
         stop_event.set()
-        background_tasks = [*keepalive_tasks, sweep_task, push_task, conversation_bridge_task]
+        background_tasks = [*keepalive_tasks, sweep_task, push_task]
         if workflow_task is not None:
             background_tasks.append(workflow_task)
         for task in background_tasks:
@@ -298,12 +289,6 @@ def create_app() -> FastAPI:
     router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
     _register_dispatch_cancel_route(router)
     _register_control_routes(router)
-
-    @router.post("/maintenance/command")
-    async def maintenance_command(req: Dict[str, Any]) -> Dict[str, Any]:
-        from connector_runtime.maintenance import MaintenanceCommandRequest, send_command
-
-        return await send_command(MaintenanceCommandRequest.model_validate(req))
 
     from api.runtime.health import build_health_router
     from connector_runtime.health_detail import connector_health_detail

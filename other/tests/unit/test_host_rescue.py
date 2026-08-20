@@ -34,6 +34,40 @@ def test_service_statuses_are_allowlisted_and_do_not_expose_compose_payload(monk
     assert "secret" not in json.dumps(statuses)
 
 
+def test_public_outage_signal_requires_every_runtime_to_be_unavailable() -> None:
+    unavailable = [
+        {"service": service, "state": "exited", "health": "", "status": "stopped"}
+        for service in host_rescue.SERVICES
+    ]
+    assert host_rescue.all_runtimes_unavailable(unavailable) is True
+
+    unhealthy = [
+        {"service": service, "state": "running", "health": "unhealthy", "status": "Up (unhealthy)"}
+        for service in host_rescue.SERVICES
+    ]
+    assert host_rescue.all_runtimes_unavailable(unhealthy) is True
+
+    unavailable[0] = {
+        "service": "api-gateway",
+        "state": "running",
+        "health": "starting",
+        "status": "Up 2 seconds",
+    }
+    assert host_rescue.all_runtimes_unavailable(unavailable) is False
+
+
+def test_public_health_fails_closed_when_compose_status_is_unknown(monkeypatch) -> None:
+    def fail() -> list[dict[str, str]]:
+        raise host_rescue.RescueError("compose status unavailable")
+
+    monkeypatch.setattr(host_rescue, "service_statuses", fail)
+    payload = host_rescue.public_health_status()
+
+    assert payload["ok"] is True
+    assert payload["all_runtimes_unavailable"] is False
+    assert "services" not in payload
+
+
 def test_queue_recovery_rejects_arbitrary_service_names() -> None:
     assert host_rescue.queue_recovery("db") == {
         "ok": False,

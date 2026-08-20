@@ -21,13 +21,9 @@ class AssistantAIConfig(SQLModel, table=True):
     base_url: str = Field(default="")
     model: str = Field(default="")
     model_preset_id: str = Field(default="", index=True)
-    # Empty means provider/CLI default. Explicit levels are intentionally a
-    # small cross-provider intersection supported by Grok, Codex and
-    # OpenAI-compatible reasoning endpoints (including DeepSeek gateways).
+    # Empty means provider default. Explicit levels are intentionally a small
+    # cross-provider intersection supported by OpenAI-compatible endpoints.
     reasoning_effort: str = Field(default="")
-    # ``external_mcp`` members are controlled by a remote MCP client instead
-    # of being sent to the built-in model runtime.
-    execution_mode: str = Field(default="internal_model", index=True)
     # 人格 Prompt 已迁出数据库，真相源为 KnowledgeBase/personas/<id>-<名>.md
     # （见 api.services.knowledge.kb_store）。Create/Update 仍接收 prompt 字段，落盘到文件。
     strip_markdown_symbols: bool = Field(default=False)
@@ -86,7 +82,6 @@ class AssistantAIConfigCreate(SQLModel):
     model: Optional[str] = ""
     model_preset_id: Optional[str] = ""
     reasoning_effort: Optional[Literal["", "low", "medium", "high"]] = ""
-    execution_mode: Optional[Literal["internal_model", "external_mcp"]] = "internal_model"
     prompt: Optional[str] = ""
     strip_markdown_symbols: Optional[bool] = False
     ai_role: Optional[str] = "digital_member"
@@ -124,7 +119,6 @@ class AssistantAIConfigUpdate(SQLModel):
     model: Optional[str] = None
     model_preset_id: Optional[str] = None
     reasoning_effort: Optional[Literal["", "low", "medium", "high"]] = None
-    execution_mode: Optional[Literal["internal_model", "external_mcp"]] = None
     prompt: Optional[str] = None
     strip_markdown_symbols: Optional[bool] = None
     ai_role: Optional[str] = None
