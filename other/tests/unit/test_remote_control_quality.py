@@ -31,3 +31,23 @@ def test_start_session_forwards_sanitized_quality_preset(monkeypatch, requested,
     assert device_call.args[1]["qualityPreset"] == expected
     assert device_call.kwargs["to"] == "device-sid"
     remote_control._SESSIONS.clear()
+
+
+@pytest.mark.parametrize("disconnected_sid", ["controller-sid", "device-sid"])
+def test_disconnect_cleans_session_for_either_peer(monkeypatch, disconnected_sid):
+    emitted = AsyncMock()
+    monkeypatch.setattr(remote_control.sio, "emit", emitted)
+    remote_control._SESSIONS.clear()
+    remote_control._SESSIONS["rc_test"] = remote_control.RcSession(
+        session_id="rc_test",
+        device_id="desktop-1",
+        user_id=7,
+        controller_sid="controller-sid",
+        device_sid="device-sid",
+    )
+
+    asyncio.run(remote_control.handle_disconnect(disconnected_sid))
+
+    assert "rc_test" not in remote_control._SESSIONS
+    expected_event = "rc:stop" if disconnected_sid == "controller-sid" else "rc:stopped"
+    assert emitted.await_args.args[0] == expected_event

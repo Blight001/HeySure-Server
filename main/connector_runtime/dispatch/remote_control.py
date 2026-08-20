@@ -216,7 +216,7 @@ async def relay(sid: str, event: str, data: Dict[str, Any]) -> None:
 
 async def handle_disconnect(sid: str) -> None:
     """Tear down any session whose controller or device socket dropped."""
-    for session in [s for s in _SESSIONS.values() if s.controller_sid == sid or s.android_sid == sid]:
+    for session in [s for s in _SESSIONS.values() if s.controller_sid == sid or s.device_sid == sid]:
         _SESSIONS.pop(session.session_id, None)
         if session.controller_sid == sid:
             # Operator closed the tab — tell the device to stop capturing.

@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 from api.devices.catalog import DeviceCatalogError
@@ -73,3 +74,25 @@ def test_success_acknowledges_server_catalog_generation_after_persist(monkeypatc
     registered = next(call.args[1] for call in emit.await_args_list if call.args[0] == "device:registered")
     assert registered["catalogGeneration"] == 7
     assert registered["catalogHash"] == "a" * 64
+
+
+def test_published_catalog_keeps_remote_transport_capabilities():
+    info = {
+        "capabilities": ["demo.run", "remote_control", "remote_terminal"],
+        "toolDefs": [],
+    }
+    ctx = _context(info)
+    catalog = SimpleNamespace(
+        capabilities=("demo.run",),
+        tool_defs=(),
+        reported_ai_description="",
+        protocol_version=2,
+    )
+
+    registration._publish_committed_catalog(ctx, catalog, {
+        "catalog_generation": 3,
+        "catalog_hash": "b" * 64,
+        "catalog_protocol_version": 2,
+    })
+
+    assert ctx.info["capabilities"] == ["demo.run", "remote_control", "remote_terminal"]

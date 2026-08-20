@@ -166,7 +166,18 @@ def _prepare_callable_catalog(ctx: Registration):
 
 
 def _publish_committed_catalog(ctx: Registration, catalog: PreparedDeviceCatalog, committed: dict) -> None:
-    ctx.info["capabilities"] = list(catalog.capabilities)
+    # The committed catalog contains callable MCP tools only. Keep transport
+    # capabilities from the original registration in the live socket record:
+    # remote-control/terminal session gates read them from ``agents`` and must
+    # not mistake catalog filtering for a device that lacks remote support.
+    from api.devices.presence import NON_MCP_CAPABILITIES
+
+    transports = {
+        str(capability or "").strip()
+        for capability in ctx.info.get("capabilities") or []
+        if str(capability or "").strip() in NON_MCP_CAPABILITIES
+    }
+    ctx.info["capabilities"] = sorted(set(catalog.capabilities) | transports)
     ctx.info["toolDefs"] = list(catalog.tool_defs)
     ctx.info["aiDescription"] = catalog.reported_ai_description
     ctx.info["catalogGeneration"] = committed["catalog_generation"]
