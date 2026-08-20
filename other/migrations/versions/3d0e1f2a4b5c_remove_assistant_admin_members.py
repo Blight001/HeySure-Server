@@ -77,6 +77,20 @@ def _delete_related_rows(bind: sa.Connection) -> None:
             "SELECT id FROM botconnection WHERE ai_config_id IN "
             "(SELECT id FROM _retired_assistant_admin_ids)))"
         ))
+    if {"botconnection", "botcontact", "chatsession"} <= tables:
+        session_columns = {column["name"] for column in inspector.get_columns("chatsession")}
+        if "bot_contact_id" in session_columns:
+            bind.execute(sa.text(
+                "UPDATE chatsession SET bot_contact_id = NULL WHERE bot_contact_id IN ("
+                "SELECT id FROM botcontact WHERE connection_id IN (SELECT id FROM botconnection "
+                "WHERE ai_config_id IN (SELECT id FROM _retired_assistant_admin_ids)))"
+            ))
+        if "bot_connection_id" in session_columns:
+            bind.execute(sa.text(
+                "UPDATE chatsession SET bot_connection_id = NULL WHERE bot_connection_id IN ("
+                "SELECT id FROM botconnection WHERE ai_config_id IN "
+                "(SELECT id FROM _retired_assistant_admin_ids))"
+            ))
     if {"botconnection", "botcontact"} <= tables:
         bind.execute(sa.text(
             "DELETE FROM botcontact WHERE connection_id IN (SELECT id FROM botconnection WHERE ai_config_id IN "
