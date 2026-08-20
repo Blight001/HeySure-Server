@@ -114,7 +114,6 @@ class UserRead(SQLModel):
     ai_message_inquiry_reminder_seconds: int
     prompt_ai_message_inquiry_reminder: str
     prompt_ai_message_reply: str
-    prompt_ai_message_chitchat: str
     prompt_ai_message_reply_success: str
     prompt_user_message_notice: str
     ui_theme_mode: str
@@ -149,7 +148,6 @@ class UserUpdate(SQLModel):
     ai_message_inquiry_reminder_seconds: Optional[int] = None
     prompt_ai_message_inquiry_reminder: Optional[str] = None
     prompt_ai_message_reply: Optional[str] = None
-    prompt_ai_message_chitchat: Optional[str] = None
     prompt_ai_message_reply_success: Optional[str] = None
     prompt_user_message_notice: Optional[str] = None
     ui_theme_mode: Optional[str] = None

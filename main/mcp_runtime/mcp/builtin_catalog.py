@@ -213,7 +213,6 @@ BUILTIN_TOOLS = (
             "- inquiry  ：询问。你在向对方提问、要状态或要结果，通常期望对方答复。\n"
             "- reply    ：回复。你在答复对方先前发来的 inquiry；应带 reply_to_message_id。\n"
             "- notify   ：通知。单向状态、结果或提醒，不期待对方回复。\n"
-            "- chitchat ：闲聊，可双向多轮。\n"
             "默认排队后即返回；只有调用方确实需要同步等待答复时才设 require_reply=true。"
         ),
         input_schema={
@@ -281,10 +280,10 @@ BUILTIN_TOOLS = (
                 "content": {"type": "string", "description": "发给 AI 的消息正文。"},
                 "message_type": {
                     "type": "string",
-                    "enum": ["inquiry", "reply", "chitchat", "notify"],
+                    "enum": ["inquiry", "reply", "notify"],
                     "description": (
                         "发给 AI 时必填，决定送达提示里的语义：inquiry=询问/需要答复，"
-                        "reply=回复上一条 inquiry，notify=单向通知/不期待回复，chitchat=闲聊。"
+                        "reply=回复上一条 inquiry，notify=单向通知/不期待回复。"
                     ),
                 },
                 "require_reply": {

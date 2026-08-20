@@ -105,7 +105,6 @@ _USER_PROMPT_COLS = (
     "prompt_ai_message_inquiry",
     "prompt_ai_message_inquiry_reminder",
     "prompt_ai_message_reply",
-    "prompt_ai_message_chitchat",
     "prompt_ai_message_reply_success",
     "prompt_user_message_notice",
 )
@@ -557,7 +556,6 @@ def run_pending_migrations() -> None:
     if not SQLITE_FILE.endswith(".db") or not os.path.exists(SQLITE_FILE):
         return
     from ..models.defaults import (
-        DEFAULT_AI_MESSAGE_CHITCHAT_TEMPLATE,
         DEFAULT_AI_MESSAGE_INQUIRY_TEMPLATE,
         DEFAULT_AI_MESSAGE_INQUIRY_REMINDER,
         DEFAULT_AI_MESSAGE_NOTIFY_TEMPLATE,
@@ -598,7 +596,6 @@ def run_pending_migrations() -> None:
             ai_message_inquiry=DEFAULT_AI_MESSAGE_INQUIRY_TEMPLATE,
             ai_message_inquiry_reminder=DEFAULT_AI_MESSAGE_INQUIRY_REMINDER,
             ai_message_reply=DEFAULT_AI_MESSAGE_REPLY_TEMPLATE,
-            ai_message_chitchat=DEFAULT_AI_MESSAGE_CHITCHAT_TEMPLATE,
             ai_message_reply_success=DEFAULT_AI_MESSAGE_REPLY_SUCCESS,
             user_message_notice=DEFAULT_USER_MESSAGE_NOTICE,
             ui_theme_mode=DEFAULT_UI_THEME_MODE,
@@ -1103,7 +1100,6 @@ def _migrate_user(
     ai_message_inquiry: str,
     ai_message_inquiry_reminder: str,
     ai_message_reply: str,
-    ai_message_chitchat: str,
     ai_message_reply_success: str,
     user_message_notice: str,
     ui_theme_mode: str,
@@ -1130,7 +1126,6 @@ def _migrate_user(
     _add_column(cursor, "user", "ai_message_inquiry_reminder_seconds", "INTEGER DEFAULT 3", existing)
     _add_column(cursor, "user", "prompt_ai_message_inquiry_reminder", f"TEXT DEFAULT '{_quote(ai_message_inquiry_reminder)}'", existing)
     _add_column(cursor, "user", "prompt_ai_message_reply", f"TEXT DEFAULT '{_quote(ai_message_reply)}'", existing)
-    _add_column(cursor, "user", "prompt_ai_message_chitchat", f"TEXT DEFAULT '{_quote(ai_message_chitchat)}'", existing)
     _add_column(cursor, "user", "prompt_ai_message_reply_success", f"TEXT DEFAULT '{_quote(ai_message_reply_success)}'", existing)
     _add_column(cursor, "user", "prompt_user_message_notice", f"TEXT DEFAULT '{_quote(user_message_notice)}'", existing)
     _add_column(cursor, "user", "ui_theme_mode", f"TEXT DEFAULT '{ui_theme_mode}'", existing)

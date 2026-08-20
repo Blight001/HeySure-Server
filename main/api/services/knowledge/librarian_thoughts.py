@@ -83,19 +83,63 @@ def _inheritance_thoughts_payload(user_id: int) -> Dict[str, Any]:
     }
 
 
-def list_inheritance_thoughts(*, user_id: int) -> Dict[str, Any]:
-    """Return installed inheritance thoughts using their ClawHub slug as ID."""
+def list_inheritance_thoughts(
+    *,
+    user_id: int,
+    query: str = "",
+    limit: int = 20,
+    offset: int = 0,
+    compact: bool = True,
+) -> Dict[str, Any]:
+    """Return a filtered, paginated list of inheritance thoughts.
+
+    Compact output is the MCP-friendly default: it keeps only fields needed to
+    choose an item for ``get_thought``.  Callers that need registry metadata can
+    explicitly request ``compact=False``.
+    """
     payload = _inheritance_thoughts_payload(int(user_id))
-    items: List[Dict[str, Any]] = []
+    normalized_query = str(query or "").strip().casefold()
+    matched: List[Dict[str, Any]] = []
     for installed in payload.get("installed") or []:
         item = dict(installed)
         item["id"] = str(item.get("slug") or "")
-        items.append(item)
+        if normalized_query:
+            searchable = " ".join((
+                item["id"],
+                str(item.get("displayName") or ""),
+                str(item.get("summary") or ""),
+                " ".join(str(value) for value in (item.get("triggers") or [])),
+            )).casefold()
+            if normalized_query not in searchable:
+                continue
+        if compact:
+            item = {
+                "id": item["id"],
+                "name": str(item.get("displayName") or item["id"]),
+                "summary": str(item.get("summary") or "")[:240],
+                "source": str(item.get("source") or ""),
+                "endpoint_kind": str(item.get("endpoint_kind") or "any"),
+            }
+        matched.append(item)
+
+    total = len(matched)
+    page = matched[offset:offset + limit]
+    returned = len(page)
     return {
-        "items": items,
-        "total": len(items),
-        "description": payload.get("description"),
-        "storage_root": payload.get("storage_root"),
+        "items": page,
+        "total": total,
+        "returned": returned,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + returned < total,
+        "next_offset": offset + returned if offset + returned < total else None,
+        "compact": compact,
+        "query": query or "",
+        "hint": "Use get_thought with an item id to read full content; increase offset when has_more=true.",
+        **({
+            "description": payload.get("description"),
+            "storage_root": payload.get("storage_root"),
+        } if not compact else {}),
     }
 
 

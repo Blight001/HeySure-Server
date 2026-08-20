@@ -101,3 +101,11 @@ def test_create_thought_accepts_title_text_aliases(monkeypatch):
     assert captured["name"] == "别名标题"
     assert captured["content"] == "正文内容"
     assert captured["summary"] == "摘要"
+
+
+def test_knowledge_list_schema_exposes_compact_pagination():
+    props = KNOWLEDGE_MANAGE_SCHEMA["properties"]
+    assert props["limit"]["default"] == 20
+    assert props["compact"]["default"] is True
+    assert "query" in props and "offset" in props
+    assert KNOWLEDGE_MANAGE_SCHEMA["additionalProperties"] is False

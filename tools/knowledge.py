@@ -95,7 +95,11 @@ KNOWLEDGE_MANAGE_SCHEMA: Dict[str, Any] = {
                 "update_system_prompts: prompts 数组。"
             ),
         },
-        "id": {"type": "string", "description": "get_thought / edit_thought / delete_thought 的目标传承思想 id。"},
+        "query": {"type": "string", "description": "list_thoughts：按名称、摘要、触发词或 id 过滤；省略则列出全部。"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "list_thoughts：本页最多返回多少条，默认 20。"},
+        "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "list_thoughts：分页偏移量；返回 has_more=true 时使用 next_offset 继续。"},
+        "compact": {"type": "boolean", "default": True, "description": "list_thoughts：默认 true，仅返回选择条目所需字段；需要完整注册元数据时传 false。"},
+        "id": {"type": "string", "description": "get_thought / edit_thought / delete_thought 的目标传承思想 id。先用 list_thoughts 获取。"},
         "scenario": {"type": "string", "description": "record_experience：什么场景/触发条件下用这条经验。"},
         "steps": {
             "type": "array",
@@ -143,4 +147,5 @@ KNOWLEDGE_MANAGE_SCHEMA: Dict[str, Any] = {
         "prompts": {"type": "array", "description": "update_system_prompts 的系统 prompt 列表（非空数组，必填）。"},
     },
     "required": ["action"],
+    "additionalProperties": False,
 }

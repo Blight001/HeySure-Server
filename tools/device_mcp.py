@@ -40,6 +40,17 @@ def _positive_int(value: Any) -> Optional[int]:
         return None
 
 
+def _error(code: str, message: str, next_step: str, **details: Any) -> Dict[str, Any]:
+    """Return one predictable, recovery-oriented error shape for small models."""
+    return {
+        "ok": False,
+        "error": message,
+        "code": code,
+        "next_step": next_step,
+        **details,
+    }
+
+
 def _device_type(row: Dict[str, Any]) -> str:
     if row.get("isToolbox"):
         return "toolbox"
@@ -104,11 +115,20 @@ def _owned_device(
 ) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     wanted = str(device_id or "").strip()
     if not wanted:
-        return None, {"ok": False, "error": "device_id is required"}
+        return None, _error(
+            "DEVICE_ID_REQUIRED",
+            "device_id is required",
+            "Call action=devices to obtain a deviceId, then retry with device_id=<deviceId>.",
+        )
     for summary in _device_rows(user_id, ai_config_id):
         if summary["deviceId"] == wanted:
             return summary, None
-    return None, {"ok": False, "error": f"device not found or not owned by current user: {wanted}"}
+    return None, _error(
+        "DEVICE_NOT_FOUND",
+        f"device not found or not owned by current user: {wanted}",
+        "Call action=devices without device_id, choose a returned deviceId, and retry.",
+        supplied_device_id=wanted,
+    )
 
 
 def _scope_payload(user_id: int, summary: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
@@ -154,16 +174,77 @@ async def _device_mcp_manage(user_id: int, args: Dict[str, Any], ai_config_id: O
 
     if action == "devices":
         rows = _device_rows(user_id, ai_config_id)
+        available_total = len(rows)
         requested_id = str(args.get("device_id") or "").strip()
         if requested_id:
             rows = [row for row in rows if row["deviceId"] == requested_id]
             if not rows:
-                return {"ok": False, "error": f"device not found or not owned by current user: {requested_id}"}
+                return _error(
+                    "DEVICE_NOT_FOUND",
+                    f"device not found or not owned by current user: {requested_id}",
+                    "Remove device_id to list available devices, then retry with a returned deviceId.",
+                    supplied_device_id=requested_id,
+                )
+
+        if "online" in args:
+            wanted_online = args.get("online")
+            if not isinstance(wanted_online, bool):
+                return _error(
+                    "INVALID_ONLINE_FILTER",
+                    "online must be true or false",
+                    "Pass a JSON boolean, for example online=true; do not pass the string 'true'.",
+                )
+            rows = [row for row in rows if row["online"] is wanted_online]
+
+        device_kind = str(args.get("device_kind") or "").strip().lower()
+        if device_kind:
+            rows = [row for row in rows if row["deviceType"] == device_kind]
+
+        bound_ai_config_id = _positive_int(args.get("bound_ai_config_id"))
+        if args.get("bound_ai_config_id") is not None and bound_ai_config_id is None:
+            return _error(
+                "INVALID_BOUND_AI_CONFIG_ID",
+                "bound_ai_config_id must be a positive integer",
+                "Pass the member ai_config_id returned by member.manage list/get.",
+            )
+        if bound_ai_config_id:
+            rows = [
+                row for row in rows
+                if bound_ai_config_id == row.get("aiConfigId")
+                or bound_ai_config_id in row.get("boundAiConfigIds", [])
+            ]
+
+        query = str(args.get("query") or "").strip().casefold()
+        if query:
+            rows = [
+                row for row in rows
+                if query in " ".join((
+                    row["deviceId"], row["name"], row["registeredName"],
+                    row["deviceType"], row["platform"],
+                )).casefold()
+            ]
+
+        try:
+            limit = int(args.get("limit", 20))
+        except (TypeError, ValueError):
+            limit = 0
+        if limit < 1 or limit > 200:
+            return _error(
+                "INVALID_LIMIT",
+                "limit must be between 1 and 200",
+                "Retry with limit=20 (default) or another integer from 1 to 200.",
+            )
+        matched_total = len(rows)
+        rows = rows[:limit]
         return {
             "ok": True,
             "count": len(rows),
+            "matchedTotal": matched_total,
+            "availableTotal": available_total,
+            "truncated": matched_total > len(rows),
             "devices": rows,
             "bindingHint": "Use a returned deviceId/deviceNumber in member.manage create/update device_ids.",
+            "nextStep": "Refine with online, device_kind, bound_ai_config_id, query, or device_id when multiple devices match.",
         }
 
     if action in {"scope_get", "scope_set"}:
@@ -290,6 +371,11 @@ DEVICE_MCP_MANAGE_SCHEMA: Dict[str, Any] = {
             ),
         },
         "device_id": {"type": "string", "description": "设备号/设备 ID。scope_get、scope_set 必填；devices 可选用于精确查询。"},
+        "online": {"type": "boolean", "description": "devices：按在线状态过滤；true 仅在线，false 仅离线。必须传 JSON 布尔值。"},
+        "device_kind": {"type": "string", "description": "devices：按返回的 deviceType 精确过滤，如 desktop、browser、custom、toolbox、workshop。"},
+        "bound_ai_config_id": {"type": "integer", "minimum": 1, "description": "devices：只返回已绑定到该数字成员 ai_config_id 的设备。"},
+        "query": {"type": "string", "description": "devices：按设备 ID、名称、类型或平台做不区分大小写的包含匹配。"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 20, "description": "devices：最多返回条数，默认 20；truncated=true 表示仍有匹配项。"},
         "tools": {"type": "array", "items": {"type": "string"}, "description": "scope_set 的完整 MCP 允许名单；传 [] 表示全不选。"},
         "device_type": {"type": "string", "enum": ["desktop", "browser"], "description": "动态工具动作（list/get/capabilities/upsert/delete/history/get_version/restore/stats/failures）的目标设备类型。"},
         "name": {"type": "string", "description": "工具名（get/delete/history 必填；upsert 也可放在 definition.name）。"},

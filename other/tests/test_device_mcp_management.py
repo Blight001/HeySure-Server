@@ -113,3 +113,33 @@ def test_schema_only_requires_action_globally():
     assert {"devices", "scope_get", "scope_set"}.issubset(
         set(device_mcp.DEVICE_MCP_MANAGE_SCHEMA["properties"]["action"]["enum"])
     )
+
+
+def test_devices_support_small_model_friendly_filters_and_limit(monkeypatch):
+    monkeypatch.setattr(device_mcp, "connected_agent_rows_for_user", lambda _user_id: _devices())
+    monkeypatch.setattr(device_mcp, "get_scope", lambda *_args: None)
+
+    result = asyncio.run(device_mcp._device_mcp_manage(
+        1,
+        {"action": "devices", "online": True, "device_kind": "linux", "query": "生产", "limit": 1},
+        2,
+    ))
+
+    assert result["ok"] is True
+    assert result["count"] == 1
+    assert result["devices"][0]["deviceId"] == "linux-abc-123"
+    assert result["matchedTotal"] == 1
+    assert result["truncated"] is False
+
+
+def test_devices_invalid_filter_returns_recovery_hint(monkeypatch):
+    monkeypatch.setattr(device_mcp, "connected_agent_rows_for_user", lambda _user_id: _devices())
+    monkeypatch.setattr(device_mcp, "get_scope", lambda *_args: None)
+
+    result = asyncio.run(device_mcp._device_mcp_manage(
+        1, {"action": "devices", "online": "true"}, 2,
+    ))
+
+    assert result["ok"] is False
+    assert result["code"] == "INVALID_ONLINE_FILTER"
+    assert "JSON boolean" in result["next_step"]

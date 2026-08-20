@@ -130,7 +130,7 @@ def stable_peer_session_id(
 # ---------------------------------------------------------------------------
 
 
-_ALLOWED_MESSAGE_TYPES = {"inquiry", "reply", "chitchat", "notify"}
+_ALLOWED_MESSAGE_TYPES = {"inquiry", "reply", "notify"}
 
 
 def _normalize_message_type(value: Optional[str], *, require_reply: bool) -> str:
