@@ -633,7 +633,6 @@ _SYSTEM_PROMPT_SECTIONS = [
             ("ai_message_inquiry_reminder_seconds", "询问未回复提醒秒数", "number"),
             ("prompt_ai_message_inquiry_reminder", "AI 间询问未回复提醒模板", "text"),
             ("prompt_ai_message_reply", "AI 间消息·回复模板", "text"),
-            ("prompt_ai_message_chitchat", "AI 间消息·闲聊模板", "text"),
             ("prompt_ai_message_reply_success", "AI 间消息回复成功提示", "text"),
             ("prompt_user_message_notice", "用户消息发送提示", "text"),
         ],

@@ -33,7 +33,6 @@ class AIMessage(SQLModel, table=True):
     # 消息语义类型，决定收件方注入哪种模板：
     #   inquiry   询问，期望对方明确答复一次
     #   reply     回复，是对某条 inquiry 的答复
-    #   chitchat  闲聊，可双向多轮
     #   notify    单向通知，不期望回复
     message_type: str = Field(default="notify", index=True)
     # 在同一条消息链路里的位置：父消息的 cascade_depth + 1；首发消息为 0。

@@ -13,7 +13,7 @@ SYSTEM_NOTICE_USER_REPLAY_TAG_PREFIXES = (
 
 def normalize_ai_message_type(value: Any, require_reply: bool) -> str:
     text = str(value or "").strip().lower()
-    if text in {"inquiry", "reply", "chitchat", "notify"}:
+    if text in {"inquiry", "reply", "notify"}:
         return text
     return "inquiry" if require_reply else "notify"
 
@@ -50,8 +50,7 @@ def render_ai_message_system_prompt(prompt: AIMessagePrompt) -> str:
     message_type_guide = (
         "- inquiry（询问）：发送方在提问、请求状态或请求结果，通常需要你答复。\n"
         "- reply（回复）：发送方在答复你之前发出的 inquiry，通常不需要再答复，除非内容明确提出新问题。\n"
-        "- notify（通知）：发送方在单向告知状态、结果或提醒，不期待你回复。\n"
-        "- chitchat（闲聊）：非任务型闲聊，可自然继续多轮。"
+        "- notify（通知）：发送方在单向告知状态、结果或提醒，不期待你回复。"
     )
     reply_rule = (
         "这条消息需要你回复。回复时调用 MCP 工具 `message.send+to`，"

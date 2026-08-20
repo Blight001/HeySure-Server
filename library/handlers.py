@@ -63,8 +63,32 @@ def list_inheritance_thoughts(
     args: Dict[str, Any],
     ai_config_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    _ = args, ai_config_id
-    return librarian_service.list_inheritance_thoughts(user_id=int(user_id))
+    _ = ai_config_id
+    try:
+        limit_raw = args.get("limit", 20)
+        limit = int(limit_raw)
+        if limit < 1 or limit > 200:
+            raise ValueError("limit must be between 1 and 200")
+        offset_raw = args.get("offset", 0)
+        offset = int(offset_raw)
+        if offset < 0:
+            raise ValueError("offset must be 0 or greater")
+        return librarian_service.list_inheritance_thoughts(
+            user_id=int(user_id),
+            query=str(args.get("query") or "").strip(),
+            limit=limit,
+            offset=offset,
+            compact=bool(args.get("compact", True)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_LIST_OPTIONS",
+                "message": str(exc),
+                "next_step": "Use limit=1..200, offset>=0, compact=true/false, and an optional query string.",
+            },
+        ) from exc
 
 
 def get_inheritance_thought(

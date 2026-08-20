@@ -128,11 +128,10 @@ DEFAULT_AI_MESSAGE_NOTIFY_TEMPLATE = """[系统通知 · AI 间通信 · 单向]
 - 通知内容:
 {content}
 
-仅当你判断该信息需要沟通时，才考虑主动发起一条新的 inquiry 或 chitchat；否则保持沉默。"""
+仅当你判断该信息需要沟通时，才考虑主动发起一条新的 inquiry；否则保持沉默。"""
 
 
-# AI ↔ AI 询问 / 回复 / 闲聊：按 message_type 分流的入站模板。
-# 这三个模板取代旧版"什么消息都要求回信"的兜底逻辑。
+# AI ↔ AI 询问 / 回复：按 message_type 分流的入站模板。
 DEFAULT_AI_MESSAGE_INQUIRY_TEMPLATE = """[AI 间通信 · 询问]
 {from_ai_name} 向你提出了一个询问，需要你给出明确答复**一次**。
 
@@ -155,18 +154,6 @@ DEFAULT_AI_MESSAGE_REPLY_TEMPLATE = """[AI 间通信 · 收到答复]
 - 本次答复消息编号: {message_id}
 - 答复上下文与内容:
 {content}"""
-
-DEFAULT_AI_MESSAGE_CHITCHAT_TEMPLATE = """[AI 间通信 · 闲聊]
-{from_ai_name} 给你发了一条闲聊消息。
-
-- 收件方（你）: {target_ai_name}（ai_config_id={target_ai_config_id}）
-- 发送方: {from_ai_name}（ai_config_id={from_ai_config_id}）
-- 消息编号: {message_id}
-- 内容:
-{content}"""
-
-# 兼容旧配置字段；当前工具层不再用它限制 AI 间消息轮次。
-CHITCHAT_MAX_DEPTH = 5
 
 DEFAULT_USER_MESSAGE_NOTICE = """[系统提示] 你已向用户发出一条消息（{channel}）。
 用户的回复（如有）会通过正常对话渠道返回，请不要重复发送。"""

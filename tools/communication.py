@@ -31,11 +31,11 @@ from ai_runtime.inference import ai_message_service
 from api.runtime.run_context import get_run_session_context
 
 
-_ALLOWED_MESSAGE_TYPES = {"inquiry", "reply", "chitchat", "notify"}
+_ALLOWED_MESSAGE_TYPES = {"inquiry", "reply", "notify"}
 _MESSAGE_TYPE_HINT = (
     'message_type is required. Use "inquiry" for a question/request that expects an answer, '
-    '"reply" for answering a previous inquiry, "notify" for one-way notification/status/result '
-    'that does not expect an answer, or "chitchat" for casual multi-turn chat.'
+    '"reply" for answering a previous inquiry, or "notify" for a one-way notification/status/result '
+    'that does not expect an answer.'
 )
 DEFAULT_REPLY_WAIT_SECONDS = 24 * 60 * 60
 

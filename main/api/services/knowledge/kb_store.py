@@ -60,7 +60,6 @@ _SYSTEM_PROMPT_DEFAULTS: Dict[str, str] = {
     "prompt_ai_message_inquiry": _defaults.DEFAULT_AI_MESSAGE_INQUIRY_TEMPLATE,
     "prompt_ai_message_inquiry_reminder": _defaults.DEFAULT_AI_MESSAGE_INQUIRY_REMINDER,
     "prompt_ai_message_reply": _defaults.DEFAULT_AI_MESSAGE_REPLY_TEMPLATE,
-    "prompt_ai_message_chitchat": _defaults.DEFAULT_AI_MESSAGE_CHITCHAT_TEMPLATE,
     "prompt_ai_message_reply_success": _defaults.DEFAULT_AI_MESSAGE_REPLY_SUCCESS,
     "prompt_user_message_notice": _defaults.DEFAULT_USER_MESSAGE_NOTICE,
 }
@@ -95,7 +94,6 @@ SYSTEM_PROMPT_KEYS: Tuple[Tuple[str, str], ...] = (
     ("prompt_ai_message_inquiry", "text"),
     ("prompt_ai_message_inquiry_reminder", "text"),
     ("prompt_ai_message_reply", "text"),
-    ("prompt_ai_message_chitchat", "text"),
     ("prompt_ai_message_reply_success", "text"),
     ("prompt_user_message_notice", "text"),
 )
