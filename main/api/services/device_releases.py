@@ -92,6 +92,7 @@ def public_catalog(base_url: str, root: Path = RELEASE_ROOT) -> dict[str, Any]:
             target = dict(raw_target)
             target_id = _safe_id(target.get("id"), "target id")
             artifact = _artifact_path(root, target.pop("artifact", ""))
+            target.pop("releases", None)
             external_url = _external_url(target.get("external_url"))
             available = bool(external_url or (artifact and artifact.is_file()))
             target["available"] = available
