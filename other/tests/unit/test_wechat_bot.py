@@ -25,6 +25,8 @@ from connector_runtime.bots.wechat.media import (
 from connector_runtime.bots.wechat.router import _message_text, _parse_incoming
 from connector_runtime.bots.wechat.routes_store import load_wechat_route, register_wechat_route
 from connector_runtime.bots.wechat.adapter import split_wechat_text
+from connector_runtime.bots import notify as bot_notify
+from connector_runtime.bots.wechat import service as wechat_service
 
 
 def test_wechat_adapter_is_registered():
@@ -106,6 +108,128 @@ def test_ilink_send_text_uses_protocol_headers_and_base_info(monkeypatch):
     assert msg["message_state"] == 2
     assert msg["client_id"].startswith("heysure-wechat-")
     assert captured["json"]["base_info"]["bot_agent"] == "HeySureAI/2.0.0"
+
+
+def test_forward_bot_falls_back_to_enabled_channel_with_recipient():
+    class FakeBot:
+        def __init__(self, channel, enabled, ready):
+            self.channel = channel
+            self.label = channel
+            self._enabled = enabled
+            self._ready = ready
+
+        def is_enabled(self, _cfg):
+            return self._enabled
+
+        def has_default_recipient(self, _cfg):
+            return self._ready
+
+    feishu = FakeBot("feishu", False, False)
+    wechat = FakeBot("wechat", True, True)
+
+    bot, warning = bot_notify._forward_bot(
+        SimpleNamespace(bot_channel="feishu"),
+        [feishu, wechat],
+    )
+
+    assert bot is wechat
+    assert warning is None
+
+
+def test_wechat_send_retry_reuses_client_id(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send_text(self, **kwargs):
+            calls.append(kwargs)
+            return {"ret": 7 if len(calls) == 1 else 0}
+
+    monkeypatch.setattr(wechat_service, "ILinkClient", FakeClient)
+    monkeypatch.setattr(
+        wechat_service,
+        "_connection",
+        lambda *_args, **_kwargs: (SimpleNamespace(base_url="https://ilinkai.weixin.qq.com"), "token"),
+    )
+    monkeypatch.setattr(wechat_service.time, "sleep", lambda _seconds: None)
+
+    result = wechat_service.send_wechat_text(
+        1,
+        2,
+        text="hello",
+        to_user_id="peer",
+        context_token="context",
+    )
+
+    assert result == {"success": True}
+    assert len(calls) == 2
+    assert calls[0]["client_id"] == calls[1]["client_id"]
+
+
+def test_wechat_send_failure_exposes_only_provider_ret(monkeypatch):
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send_text(self, **_kwargs):
+            return {"ret": 11, "sensitive": "must-not-leak"}
+
+    monkeypatch.setattr(wechat_service, "ILinkClient", FakeClient)
+    monkeypatch.setattr(
+        wechat_service,
+        "_connection",
+        lambda *_args, **_kwargs: (SimpleNamespace(base_url="https://ilinkai.weixin.qq.com"), "token"),
+    )
+    monkeypatch.setattr(wechat_service.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(Exception) as caught:
+        wechat_service.send_wechat_text(
+            1,
+            2,
+            text="hello",
+            to_user_id="peer",
+            context_token="context",
+        )
+
+    assert "ret=11" in str(caught.value)
+    assert "must-not-leak" not in str(caught.value)
+
+
+def test_wechat_send_retries_transient_http_error(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send_text(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                response = SimpleNamespace(status_code=503)
+                raise wechat_service.requests.HTTPError(response=response)
+            return {"ret": 0}
+
+    monkeypatch.setattr(wechat_service, "ILinkClient", FakeClient)
+    monkeypatch.setattr(
+        wechat_service,
+        "_connection",
+        lambda *_args, **_kwargs: (SimpleNamespace(base_url="https://ilinkai.weixin.qq.com"), "token"),
+    )
+    monkeypatch.setattr(wechat_service.time, "sleep", lambda _seconds: None)
+
+    result = wechat_service.send_wechat_text(
+        1,
+        2,
+        text="hello",
+        to_user_id="peer",
+        context_token="context",
+    )
+
+    assert result == {"success": True}
+    assert len(calls) == 2
+    assert calls[0]["client_id"] == calls[1]["client_id"]
 
 
 def test_wechat_text_chunks_prefer_visible_boundaries():

@@ -102,7 +102,14 @@ class ILinkClient:
             timeout=40.0,
         )
 
-    def send_text(self, *, to_user_id: str, context_token: str, text: str) -> Dict[str, Any]:
+    def send_text(
+        self,
+        *,
+        to_user_id: str,
+        context_token: str,
+        text: str,
+        client_id: str = "",
+    ) -> Dict[str, Any]:
         return self._post(
             "ilink/bot/sendmessage",
             {
@@ -112,7 +119,7 @@ class ILinkClient:
                     # iLink may return HTTP 200 for an incomplete message
                     # envelope while silently dropping it downstream. Keep
                     # text sends identical to the working media path.
-                    "client_id": f"heysure-wechat-{uuid.uuid4().hex}",
+                    "client_id": client_id or f"heysure-wechat-{uuid.uuid4().hex}",
                     "message_type": 2,
                     "message_state": 2,
                     "context_token": str(context_token),

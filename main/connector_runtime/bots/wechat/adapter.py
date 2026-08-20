@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
+from fastapi import HTTPException
 from sqlmodel import Session
 
 from api.database import engine
@@ -115,7 +116,14 @@ class WeChatBot(BotAdapter):
                     connection_ref=str(route.connection_ref),
                 )
             except Exception as exc:
-                logger.warning("wechat reply failed message_id=%s error_type=%s", message.id, type(exc).__name__)
+                status = exc.status_code if isinstance(exc, HTTPException) else "unknown"
+                detail = exc.detail if isinstance(exc, HTTPException) else type(exc).__name__
+                logger.warning(
+                    "wechat reply failed message_id=%s status=%s detail=%s",
+                    message.id,
+                    status,
+                    detail,
+                )
                 return
 
     def diagnose(self, cfg: "AssistantAIConfig", *, user_id: int) -> Dict[str, Any]:
