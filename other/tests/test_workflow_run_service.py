@@ -35,7 +35,7 @@ from api.services.workflows.run_service import (
     RunActorContext,
 )
 from api.services.workflows.expression import resolve_target_arguments
-from api.services.workflows.step_device_binding import step_run_device_id
+from api.services.workflows.step_runtime import step_run_device_id
 from api.services.workflows.ai_interaction import (
     advance_interactive_run,
     ai_review_payload,

@@ -71,7 +71,7 @@ PAUSABLE_RUN_STATUSES = {
 
 AUTOMATION_DEFINITION_GUIDANCE = (
     "definition 使用工作流 Schema v1：顶层至少包含 schemaVersion=1、startStepId 和非空 steps；"
-    "可选 inputSchema、limits、output、compatibility。steps 是以步骤 ID 为键的对象，只支持以下节点："
+    "可选 inputSchema、limits、output、compatibility。steps 是以步骤 ID 为键的对象，支持以下节点："
     "① mcp：{type:'mcp',toolRef:{namespace:'device',name,deviceId},arguments:{},saveAs,next}。"
     "deviceId 可指向当前 AI 有权调用的任意已绑定设备；不同节点可分别使用桌面端、Linux、浏览器、"
     "Android 或自建设备上的 MCP，不限于浏览器自动化。服务端自动从节点汇总契约设备。"
@@ -81,7 +81,12 @@ AUTOMATION_DEFINITION_GUIDANCE = (
     "③ delay：{type:'delay',delaySeconds,next}；"
     "④ ai：{type:'ai',prompt,saveAs,next}，运行到此节点时暂停并把此前完整步骤轨迹和 prompt 返回给负责的 AI；"
     "AI 完成审核或指定任务后调用 action=respond，通过 parameters 回传参数并从 next 继续，"
-    "可用 onError 指向拒绝或失败分支；⑤ end：{type:'end'}，可选 output。"
+    "可用 onError 指向拒绝或失败分支；⑤ end：{type:'end'}，可选 output；"
+    "⑥ card：{type:'card',cardRef:{id,versionId},input:{},saveAs,next,onError}，用于确定性调用子卡片。"
+    "发布时服务端会校验同一用户所有权和调用权限，把省略的 versionId 固定为当时最新版，并将固定版本编译进父卡；"
+    "条件分支选择图片/视频等已有卡片时必须直接使用 condition→card，不要用 ai 节点判断后再调用 automation.manage。"
+    "card input 按子卡 inputSchema 校验，完成输出保存到 steps.<saveAs>.result；子卡失败、超时或超过转换限制"
+    "按 onError 传播（省略或 fail 则父运行失败），取消父运行会一并取消当前子卡执行。禁止直接或间接循环引用。"
     "参数和输出可用 ${input.<字段>}、${steps.<saveAs>.result.<字段>}、"
     "${steps.<saveAs>.error.<字段>} 模板；input 字段必须先在 inputSchema.properties 声明。"
     "录制后逐节点核对实际返回结构，避免多写或少写 result 层；JSON Schema 的 default 不会注入 input，"
@@ -98,6 +103,48 @@ AUTOMATION_DEFINITION_GUIDANCE = (
     "不要手工猜测摘要，设备离线时应先让设备上线。"
     "所有跳转目标必须存在，流程不得成环，且每条可达路径最终必须到达 end。"
 )
+
+
+AUTOMATION_DEFINITION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "schemaVersion": {"type": "integer", "enum": [1]},
+        "inputSchema": {"type": "object"},
+        "startStepId": {"type": "string"},
+        "steps": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["mcp", "condition", "delay", "ai", "end", "card"],
+                    },
+                    "cardRef": {
+                        "type": "object",
+                        "description": "type=card 时必填；id 必填，versionId 可省略并在发布时固定为最新版。",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "versionId": {"type": "string"},
+                            "name": {"type": "string"},
+                        },
+                        "required": ["id"],
+                    },
+                    "input": {"type": "object"},
+                    "saveAs": {"type": "string"},
+                    "next": {"type": "string"},
+                    "onError": {"type": "string"},
+                },
+                "required": ["type"],
+            },
+        },
+        "limits": {"type": "object"},
+        "output": {},
+        "compatibility": {"type": "object"},
+    },
+    "required": ["schemaVersion", "startStepId", "steps"],
+}
 
 
 def _require_enabled(*, run: bool = False) -> None:
@@ -1008,7 +1055,7 @@ AUTOMATION_MANAGE_SCHEMA = {
         },
         "risk_level": {"type": "string"},
         "definition": {
-            "type": "object",
+            **AUTOMATION_DEFINITION_SCHEMA,
             "description": (
                 "供 create 或 replace_definition 使用的完整定义。不要凭空手写复杂流程；优先实战录制生成，"
                 "小细节用 patch；基于已审核版本做结构性重构时用 replace_definition。元数据仍使用 edit。"

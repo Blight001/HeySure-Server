@@ -24,7 +24,14 @@ from .audit import add_audit
 from .expression import evaluate_expression, render_template, resolve_target_arguments
 from .result_store import device_step_error, save_result
 from .secrets import decrypt_json, encrypt_json
-from .step_device_binding import step_contract, step_device_id
+from .step_runtime import (
+    step_contract,
+    step_device_id,
+    enter_nested_frame,
+    leave_nested_frame,
+    nested_limit_violation,
+    require_nested_card_access,
+)
 from .workflow_cancellation import (
     cancel_workflow_run,
 )
@@ -250,6 +257,10 @@ def create_run(
     if not version or not WorkflowCard.is_runnable_status(card.status):
         raise ValueError("CARD_VERSION_NOT_RUNNABLE")
     definition = _load(version.definition_json, {})
+    require_nested_card_access(
+        session, user_id=user_id, definition=definition,
+        actor_type=actor.actor_type, actor_id=actor.actor_id,
+    )
     _require_device_for_mcp_run(session, user_id, device_id, definition)
     selected_start, initial_status, variables, initial_wakeup = _initial_run_state(definition, actor, now=time.time())
     errors = list(Draft202012Validator(definition.get("inputSchema", {"type": "object"})).iter_errors(input_value))
@@ -376,6 +387,23 @@ def _nested_card_error(
     session.add(run)
 
 
+def _enforce_nested_limits(
+    session: Session, run: WorkflowRun, variables: Dict[str, Any], now: float,
+) -> bool:
+    violation = nested_limit_violation(
+        variables, transition_count=run.transition_count, run_deadline=run.deadline_at, now=now,
+    )
+    if not violation:
+        return False
+    frame, code, message = violation
+    leave_nested_frame(variables)
+    run.variables_json = _dump(variables)
+    _nested_card_error(session, run, {
+        "onError": frame.get("onError"), "saveAs": frame.get("saveAs"),
+    }, error_payload(code, message, "nested_card"), now)
+    return True
+
+
 def _advance_nested_card_step(
     session: Session, run: WorkflowRun, step: Dict[str, Any], step_type: str, now: float,
 ) -> bool:
@@ -383,6 +411,9 @@ def _advance_nested_card_step(
         return False
     entered = run.current_step_id
     if step_type == "_card_error":
+        variables = _load(run.variables_json, {"steps": {}})
+        leave_nested_frame(variables)
+        run.variables_json = _dump(variables)
         _nested_card_error(
             session, run, step,
             error_payload("NESTED_CARD_FAILED", "referenced card failed", "nested_card"), now,
@@ -404,6 +435,13 @@ def _advance_nested_card_step(
         )
         return True
     variables = _load(run.variables_json, {"steps": {}})
+    if step_type == "_card_enter":
+        enter_nested_frame(
+            variables, step_id=entered, step=step, run_deadline=run.deadline_at,
+            transition_count=run.transition_count, now=now,
+        )
+    else:
+        leave_nested_frame(variables)
     saved = {"input": rendered} if step_type == "_card_enter" else rendered
     variables.setdefault("steps", {})[str(step.get("saveAs") or entered)] = {"result": _redact(saved)}
     run.variables_json = _dump(variables)
@@ -443,6 +481,10 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
         session.commit()
         return run
     definition = _load(version.definition_json, {})
+    variables = _load(run.variables_json, {"steps": {}})
+    if _enforce_nested_limits(session, run, variables, now):
+        session.commit()
+        return run
     limits = definition.get("limits", {})
     if run.transition_count >= int(limits.get("maxTransitions", 100)):
         fail_run(session, run, error_payload("MAX_TRANSITIONS_EXCEEDED", "transition limit reached", "run"))

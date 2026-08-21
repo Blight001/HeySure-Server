@@ -6,7 +6,7 @@ from api.models import DevicePresence, WorkflowStepRun
 from api.services.workflows.ai_interaction import create_validated_run
 from api.services.workflows.compiler import schema_digest
 from api.services.workflows.run_service import advance_run
-from api.services.workflows.step_device_binding import step_run_device_id
+from api.services.workflows.step_runtime import step_run_device_id
 from test_workflow_run_service import _database, _seed
 
 

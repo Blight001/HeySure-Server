@@ -6,7 +6,7 @@ from api.models import AssistantAIConfig, DevicePresence, User, WorkflowCard, Wo
 from api.services.workflows.card_service import create_card, delete_card, owned_card, update_card
 from api.services.workflows.schemas import CardCreate, CardUpdate
 from api.services.workflows.ai_interaction import _run_device_id
-from api.services.workflows.step_device_binding import step_device_id
+from api.services.workflows.step_runtime import step_device_id
 from api.models import WorkflowRun
 
 

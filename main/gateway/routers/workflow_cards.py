@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlmodel import Session, select
@@ -22,7 +22,16 @@ from api.services.workflows.card_service import (
 from api.services.workflows.compiler import WorkflowValidationError
 from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.patch_service import patch_card_definition
-from api.services.workflows.schemas import CardCreate, CardLayoutUpdate, CardUpdate, TraceDraftRequest
+from api.services.workflows.definition_replace_service import replace_card_definition
+from api.services.workflows.preview_token import consume_preview_token
+from api.services.workflows.schemas import (
+    CardCreate,
+    CardLayoutUpdate,
+    CardUpdate,
+    DefinitionPatchRequest,
+    DefinitionReplaceRequest,
+    TraceDraftRequest,
+)
 from api.core.settings import settings
 from .auth import get_current_user
 
@@ -34,11 +43,6 @@ def _require_enabled() -> None:
 
 router = APIRouter(dependencies=[Depends(_require_enabled)])
 PREFIX = "/api/workflow-cards"
-
-
-class DefinitionPatchRequest(CardUpdate):
-    base_version_id: str
-    operations: list[dict]
 
 
 def _validation_error(exc: WorkflowValidationError) -> HTTPException:
@@ -168,6 +172,21 @@ def patch_card(
         raise _validation_error(exc)
 
 
+def _owned_version(
+    session: Session, row: WorkflowCard, version_id: Optional[str] = None,
+) -> WorkflowCardVersion:
+    selected_id = str(version_id or row.latest_version_id or "")
+    version = session.exec(
+        select(WorkflowCardVersion).where(
+            WorkflowCardVersion.id == selected_id,
+            WorkflowCardVersion.card_id == row.id,
+        )
+    ).first()
+    if not version:
+        raise HTTPException(status_code=404, detail={"code": "CARD_VERSION_NOT_FOUND"})
+    return version
+
+
 @router.put("/{card_id}/layout")
 def save_card_layout(
     card_id: str,
@@ -197,12 +216,59 @@ def patch_definition(
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
     try:
+        operations: Any = body.operations
+        if body.preview_token and not body.dry_run:
+            operations = consume_preview_token(
+                body.preview_token,
+                action="patch",
+                user_id=user.id,
+                card_id=row.id,
+                base_version_id=body.base_version_id,
+            )
+        if not isinstance(operations, list):
+            raise WorkflowValidationError(["patch requires operations or preview_token"])
         return patch_card_definition(
             session,
             card=row,
             user_id=user.id,
             base_version_id=body.base_version_id,
-            operations=body.operations,
+            operations=operations,
+            dry_run=body.dry_run,
+        )
+    except WorkflowValidationError as exc:
+        raise _validation_error(exc)
+
+
+@router.post("/{card_id}/replace-definition")
+def replace_definition(
+    card_id: str,
+    body: DefinitionReplaceRequest,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    row = owned_card(session, user.id, card_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
+    try:
+        definition: Any = body.definition
+        if body.preview_token and not body.dry_run:
+            definition = consume_preview_token(
+                body.preview_token,
+                action="replace_definition",
+                user_id=user.id,
+                card_id=row.id,
+                base_version_id=body.base_version_id,
+            )
+        if not isinstance(definition, dict):
+            raise WorkflowValidationError(["replace_definition requires definition or preview_token"])
+        return replace_card_definition(
+            session,
+            card=row,
+            user_id=user.id,
+            base_version_id=body.base_version_id,
+            definition=definition,
+            dry_run=body.dry_run,
         )
     except WorkflowValidationError as exc:
         raise _validation_error(exc)
@@ -242,6 +308,43 @@ def versions(
     return {"items": [version_payload(item) for item in items]}
 
 
+@router.get("/{card_id}/definition")
+def get_definition(
+    card_id: str,
+    version_id: Optional[str] = Query(default=None),
+    step_offset: int = Query(default=0, ge=0),
+    step_limit: Optional[int] = Query(default=None, ge=1, le=100),
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Return an immutable definition in full, or a deterministic page of its steps."""
+    user = get_current_user(authorization, session)
+    row = owned_card(session, user.id, card_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
+    version = _owned_version(session, row, version_id)
+    payload = version_payload(version, include_definition=True)
+    definition = payload["definition"]
+    steps = definition.get("steps") if isinstance(definition, dict) else None
+    ordered = list(steps.items()) if isinstance(steps, dict) else []
+    end = len(ordered) if step_limit is None else min(len(ordered), step_offset + step_limit)
+    selected = ordered[step_offset:end]
+    if step_offset or step_limit is not None:
+        definition = dict(definition)
+        definition["steps"] = dict(selected)
+        payload["definition"] = definition
+    payload["step_page"] = {
+        "offset": step_offset,
+        "limit": step_limit,
+        "returned": len(selected),
+        "total": len(ordered),
+        "has_more": end < len(ordered),
+        "next_offset": end if end < len(ordered) else None,
+        "definition_complete": step_offset == 0 and end == len(ordered),
+    }
+    return payload
+
+
 @router.get("/{card_id}/versions/{version_id}")
 def get_version(
     card_id: str,
@@ -253,14 +356,7 @@ def get_version(
     row = owned_card(session, user.id, card_id)
     if not row:
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
-    version = session.exec(
-        select(WorkflowCardVersion).where(
-            WorkflowCardVersion.id == version_id,
-            WorkflowCardVersion.card_id == row.id,
-        )
-    ).first()
-    if not version:
-        raise HTTPException(status_code=404, detail={"code": "CARD_VERSION_NOT_FOUND"})
+    version = _owned_version(session, row, version_id)
     return version_payload(version, include_definition=True)
 
 

@@ -17,7 +17,7 @@ from api.services.workflows.run_service import (
     fail_step_dispatch,
     render_step_arguments,
 )
-from api.services.workflows.step_device_binding import step_run_device_id
+from api.services.workflows.step_runtime import step_run_device_id
 from connector_runtime.dispatch.device_dispatch import dispatch_task_to_agent, redeliver_dispatch
 
 

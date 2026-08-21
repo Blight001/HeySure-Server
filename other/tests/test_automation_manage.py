@@ -124,6 +124,18 @@ def test_automation_description_teaches_ai_all_supported_node_shapes():
         assert "建议 1800 秒" in description
 
 
+def test_automation_description_and_schema_expose_deterministic_card_nodes():
+    description = AUTOMATION_MANAGE_SCHEMA["properties"]["definition"]["description"]
+    assert "type:'card'" in description
+    assert "condition→card" in description
+    assert "不要用 ai 节点判断" in description
+    step_type = AUTOMATION_MANAGE_SCHEMA["properties"]["definition"]["properties"]["steps"]
+    assert "card" in step_type["additionalProperties"]["properties"]["type"]["enum"]
+    card_ref = step_type["additionalProperties"]["properties"]["cardRef"]
+    assert card_ref["required"] == ["id"]
+    assert "发布时固定" in card_ref["description"]
+
+
 def test_removed_human_confirmation_is_not_actionable_by_ai():
     explicit = SimpleNamespace(
         id="confirm-user",

@@ -35,6 +35,20 @@ class CardLayoutUpdate(BaseModel):
     positions: Dict[str, Dict[str, float]] = Field(default_factory=dict)
 
 
+class DefinitionPatchRequest(BaseModel):
+    base_version_id: str = Field(min_length=1, max_length=80)
+    operations: Optional[List[Dict[str, Any]]] = Field(default=None, min_length=1, max_length=100)
+    dry_run: bool = False
+    preview_token: Optional[str] = Field(default=None, min_length=1)
+
+
+class DefinitionReplaceRequest(BaseModel):
+    base_version_id: str = Field(min_length=1, max_length=80)
+    definition: Optional[Dict[str, Any]] = None
+    dry_run: bool = False
+    preview_token: Optional[str] = Field(default=None, min_length=1)
+
+
 class TraceDraftRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)

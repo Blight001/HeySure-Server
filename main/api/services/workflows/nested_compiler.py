@@ -76,6 +76,7 @@ def _boundary_steps(
             "next": step_ids.get(str(child.get("startStepId") or ""), ""),
             "onError": str(step.get("onError") or "fail"),
             "cardRef": deepcopy(card_ref),
+            "_nestedLimits": deepcopy(child.get("limits") or {}),
         },
         error_id: {
             "type": "_card_error",

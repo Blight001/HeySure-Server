@@ -39,6 +39,31 @@ def _referenced_version(
     return card, version
 
 
+def _nested_card_ids(definition: Dict[str, Any]) -> set[str]:
+    """Collect immutable card ancestry already embedded in a compiled version."""
+    found: set[str] = set()
+    steps = definition.get("steps") if isinstance(definition.get("steps"), dict) else {}
+    for step in steps.values():
+        if not isinstance(step, dict):
+            continue
+        nested_id = str(step.get("_nestedCardId") or "").strip()
+        if nested_id:
+            found.add(nested_id)
+        ref = step.get("cardRef") if isinstance(step.get("cardRef"), dict) else {}
+        ref_id = str(ref.get("id") or "").strip()
+        if ref_id:
+            found.add(ref_id)
+    return found
+
+
+def _pin_editor_reference(steps: Dict[str, Any], step_id: str, ref: Dict[str, Any]) -> None:
+    step = steps.get(step_id)
+    if not isinstance(step, dict):
+        return
+    step["cardRef"] = ref
+    step.pop("_definition", None)
+
+
 def resolve_card_references(
     session: Session, *, user_id: int, parent_card_id: str, definition: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -71,12 +96,14 @@ def resolve_card_references(
         if not version:
             errors.append(f"step {step_id}: referenced card version does not exist")
             continue
+        child_definition = _load(version.definition_json)
+        if parent_card_id in _nested_card_ids(child_definition):
+            errors.append(f"step {step_id}: referenced card would create an indirect card cycle")
+            continue
         normalized_ref = {"id": card.id, "versionId": version.id, "name": card.name}
         step["cardRef"] = normalized_ref
-        step["_definition"] = _load(version.definition_json)
-        if isinstance(pinned_steps.get(step_id), dict):
-            pinned_steps[step_id]["cardRef"] = normalized_ref
-            pinned_steps[step_id].pop("_definition", None)
+        step["_definition"] = child_definition
+        _pin_editor_reference(pinned_steps, step_id, normalized_ref)
     if errors:
         raise WorkflowValidationError(errors)
     return hydrated, pinned
