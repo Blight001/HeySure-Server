@@ -26,6 +26,21 @@ router = APIRouter()
 PREFIX = "/api/admin"
 
 
+def _ensure_repo_operation_idle() -> None:
+    """Keep manual service mutations out of an update or rollback window."""
+    from api.services import repo_update, repo_versions
+
+    repo_versions.sync_remote_rollback_state()
+    repo_update.sync_remote_update_state()
+    state = repo_update.get_state()
+    if state.get("running"):
+        phase = str(state.get("phase") or "unknown")
+        raise HTTPException(
+            status_code=409,
+            detail=f"版本更新或回退正在进行（{phase}），暂不能重启或重建服务",
+        )
+
+
 @router.get("/services")
 def list_services(_admin: User = Depends(require_admin_user)) -> dict:
     return {"services": list_service_statuses(), "checked_at": time.time()}
@@ -137,6 +152,7 @@ def rebuild_all_services(
 ) -> dict:
     from api.services import repo_rebuild
 
+    _ensure_repo_operation_idle()
     try:
         payload = repo_rebuild.rebuild_all_containers()
     except repo_rebuild.RepoUpdateError as exc:
@@ -160,6 +176,7 @@ def restart_service(
     session: Session = Depends(get_session),
     admin: User = Depends(require_admin_user),
 ) -> dict:
+    _ensure_repo_operation_idle()
     target = service_target(key)
     if target is None:
         raise HTTPException(status_code=404, detail="未知的子服务")
@@ -200,6 +217,7 @@ def restart_all_services(
     admin: User = Depends(require_admin_user),
 ) -> dict:
     """Restart the four application runtimes, scheduling Gateway last."""
+    _ensure_repo_operation_idle()
     restarted = []
     errors = {}
     for key in ("mcp", "connector", "ai"):

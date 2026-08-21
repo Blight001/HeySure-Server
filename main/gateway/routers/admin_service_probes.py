@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import math
+import os
+import platform
+import socket
 import time
 from typing import Any, Dict
 
 import httpx
+import psutil
 from sqlmodel import Session, select
 
 from api.core.settings import settings
@@ -26,6 +31,103 @@ def probe_gateway() -> Dict[str, Any]:
     ok = bool(snapshot.get("ready") and database.get("ok"))
     summary = "已就绪并接受请求" if ok else str(snapshot.get("readiness_error") or "未就绪")
     return _result("running" if ok else "degraded", summary, detail)
+
+
+def probe_host_info() -> Dict[str, Any]:
+    """Return an admin-safe snapshot of the machine running Gateway."""
+    detail: Dict[str, Any] = {}
+    collection_errors = []
+    collectors = (
+        ("identity", _host_identity),
+        ("cpu", _host_cpu),
+        ("memory", _host_memory),
+        ("disk", _host_disk),
+        ("uptime_seconds", _host_uptime_seconds),
+    )
+    for key, collector in collectors:
+        try:
+            value = collector()
+            if key == "identity":
+                detail.update(value)
+            else:
+                detail[key] = value
+        except Exception:
+            collection_errors.append(key)
+    if collection_errors:
+        detail["collection_errors"] = collection_errors
+    status = "running" if not collection_errors else "degraded"
+    return _result(status, _host_summary(detail), detail)
+
+
+def _host_identity() -> Dict[str, Any]:
+    uname = platform.uname()
+    return {
+        "hostname": socket.gethostname(),
+        "os": uname.system,
+        "os_release": uname.release,
+        "architecture": uname.machine,
+    }
+
+
+def _host_cpu() -> Dict[str, Any]:
+    return {
+        "logical_count": psutil.cpu_count(logical=True),
+        "physical_count": psutil.cpu_count(logical=False),
+        "usage_percent": _safe_percent(psutil.cpu_percent(interval=None)),
+    }
+
+
+def _host_memory() -> Dict[str, Any]:
+    memory = psutil.virtual_memory()
+    return {
+        "total_bytes": _safe_bytes(memory.total),
+        "available_bytes": _safe_bytes(memory.available),
+        "used_bytes": _safe_bytes(memory.used),
+        "usage_percent": _safe_percent(memory.percent),
+    }
+
+
+def _host_disk() -> Dict[str, Any]:
+    disk = psutil.disk_usage(os.path.abspath(os.sep))
+    return {
+        "total_bytes": _safe_bytes(disk.total),
+        "free_bytes": _safe_bytes(disk.free),
+        "used_bytes": _safe_bytes(disk.used),
+        "usage_percent": _safe_percent(disk.percent),
+    }
+
+
+def _host_uptime_seconds() -> float:
+    return round(max(0.0, time.time() - float(psutil.boot_time())), 1)
+
+
+def _safe_bytes(value: Any) -> int:
+    return max(0, int(value))
+
+
+def _safe_percent(value: Any) -> float | None:
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return None
+    return round(min(100.0, max(0.0, numeric)), 1)
+
+
+def _host_summary(detail: Dict[str, Any]) -> str:
+    cpu = detail.get("cpu") or {}
+    memory = detail.get("memory") or {}
+    disk = detail.get("disk") or {}
+    parts = []
+    if cpu.get("logical_count") is not None:
+        usage = cpu.get("usage_percent")
+        parts.append(f"CPU {cpu['logical_count']} 线程 / {usage if usage is not None else '—'}%")
+    if memory.get("usage_percent") is not None:
+        parts.append(f"内存 {memory['usage_percent']}%")
+    if disk.get("usage_percent") is not None:
+        parts.append(f"磁盘 {disk['usage_percent']}%")
+    summary = " · ".join(parts) or "基础信息不可用"
+    if detail.get("collection_errors"):
+        summary += " · 部分信息不可用"
+    return summary
 
 
 def probe_postgres() -> Dict[str, Any]:

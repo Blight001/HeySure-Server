@@ -1,5 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
+from api.services import repo_update, repo_versions
 from gateway.routers import admin_runtime_routes
 
 
@@ -42,3 +46,63 @@ def test_serialize_task_preserves_admin_contract():
     assert payload["user_name"] == "Owner"
     assert payload["user_account"] == "owner"
     assert payload["updated_at"] == 3.0
+
+
+def test_service_mutation_guard_rejects_active_repo_operation(monkeypatch):
+    synced = []
+    monkeypatch.setattr(repo_versions, "sync_remote_rollback_state", lambda: synced.append("rollback"))
+    monkeypatch.setattr(repo_update, "sync_remote_update_state", lambda: synced.append("update"))
+    monkeypatch.setattr(
+        repo_update,
+        "get_state",
+        lambda: {"running": True, "phase": "backing_up"},
+    )
+
+    with pytest.raises(HTTPException) as captured:
+        admin_runtime_routes._ensure_repo_operation_idle()
+
+    assert synced == ["rollback", "update"]
+    assert captured.value.status_code == 409
+    assert "backing_up" in str(captured.value.detail)
+
+
+def test_service_mutation_guard_allows_idle_state(monkeypatch):
+    monkeypatch.setattr(repo_versions, "sync_remote_rollback_state", lambda: None)
+    monkeypatch.setattr(repo_update, "sync_remote_update_state", lambda: None)
+    monkeypatch.setattr(repo_update, "get_state", lambda: {"running": False, "phase": "idle"})
+
+    admin_runtime_routes._ensure_repo_operation_idle()
+
+
+def test_remote_update_state_is_adopted_after_gateway_restart(monkeypatch):
+    original = repo_update.get_state()
+    monkeypatch.setattr(repo_update.settings, "repo_updater_url", "http://host-updater")
+    monkeypatch.setattr(
+        repo_update,
+        "_remote_request",
+        lambda *_args, **_kwargs: {
+            "state": {
+                "running": True,
+                "phase": "backing_up",
+                "operation": "update",
+                "operation_id": "0123456789abcdef",
+                "message": "backup",
+                "logs": ["started"],
+            }
+        },
+    )
+    try:
+        repo_update._set_state(phase="idle", running=False, trigger="", steps=repo_update._fresh_steps())
+
+        repo_update.sync_remote_update_state()
+
+        adopted = repo_update.get_state()
+        assert adopted["running"] is True
+        assert adopted["phase"] == "backing_up"
+        assert adopted["trigger"] == "update"
+        assert adopted["operation_id"] == "0123456789abcdef"
+        assert adopted["steps"][1]["status"] == "active"
+    finally:
+        with repo_update._state_lock:
+            repo_update._state.clear()
+            repo_update._state.update(original)

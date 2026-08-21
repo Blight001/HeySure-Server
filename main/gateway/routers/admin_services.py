@@ -35,6 +35,7 @@ def service_registry() -> list[ServiceTarget]:
             restartable=True, logs_available=True,
         ),
         ServiceTarget("ai", "AI 运行时", settings.ai_runtime_url, restartable=True, logs_available=True),
+        ServiceTarget("host", "服务器信息", "local", group="infrastructure"),
         ServiceTarget("web", "Web 控制台", settings.web_runtime_url, group="infrastructure"),
         ServiceTarget("postgres", "PostgreSQL", "DATABASE_URL", group="infrastructure"),
         ServiceTarget("migrations", "数据库迁移", "Alembic", group="infrastructure"),
@@ -52,6 +53,7 @@ def service_target(key: str) -> Optional[ServiceTarget]:
 def probe_service(target: ServiceTarget) -> dict:
     local_probes = {
         "gateway": probes.probe_gateway,
+        "host": probes.probe_host_info,
         "web": lambda: probes.probe_web(target.base_url),
         "postgres": probes.probe_postgres,
         "migrations": probes.probe_migrations,

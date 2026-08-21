@@ -354,76 +354,23 @@ def _remote_version_info() -> Optional[Dict[str, Any]]:
     if not settings.repo_updater_url:
         return None
     try:
-        payload = _remote_request("GET", "/version", timeout=8)
+        payload = _remote_request("GET", "/version", timeout=8); checkout = payload.get("current") if isinstance(payload.get("current"), dict) else None
+        deployed = payload.get("deployed_current") if isinstance(payload.get("deployed_current"), dict) else None; pending = bool(payload.get("deployment_pending"))
         return {
-            "git_available": False,
-            "updater_available": True,
-            "branch": str(payload.get("branch") or ""),
-            "current": payload.get("current") if isinstance(payload.get("current"), dict) else None,
+            "git_available": False, "updater_available": True,
+            "branch": str(payload.get("branch") or ""), "current": deployed if pending and deployed else checkout,
+            "checkout_current": checkout, "deployment_pending": pending,
         }
     except Exception as exc:
         logger.warning("repo-update: remote version unavailable: %s", exc)
         return None
 
 
-_REMOTE_RESTART_PHASES = {"queued_restart", "rebuilding", "restarting"}
-_REMOTE_PHASE_MESSAGES = {
-    "queued_restart": "代码已更新，等待宿主更新服务开始重建…",
-    "rebuilding": "正在构建 Docker 镜像…",
-    "restarting": "正在重建并启动 Docker 容器…",
-    "done": "服务已更新并启动",
-    "error": "宿主更新服务重建失败",
-}
-
-
 def sync_remote_update_state() -> None:
-    """Mirror the host updater's rebuild/restart phase into the gateway state."""
-    if not settings.repo_updater_url:
-        return
-    phase = str(_state.get("phase") or "")
-    if phase not in _REMOTE_RESTART_PHASES and not bool(_state.get("running")):
-        return
-    try:
-        payload = _remote_request("GET", "/state", timeout=5)
-    except Exception as exc:
-        logger.debug("repo-update: remote state unavailable: %s", exc)
-        return
-    remote_state = payload.get("state")
-    if not isinstance(remote_state, dict):
-        return
-    remote_phase = str(remote_state.get("phase") or "")
-    if not remote_phase:
-        return
+    """Mirror host update/rebuild state, including after a Gateway restart."""
+    from api.services import repo_update_remote
 
-    if remote_phase in _REMOTE_RESTART_PHASES:
-        _set_state(
-            phase=remote_phase,
-            running=True,
-            message=_REMOTE_PHASE_MESSAGES.get(remote_phase) or str(remote_state.get("message") or ""),
-            last_error="",
-            logs=list(remote_state.get("logs") or [])[-120:],
-        )
-        _set_step(_STEP_PULL, "done")
-        _set_step(_STEP_RESTART, "active")
-    elif remote_phase == "done":
-        _set_state(
-            phase="done",
-            running=False,
-            message=_REMOTE_PHASE_MESSAGES["done"],
-            last_error="",
-            logs=list(remote_state.get("logs") or [])[-120:],
-        )
-        _set_step(_STEP_PULL, "done")
-        _set_step(_STEP_RESTART, "done")
-    elif remote_phase == "error":
-        _set_state(
-            phase="error",
-            running=False,
-            message=_REMOTE_PHASE_MESSAGES["error"],
-            last_error=str(remote_state.get("last_error") or "宿主更新服务重建失败"),
-            logs=list(remote_state.get("logs") or [])[-120:],
-        )
-        _set_step(_STEP_RESTART, "error")
+    repo_update_remote.sync_remote_update_state()
 
 
 def _fetch_and_compare() -> Dict[str, Any]:
@@ -479,7 +426,7 @@ def _run_remote_check_and_maybe_update(*, trigger: str, auto_apply: bool) -> Dic
         message="正在通过宿主更新服务检测远程更新…",
     )
     _set_step(_STEP_CHECK, "active")
-    payload = _remote_request("POST", "/check", {"apply": auto_apply}, timeout=600)
+    payload = _remote_request("POST", "/check", {"apply": auto_apply}, timeout=1500)
     _set_state(
         branch=str(payload.get("branch") or ""),
         ahead=int(payload.get("ahead") or 0),
