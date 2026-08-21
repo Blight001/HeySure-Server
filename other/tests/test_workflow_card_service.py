@@ -150,6 +150,35 @@ def test_save_creates_immutable_versions_and_binds_contract_devices(monkeypatch)
         ).all()) == 2
 
 
+def test_metadata_update_does_not_create_a_workflow_version():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "finish",
+        "steps": {"finish": {"type": "end"}},
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 4},
+        "output": {},
+    }
+    with Session(_database()) as session:
+        user = _user(session)
+        card = create_card(session, user.id, CardCreate(name="Before", definition=definition))
+        version_id = card.latest_version_id
+
+        updated = update_card(
+            session,
+            card,
+            CardUpdate(name="After", description="metadata only", tags=["edited"]),
+            user_id=user.id,
+        )
+
+        assert updated.name == "After"
+        assert updated.description == "metadata only"
+        assert updated.latest_version_id == version_id
+        assert len(session.exec(
+            select(WorkflowCardVersion).where(WorkflowCardVersion.card_id == card.id)
+        ).all()) == 1
+
+
 def test_device_mcp_card_requires_a_device_on_each_node_or_one_fallback():
     definition = {
         "schemaVersion": 1,

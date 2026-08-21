@@ -169,6 +169,11 @@ def update_card(
     row.status = "active"
     row.updated_at = time.time()
     session.add(row)
+    version_fields = {"definition", "device_id", "default_device_id", "device_ids"}
+    if not version_fields.intersection(payload):
+        session.commit()
+        session.refresh(row)
+        return row
     _save_version(
         session,
         row,
