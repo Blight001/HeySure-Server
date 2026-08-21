@@ -239,3 +239,26 @@ def test_deployed_marker_is_written_only_after_expected_checkout_revalidation(mo
         "snapshot",
         ("write", version),
     ]
+
+
+@pytest.mark.parametrize(
+    ("checkout_sha", "deployed_sha", "expected_consistent"),
+    [
+        ("a" * 40, "a" * 40, True),
+        ("b" * 40, "a" * 40, False),
+    ],
+)
+def test_release_failure_consistency_uses_deployed_marker(
+    monkeypatch, checkout_sha: str, deployed_sha: str, expected_consistent: bool
+):
+    updater = _load_host_updater()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(updater, "_read_version_file", lambda: {"current": {"sha": deployed_sha}})
+    monkeypatch.setattr(updater, "_commit_info", lambda _ref: {"sha": checkout_sha})
+    monkeypatch.setattr(updater, "verify_deployment_checkout", lambda *_args: None)
+    monkeypatch.setattr(updater, "_append_log", lambda _line: None)
+    monkeypatch.setattr(updater, "_set_state", lambda **fields: captured.update(fields))
+
+    updater._mark_release_failed("update failed", subprocess.TimeoutExpired("git fetch", 180))
+
+    assert captured["deployment_consistent"] is expected_consistent

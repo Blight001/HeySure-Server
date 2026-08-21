@@ -324,8 +324,7 @@ def _mark_release_failed(message: str, exc: Exception) -> None:
         checkout = None
     checkout_sha = (checkout or {}).get("sha")
     deployed_sha = (cached.get("current") or {}).get("sha")
-    expected_sha = _state.get("rollback_from") or _state.get("update_from")
-    checkout_consistent = bool(expected_sha and checkout_sha == expected_sha)
+    checkout_consistent = bool(deployed_sha and checkout_sha == deployed_sha)
     if checkout_consistent:
         try:
             verify_deployment_checkout(_git, _git_output, UpdateError)
