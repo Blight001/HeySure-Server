@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, or_
 from sqlmodel import Session, select
 
 from api.models import BotConnection, BotContact, BotSessionRoute, BotUserCursor, ChatSession
@@ -46,7 +46,21 @@ def delete_ai_bot_directory(session: Session, *, user_id: int, ai_config_id: int
         BotConnection.ai_config_id == int(ai_config_id),
     )).all()
 
-    for row in (*routes, *cursors):
+    contact_ids = [int(row.id) for row in contacts if row.id is not None]
+    connection_ids = [int(row.id) for row in connections if row.id is not None]
+    bot_sessions = []
+    if contact_ids or connection_ids:
+        references = []
+        if contact_ids:
+            references.append(ChatSession.bot_contact_id.in_(contact_ids))
+        if connection_ids:
+            references.append(ChatSession.bot_connection_id.in_(connection_ids))
+        bot_sessions = session.exec(select(ChatSession).where(
+            ChatSession.user_id == int(user_id),
+            or_(*references),
+        )).all()
+
+    for row in (*bot_sessions, *routes, *cursors):
         session.delete(row)
     session.flush()
     for row in contacts:

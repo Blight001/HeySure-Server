@@ -1,4 +1,4 @@
-from api.models import BotConnection, BotContact, BotSessionRoute, BotUserCursor
+from api.models import BotConnection, BotContact, BotSessionRoute, BotUserCursor, ChatSession
 from api.services.bot_directory import delete_ai_bot_directory
 
 
@@ -32,16 +32,29 @@ def test_delete_ai_bot_directory_flushes_dependents_before_contacts_and_connecti
     cursor = BotUserCursor(user_id=1, ai_config_id=19, channel="wechat", identity_key="opaque")
     contact = BotContact(user_id=1, ai_config_id=19, connection_id=7, contact_ref="contact")
     connection = BotConnection(user_id=1, ai_config_id=19, channel="wechat", connection_ref="conn")
+    contact.id = 8
+    connection.id = 7
+    bot_chat = ChatSession(
+        user_id=1,
+        ai_config_id=19,
+        ai_kind="core",
+        session_id="bot-session",
+        session_name="bot session",
+        bot_connection_id=7,
+        bot_contact_id=8,
+    )
     session = _Session({
         BotSessionRoute: [route],
         BotUserCursor: [cursor],
         BotContact: [contact],
         BotConnection: [connection],
+        ChatSession: [bot_chat],
     })
 
     delete_ai_bot_directory(session, user_id=1, ai_config_id=19)
 
     assert session.deleted == [
+        (ChatSession, 0),
         (BotSessionRoute, 0),
         (BotUserCursor, 0),
         (BotContact, 1),
