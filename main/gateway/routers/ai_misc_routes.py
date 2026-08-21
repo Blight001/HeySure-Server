@@ -135,6 +135,9 @@ async def delete_ai_config(
     from api.devices.member_cleanup import delete_member_bindings_and_scopes
 
     affected_device_ids = delete_member_bindings_and_scopes(session, user.id, config_id)
+    from api.services.workflows.member_cleanup import detach_member_workflow_state
+
+    detach_member_workflow_state(session, user_id=user.id, ai_config_id=config_id)
 
     # Remaining tables with a NOT NULL FK to assistantaiconfig — leftover rows
     # would make the DELETE below fail with a ForeignKeyViolation.
