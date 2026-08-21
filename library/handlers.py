@@ -143,12 +143,15 @@ def create_inheritance_thought(
         raise HTTPException(status_code=400, detail="content is required")
     endpoint_kind = args.get("endpoint_kind")
     summary = args.get("summary")
+    trigger_value = args.get("triggers", args.get("keywords"))
+    triggers = _as_str_list(trigger_value) if trigger_value is not None else None
     try:
         return librarian_service.create_inheritance_thought(
             user_id=int(user_id),
             name=name,
             content=content,
             summary=str(summary) if summary else None,
+            triggers=triggers,
             endpoint_kind=str(endpoint_kind) if endpoint_kind else None,
             ai_config_id=int(ai_config_id) if ai_config_id else None,
         )

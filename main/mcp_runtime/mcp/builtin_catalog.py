@@ -319,7 +319,7 @@ BUILTIN_TOOLS = (
     MCPTool(
         name="knowledge.search",
         description=(
-            "语义召回图书馆里的主题思想。根据 query 通过向量检索与关键词回退返回最相关条目，"
+            "关键词召回图书馆里的主题思想。根据 query 扫描标题、触发词、摘要和正文并按命中权重排序，"
             "用于在写作、任务执行和复盘时快速找到可复用的有效思想。"
         ),
         input_schema=KNOWLEDGE_SEARCH_SCHEMA,

@@ -94,13 +94,19 @@ def test_create_thought_accepts_title_text_aliases(monkeypatch):
     )
     result = create_inheritance_thought(
         1,
-        {"title": "别名标题", "text": "正文内容", "summary": "摘要"},
+        {
+            "title": "别名标题",
+            "text": "正文内容",
+            "summary": "摘要",
+            "triggers": ["别名", "触发词"],
+        },
         None,
     )
     assert result["id"] == "manual/demo-abc"
     assert captured["name"] == "别名标题"
     assert captured["content"] == "正文内容"
     assert captured["summary"] == "摘要"
+    assert captured["triggers"] == ["别名", "触发词"]
 
 
 def test_knowledge_list_schema_exposes_compact_pagination():

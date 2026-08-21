@@ -10,6 +10,8 @@ def test_knowledge_search_registered_as_read_only_tool():
 
     assert tool is not None
     assert tool.destructive is False
+    assert "关键词" in tool.description
+    assert "向量" not in tool.description
     from tools.engine import toolbox_capability_names
 
     assert "knowledge.search" in toolbox_capability_names()

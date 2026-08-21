@@ -87,9 +87,9 @@ KNOWLEDGE_MANAGE_SCHEMA: Dict[str, Any] = {
             "description": (
                 "所选 action 的参数（也可直接平铺在顶层）。"
                 "record_experience: title、steps（必填），scenario、gotchas、triggers、scope 可选；"
-                "create_thought: name、content（必填），summary、endpoint_kind 可选；"
+                "create_thought: name、content（必填），summary、triggers、endpoint_kind 可选；"
                 "get_thought/edit_thought/delete_thought: id；"
-                "edit_thought: mode/line/text 或 edits 数组，可选 endpoint_kind、expected_sha256；"
+                "edit_thought: mode/line/text 或 edits 数组，可选 name、summary、triggers、endpoint_kind、expected_sha256；"
                 "install_skill_package: package（必填），timeout、endpoint_kind 可选；"
                 "update_skills: tools 数组；update_persona: ai_config_id、prompt；"
                 "update_system_prompts: prompts 数组。"
@@ -114,12 +114,12 @@ KNOWLEDGE_MANAGE_SCHEMA: Dict[str, Any] = {
         "triggers": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "record_experience：触发词/关键词，用于检索与派任务前简报命中。",
+            "description": "record_experience / create_thought / edit_thought：触发词或关键词。",
         },
         "scope": {"type": "string", "description": "record_experience：知识作用域，默认 global。"},
-        "name": {"type": "string", "description": "create_thought 的技能名/标题（必填）。"},
+        "name": {"type": "string", "description": "create_thought 的名称（必填）；edit_thought 时用于重命名技能型知识。"},
         "content": {"type": "string", "description": "create_thought 的正文，写入 SKILL.md body（必填）。"},
-        "summary": {"type": "string", "description": "create_thought 的可选摘要，写入 frontmatter description。"},
+        "summary": {"type": "string", "description": "create_thought / edit_thought 的摘要。"},
         "endpoint_kind": {
             "type": "string",
             "description": "create_thought / install_skill_package / edit_thought 的端侧归类（如 desktop、browser）。",

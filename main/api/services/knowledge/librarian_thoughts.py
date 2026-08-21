@@ -3,18 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
-import subprocess
 import time
-import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 
-from mcp_runtime.mcp.core import safe_join
 import logging
 
 from .librarian_core import (
@@ -35,6 +29,13 @@ from .librarian_core import (
     _delete_thought_file,
     _find_thought,
     _entry_dict_from_file_entry,
+)
+from .librarian_entry_crud import (
+    _text_sha256,
+    delete_topic_entry,
+    edit_managed_thought,
+    edit_topic_entry,
+    read_topic_entry,
 )
 from ...integrations import clawhub
 
@@ -147,6 +148,8 @@ def _listed_thought(installed: Dict[str, Any], query: str, compact: bool) -> Opt
 
 def read_inheritance_thought(*, user_id: int, thought_id: str) -> Dict[str, Any]:
     """Return one installed inheritance thought by the ID emitted by the list."""
+    if _find_thought(int(user_id), thought_id) is None:
+        return read_topic_entry(user_id=int(user_id), memory_id=thought_id)
     from .librarian_clawhub import clawhub_installed_skill_detail
     detail = clawhub_installed_skill_detail(
         user_id=int(user_id),
@@ -163,146 +166,20 @@ def read_inheritance_thought(*, user_id: int, thought_id: str) -> Dict[str, Any]
     return detail
 
 
-def _text_sha256(content: str) -> str:
-    import hashlib
-
-    return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
-
-
-def _line_number(value: Any, field: str, line_count: int) -> int:
-    try:
-        number = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field} must be an integer") from exc
-    if number < 1 or number > line_count:
-        raise ValueError(f"{field} must be between 1 and {line_count}")
-    return number
-
-
-def _edit_text(edit: Dict[str, Any]) -> str:
-    if "text" in edit:
-        return str(edit.get("text") or "")
-    if "content" in edit:
-        return str(edit.get("content") or "")
-    return ""
-
-
-def _apply_one_skill_line_edit(lines: List[str], edit: Dict[str, Any]) -> None:
-    mode = str(edit.get("mode") or "").strip().lower()
-    if not mode and any(key in edit for key in ("line", "line_number", "start_line")):
-        mode = "replace_line"
-    if mode == "replace_all":
-        lines[:] = _edit_text(edit).splitlines()
-        return
-    if mode in {"append", "prepend"}:
-        new_lines = _edit_text(edit).splitlines()
-        if mode == "append":
-            lines.extend(new_lines)
-        else:
-            lines[:0] = new_lines
-        return
-    if not lines:
-        raise ValueError(f"{mode or 'line edit'} requires non-empty content")
-
-    if mode in {"replace_line", "delete_line"}:
-        start_raw = edit.get("start_line", edit.get("line", edit.get("line_number")))
-        if start_raw is None:
-            raise ValueError("line/line_number/start_line is required")
-        end_raw = edit.get("end_line", start_raw)
-        start = _line_number(start_raw, "start_line", len(lines))
-        end = _line_number(end_raw, "end_line", len(lines))
-        if end < start:
-            raise ValueError("end_line must be >= start_line")
-        replacement = [] if mode == "delete_line" else _edit_text(edit).splitlines()
-        lines[start - 1:end] = replacement
-        return
-    if mode in {"insert_before", "insert_after"}:
-        raw = edit.get("line", edit.get("line_number", edit.get("start_line")))
-        if raw is None:
-            raise ValueError("line/line_number is required")
-        number = _line_number(raw, "line", len(lines))
-        index = number - 1 if mode == "insert_before" else number
-        lines[index:index] = _edit_text(edit).splitlines()
-        return
-    raise ValueError(
-        "unsupported edit mode; use replace_line, insert_before, insert_after, "
-        "delete_line, append, prepend, or replace_all"
-    )
-
-
-def _apply_skill_line_edits(content: str, arguments: Dict[str, Any]) -> tuple[str, int]:
-    raw_edits = arguments.get("edits")
-    if isinstance(raw_edits, list) and raw_edits:
-        if not all(isinstance(item, dict) for item in raw_edits):
-            raise ValueError("edits must be an array of objects")
-        edits = list(raw_edits)
-    else:
-        edits = [arguments]
-    lines = str(content or "").splitlines()
-    had_trailing_newline = str(content or "").endswith("\n")
-    for edit in edits:
-        _apply_one_skill_line_edit(lines, edit)
-    updated = "\n".join(lines)
-    if had_trailing_newline and updated:
-        updated += "\n"
-    return updated, len(edits)
-
-
-def _has_skill_line_edits(arguments: Dict[str, Any]) -> bool:
-    """是否带有 SKILL.md 行编辑指令（区别于纯改端）。"""
-    raw_edits = arguments.get("edits")
-    if isinstance(raw_edits, list) and raw_edits:
-        return True
-    if str(arguments.get("mode") or "").strip():
-        return True
-    return any(arguments.get(key) is not None for key in ("line", "line_number", "start_line"))
-
-
 def edit_inheritance_thought(
     *,
     user_id: int,
     thought_id: str,
     arguments: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """按行编辑正文与/或改端（endpoint_kind）。两者均可单独使用。"""
-    from .librarian_clawhub import _normalize_clawhub_slug
-    thought_id = _normalize_clawhub_slug(thought_id)
-    endpoint_raw = arguments.get("endpoint_kind")
-    has_endpoint = endpoint_raw is not None and str(endpoint_raw).strip() != ""
-    has_line_edits = _has_skill_line_edits(arguments)
-    if not has_line_edits and not has_endpoint:
-        raise ValueError("nothing to edit: provide line edits and/or endpoint_kind")
-
-    found = _find_thought(int(user_id), thought_id)
+    """Edit either a managed skill snapshot or an ordinary procedural topic."""
+    raw_id = str(thought_id or "").strip()
+    found = _find_thought(int(user_id), raw_id)
     if found is None:
-        raise ValueError("installed skill not found")
-    _rel, _abs, _meta, old_body = found
-    old_content = str(old_body or "")
-    old_sha256 = _text_sha256(old_content)
-    new_content = old_content
-    edit_count = 0
-
-    update_row: Dict[str, Any] = {"slug": thought_id}
-    body_arg = None
-    if has_line_edits:
-        expected = str(arguments.get("expected_sha256") or "").strip().lower()
-        if expected and expected != old_sha256:
-            raise ValueError("SKILL.md changed after it was read; read it again before editing")
-        new_content, edit_count = _apply_skill_line_edits(old_content, arguments)
-        body_arg = new_content
-    if has_endpoint:
-        update_row["endpoint_kind"] = _normalize_endpoint(endpoint_raw)
-
-    merged = _upsert_thought(int(user_id), update_row, body=body_arg)
-    return {
-        "updated": True,
-        "id": thought_id,
-        "edit_count": edit_count,
-        "endpoint_kind": _normalize_endpoint(merged.get("endpoint_kind")),
-        "old_sha256": old_sha256,
-        "content_sha256": _text_sha256(new_content),
-        "line_count": len(new_content.splitlines()),
-    }
+        return edit_topic_entry(user_id=int(user_id), memory_id=raw_id, arguments=arguments)
+    return edit_managed_thought(
+        user_id=int(user_id), thought_id=raw_id, arguments=arguments, found=found,
+    )
 
 
 def _ensure_skill_frontmatter(body: str, *, name: str, description: str) -> str:
@@ -410,6 +287,7 @@ def create_inheritance_thought(
     name: str,
     content: str,
     summary: Optional[str] = None,
+    triggers: Optional[List[str]] = None,
     endpoint_kind: Optional[str] = None,
     ai_config_id: Optional[int] = None,
 ) -> Dict[str, Any]:
@@ -437,12 +315,17 @@ def create_inheritance_thought(
     summary_text = str(summary or "").strip()
     if not summary_text and isinstance(fm, dict):
         summary_text = str(fm.get("description") or "").strip()
+    trigger_source: Any = triggers
+    if triggers is None:
+        trigger_source = _extract_skill_triggers(body, name)
+    triggers_norm = _normalize_triggers(trigger_source)
 
     resolved_endpoint = _resolve_endpoint_kind(int(user_id), ai_config_id, endpoint_kind)
     row = {
         "slug": thought_id,
         "displayName": name,
         "summary": summary_text,
+        "triggers": triggers_norm,
         "version": None,
         "ownerHandle": "",
         "source": "manual",
@@ -456,6 +339,8 @@ def create_inheritance_thought(
 
 
 def delete_inheritance_thought(*, user_id: int, thought_id: str) -> Dict[str, Any]:
+    if _find_thought(int(user_id), thought_id) is None:
+        return delete_topic_entry(user_id=int(user_id), memory_id=thought_id)
     from .librarian_clawhub import delete_clawhub_installed_skill
     result = delete_clawhub_installed_skill(
         user_id=int(user_id),

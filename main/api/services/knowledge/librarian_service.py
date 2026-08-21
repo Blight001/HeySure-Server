@@ -75,12 +75,6 @@ from .librarian_thoughts import (
     _render_inheritance_thoughts_body,
     list_inheritance_thoughts,
     read_inheritance_thought,
-    _text_sha256,
-    _line_number,
-    _edit_text,
-    _apply_one_skill_line_edit,
-    _apply_skill_line_edits,
-    _has_skill_line_edits,
     edit_inheritance_thought,
     _ensure_skill_frontmatter,
     _extract_skill_triggers,
@@ -102,6 +96,15 @@ from .librarian_skill_packages import (
     _validate_skill_tree_for_import,
     _import_global_skill_snapshot,
     install_npx_skill_package,
+)
+
+from .librarian_entry_crud import (
+    _text_sha256,
+    _line_number,
+    _edit_text,
+    _apply_one_skill_line_edit,
+    _apply_skill_line_edits,
+    _has_skill_line_edits,
 )
 from .librarian_builtins import (
     _builtin_entries,
