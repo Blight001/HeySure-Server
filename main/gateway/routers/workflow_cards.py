@@ -15,13 +15,14 @@ from api.services.workflows.card_service import (
     delete_card,
     owned_card,
     update_card,
+    update_editor_layout,
     validate_card,
     version_payload,
 )
 from api.services.workflows.compiler import WorkflowValidationError
 from api.services.workflows.trace import definition_from_trace
 from api.services.workflows.patch_service import patch_card_definition
-from api.services.workflows.schemas import CardCreate, CardUpdate, TraceDraftRequest
+from api.services.workflows.schemas import CardCreate, CardLayoutUpdate, CardUpdate, TraceDraftRequest
 from api.core.settings import settings
 from .auth import get_current_user
 
@@ -163,6 +164,23 @@ def patch_card(
         raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
     try:
         return card_payload(update_card(session, row, body, user_id=user.id))
+    except WorkflowValidationError as exc:
+        raise _validation_error(exc)
+
+
+@router.put("/{card_id}/layout")
+def save_card_layout(
+    card_id: str,
+    body: CardLayoutUpdate,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    user = get_current_user(authorization, session)
+    row = owned_card(session, user.id, card_id)
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": "CARD_NOT_FOUND"})
+    try:
+        return card_payload(update_editor_layout(session, row, body.positions))
     except WorkflowValidationError as exc:
         raise _validation_error(exc)
 

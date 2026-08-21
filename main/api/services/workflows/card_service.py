@@ -14,6 +14,7 @@ from api.devices.presence import tool_defs_for_agent
 from api.models import AssistantAIConfig, DevicePresence, WorkflowCard, WorkflowCardVersion
 
 from .compiler import WorkflowValidationError, compile_definition, definition_digest, schema_digest
+from .card_references import resolve_card_references
 
 
 
@@ -41,6 +42,7 @@ def card_payload(row: WorkflowCard) -> Dict[str, Any]:
         "access_scope": row.access_scope,
         "allowed_ai_config_ids": _load(row.allowed_ai_config_ids_json, []),
         "definition": definition,
+        "editor_layout": _load(row.editor_layout_json, {}),
         "default_device_id": str(definition.get("defaultDeviceId") or ""),
         "latest_version_id": row.latest_version_id,
         "created_at": row.created_at,
@@ -284,7 +286,12 @@ def validate_card(
     row: WorkflowCard, session: Optional[Session] = None, *,
     contract_check: str = "live", version_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    compiled = compile_definition(_load(row.draft_definition_json, {}))
+    source = _load(row.draft_definition_json, {})
+    if session is not None:
+        source, _ = resolve_card_references(
+            session, user_id=row.user_id, parent_card_id=row.id, definition=source,
+        )
+    compiled = compile_definition(source)
     result: Dict[str, Any] = {
         "valid": True, "definition_valid": True, "contracts_valid": None,
         "device_online": None, "runnable": True, "digest": compiled["digest"],
@@ -393,9 +400,15 @@ def _save_version(
     device_ids: Optional[List[str]] = None,
     default_device_id: Optional[str] = None,
 ) -> WorkflowCardVersion:
-    compiled = compile_definition(_load(row.draft_definition_json, {}))
+    hydrated, pinned = resolve_card_references(
+        session,
+        user_id=user_id,
+        parent_card_id=row.id,
+        definition=_load(row.draft_definition_json, {}),
+    )
+    compiled = compile_definition(hydrated)
     definition = compiled["definition"]
-    row.draft_definition_json = _json(definition)
+    row.draft_definition_json = _json(pinned)
     contracts, bound_ids = _snapshot_contracts(
         session, user_id, definition, device_id=device_id, device_ids=device_ids,
     )
@@ -407,7 +420,6 @@ def _save_version(
     if selected_default:
         definition["defaultDeviceId"] = selected_default
     definition["contractDeviceIds"] = bound_ids
-    row.draft_definition_json = _json(definition)
     latest = session.exec(
         select(WorkflowCardVersion)
         .where(WorkflowCardVersion.card_id == row.id)
@@ -433,3 +445,25 @@ def _save_version(
     session.commit()
     session.refresh(version)
     return version
+
+
+def update_editor_layout(session: Session, row: WorkflowCard, positions: Dict[str, Any]) -> WorkflowCard:
+    normalized: Dict[str, Dict[str, float]] = {}
+    if len(positions) > 500:
+        raise WorkflowValidationError(["editor layout exceeds 500 nodes"])
+    for step_id, position in positions.items():
+        if not isinstance(position, dict):
+            raise WorkflowValidationError([f"layout position for {step_id} must be an object"])
+        try:
+            x, y = float(position["x"]), float(position["y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorkflowValidationError([f"layout position for {step_id} requires numeric x and y"]) from exc
+        if not (-100000 <= x <= 100000 and -100000 <= y <= 100000):
+            raise WorkflowValidationError([f"layout position for {step_id} is out of range"])
+        normalized[str(step_id)] = {"x": x, "y": y}
+    row.editor_layout_json = _json({"positions": normalized})
+    row.updated_at = time.time()
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row

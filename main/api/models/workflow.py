@@ -23,6 +23,7 @@ class WorkflowCard(SQLModel, table=True):
     access_scope: str = Field(default="all", index=True)
     allowed_ai_config_ids_json: str = Field(default="[]")
     draft_definition_json: str = Field(default="{}")
+    editor_layout_json: str = Field(default="{}")
     latest_version_id: Optional[str] = Field(default=None, foreign_key="workflowcardversion.id", index=True)
     created_by: int = Field(foreign_key="user.id")
     created_at: float = Field(default_factory=time.time)

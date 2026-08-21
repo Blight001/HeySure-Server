@@ -19,9 +19,6 @@ from api.models import (
     AITaskJob,
     AIRuntimeStatus,
     AssistantAIConfig,
-    BotConnection,
-    BotSessionRoute,
-    BotUserCursor,
     ChatMessage,
     ChatRun,
     ChatSession,
@@ -153,24 +150,6 @@ async def delete_ai_config(
             AITaskJob.ai_config_id == config_id,
         )
     ).all()
-    bot_route_rows = session.exec(
-        select(BotSessionRoute).where(
-            BotSessionRoute.user_id == user.id,
-            BotSessionRoute.ai_config_id == config_id,
-        )
-    ).all()
-    bot_cursor_rows = session.exec(
-        select(BotUserCursor).where(
-            BotUserCursor.user_id == user.id,
-            BotUserCursor.ai_config_id == config_id,
-        )
-    ).all()
-    bot_connection_rows = session.exec(
-        select(BotConnection).where(
-            BotConnection.user_id == user.id,
-            BotConnection.ai_config_id == config_id,
-        )
-    ).all()
     ai_message_rows = session.exec(
         select(AIMessage).where(
             AIMessage.user_id == user.id,
@@ -183,9 +162,6 @@ async def delete_ai_config(
     for row in (
         *workshop_rows,
         *task_job_rows,
-        *bot_route_rows,
-        *bot_cursor_rows,
-        *bot_connection_rows,
         *ai_message_rows,
     ):
         session.delete(row)
@@ -195,6 +171,9 @@ async def delete_ai_config(
     # won't reliably order the DELETEs within a single flush and Postgres then
     # rejects the parent delete with a ForeignKeyViolation.
     session.flush()
+    from api.services.bot_directory import delete_ai_bot_directory
+
+    delete_ai_bot_directory(session, user_id=user.id, ai_config_id=config_id)
     from api.devices.member_cleanup import refresh_presence_primaries
 
     refresh_presence_primaries(session, user.id, affected_device_ids)

@@ -23,9 +23,9 @@ from api.models import (
     WorkflowRun,
     WorkflowStepRun,
 )
-from api.services.workflows.compiler import definition_digest
+from api.services.workflows.compiler import compile_definition, definition_digest
 from api.services.workflows.compiler import schema_digest
-from api.services.workflows.card_service import _snapshot_contracts
+from api.services.workflows.card_service import _snapshot_contracts, update_editor_layout
 from api.services.workflows.permissions import WorkflowDispatchError, validate_step_dispatch
 from api.services.workflows.run_service import (
     advance_run,
@@ -96,6 +96,34 @@ def _seed(session: Session, definition: dict, *, tool_contracts=None, contract_d
     return user, card
 
 
+def test_editor_layout_update_does_not_create_a_card_version():
+    definition = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object"},
+        "startStepId": "finish",
+        "steps": {"finish": {"type": "end"}},
+        "output": {},
+    }
+    engine = _database()
+    with Session(engine) as session:
+        _, card = _seed(session, definition)
+        original_version_id = card.latest_version_id
+        original_versions = session.exec(
+            select(WorkflowCardVersion).where(WorkflowCardVersion.card_id == card.id)
+        ).all()
+
+        update_editor_layout(session, card, {"finish": {"x": 120, "y": 80}})
+
+        versions = session.exec(
+            select(WorkflowCardVersion).where(WorkflowCardVersion.card_id == card.id)
+        ).all()
+        assert card.latest_version_id == original_version_id
+        assert len(versions) == len(original_versions) == 1
+        assert json.loads(card.editor_layout_json) == {
+            "positions": {"finish": {"x": 120.0, "y": 80.0}},
+        }
+
+
 def test_observed_target_resolver_requires_one_fresh_semantic_match():
     step = {
         "targetResolver": {
@@ -135,6 +163,47 @@ def test_workflow_without_mcp_nodes_runs_without_a_device():
         session.refresh(run)
         assert run.status == "succeeded"
         assert json.loads(run.output_json) == {"ok": True}
+
+
+def test_nested_card_steps_run_with_mapped_input_and_return_output():
+    child = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]},
+        "startStepId": "wait",
+        "steps": {
+            "wait": {"type": "delay", "delaySeconds": 0, "next": "finish"},
+            "finish": {"type": "end", "output": {"echo": "${input.value}"}},
+        },
+        "limits": {"timeoutSeconds": 30, "maxTransitions": 10},
+        "output": {},
+    }
+    parent = {
+        "schemaVersion": 1,
+        "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+        "startStepId": "child",
+        "steps": {
+            "child": {
+                "type": "card", "cardRef": {"id": "child", "versionId": "child-v1", "name": "Child"},
+                "_definition": child, "input": {"value": "${input.name}"}, "saveAs": "child_result",
+                "next": "finish", "onError": "fail",
+            },
+            "finish": {"type": "end", "output": {"echo": "${steps.child_result.result.echo}"}},
+        },
+        "limits": {"timeoutSeconds": 60, "maxTransitions": 10},
+        "output": {},
+    }
+    definition = compile_definition(parent)["definition"]
+    engine = _database()
+    with Session(engine) as session:
+        user, card = _seed(session, definition)
+        run = create_run(
+            session, user_id=user.id, card_id=card.id, device_id="", input_value={"name": "nested"},
+        )
+        for _ in range(4):
+            advance_run(session, run.id)
+        session.refresh(run)
+        assert run.status == "succeeded"
+        assert json.loads(run.output_json) == {"echo": "nested"}
 
 
 def test_end_steps_can_report_published_or_manual_fallback_outcomes():

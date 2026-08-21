@@ -358,6 +358,72 @@ def fail_run(session: Session, run: WorkflowRun, error: Dict[str, Any], *, statu
     )
 
 
+def _nested_card_error(
+    session: Session, run: WorkflowRun, step: Dict[str, Any], error: Dict[str, Any], now: float,
+) -> None:
+    target = str(step.get("onError") or step.get("next") or "fail")
+    if target in {"", "fail"}:
+        fail_run(session, run, error)
+        return
+    variables = _load(run.variables_json, {"steps": {}})
+    variables.setdefault("steps", {})[str(step.get("saveAs") or run.current_step_id)] = {
+        "error": _redact(error),
+    }
+    run.variables_json = _dump(variables)
+    _move_run(run, target, "running")
+    run.next_wakeup_at = now
+    run.updated_at = now
+    session.add(run)
+
+
+def _advance_nested_card_step(
+    session: Session, run: WorkflowRun, step: Dict[str, Any], step_type: str, now: float,
+) -> bool:
+    if step_type not in {"_card_enter", "_card_return", "_card_error"}:
+        return False
+    entered = run.current_step_id
+    if step_type == "_card_error":
+        _nested_card_error(
+            session, run, step,
+            error_payload("NESTED_CARD_FAILED", "referenced card failed", "nested_card"), now,
+        )
+        return True
+    try:
+        rendered = render_template(
+            step.get("input", {}) if step_type == "_card_enter" else step.get("output", {}),
+            _context(run),
+        )
+        if step_type == "_card_enter":
+            errors = list(Draft202012Validator(step.get("inputSchema", {"type": "object"})).iter_errors(rendered))
+            if errors:
+                raise ValueError(errors[0].message)
+    except Exception as exc:
+        _nested_card_error(
+            session, run, step,
+            error_payload("NESTED_CARD_INPUT_INVALID", str(exc), "nested_card"), now,
+        )
+        return True
+    variables = _load(run.variables_json, {"steps": {}})
+    saved = {"input": rendered} if step_type == "_card_enter" else rendered
+    variables.setdefault("steps", {})[str(step.get("saveAs") or entered)] = {"result": _redact(saved)}
+    run.variables_json = _dump(variables)
+    _move_run(run, str(step.get("next") or ""), "running")
+    run.next_wakeup_at = now
+    run.updated_at = now
+    session.add(run)
+    add_audit(
+        session,
+        event_type="nested_card_entered" if step_type == "_card_enter" else "nested_card_returned",
+        run=run,
+        step_id=entered,
+        status_from="running",
+        status_to="running",
+        detail={"card_id": str(step.get("cardRef", {}).get("id") or step.get("_nestedCardId") or "")},
+    )
+    _pause_after_debug_step(run, now, entered)
+    return True
+
+
 def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
     run = session.exec(
         select(WorkflowRun).where(WorkflowRun.id == run_id).with_for_update(skip_locked=True)
@@ -404,6 +470,9 @@ def advance_run(session: Session, run_id: str) -> Optional[WorkflowRun]:
         status_to="running",
         detail={"type": step_type},
     )
+    if _advance_nested_card_step(session, run, step, str(step_type or ""), now):
+        session.commit()
+        return run
     if step_type == "end":
         try:
             output = render_template(step.get("output", definition.get("output", {})), _context(run))

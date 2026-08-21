@@ -31,6 +31,10 @@ class CardUpdate(BaseModel):
     device_ids: Optional[List[str]] = Field(default=None, max_length=20)
 
 
+class CardLayoutUpdate(BaseModel):
+    positions: Dict[str, Dict[str, float]] = Field(default_factory=dict)
+
+
 class TraceDraftRequest(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str = Field(default="", max_length=4000)

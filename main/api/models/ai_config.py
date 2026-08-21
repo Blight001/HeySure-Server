@@ -1,4 +1,5 @@
 import time
+import uuid
 from typing import Any, Dict, Literal, Optional
 
 from sqlmodel import Field, SQLModel
@@ -65,6 +66,13 @@ class AssistantAIConfig(SQLModel, table=True):
 
     enabled: bool = Field(default=True)
     mcp_enabled: bool = Field(default=True)
+    external_mcp_enabled: bool = Field(default=False, index=True)
+    external_mcp_public_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+        index=True,
+        unique=True,
+        max_length=32,
+    )
     switch_key: str = Field(default="assistant_default")
     mcp_tools: str = Field(default=_DEFAULT_MCP_TOOLS)
     system_auto_control: str = Field(default=_DEFAULT_SYSTEM_AUTO_CONTROL)

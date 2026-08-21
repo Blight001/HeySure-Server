@@ -6,11 +6,12 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from typing import Any, Dict, Iterable, List, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from jsonschema import Draft202012Validator
 
 from .expression import TemplateResolutionError, parse_path
+from .nested_compiler import expand_card_steps
 
 
 STEP_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -158,7 +159,11 @@ def _initial_topology_errors(
 
 def _initial_environment_errors(definition: Dict[str, Any]) -> List[str]:
     steps = definition.get("steps") if isinstance(definition.get("steps"), dict) else {}
-    if not any(".browser+" in _tool_name(step) for step in steps.values()):
+    local_steps = {
+        step_id: step for step_id, step in steps.items()
+        if not isinstance(step, dict) or not step.get("_nestedCardId")
+    }
+    if not any(".browser+" in _tool_name(step) for step in local_steps.values()):
         return []
     compatibility = definition.get("compatibility", {})
     contract = compatibility.get("initialEnvironment") if isinstance(compatibility, dict) else None
@@ -171,9 +176,9 @@ def _initial_environment_errors(definition: Dict[str, Any]) -> List[str]:
         errors.append("description is required")
     reset_id = str(contract.get("resetStepId") or "")
     ready_id = str(contract.get("readyStepId") or "")
-    errors.extend(_reset_step_errors(reset_id, steps.get(reset_id)))
-    errors.extend(_ready_step_errors(ready_id, steps.get(ready_id)))
-    errors.extend(_initial_topology_errors(definition, steps, reset_id, ready_id))
+    errors.extend(_reset_step_errors(reset_id, local_steps.get(reset_id)))
+    errors.extend(_ready_step_errors(ready_id, local_steps.get(ready_id)))
+    errors.extend(_initial_topology_errors(definition, local_steps, reset_id, ready_id))
     return [INITIAL_ENVIRONMENT_REQUIREMENTS, *errors] if errors else []
 
 
@@ -250,11 +255,56 @@ def _validate_ai_step(
         errors.append(f"step {step_id}: timeoutSeconds must be 1..86400")
 
 
+def _validate_internal_card_step(
+    step_id: str, step: Dict[str, Any], errors: List[str], save_names: Set[str],
+) -> Optional[List[str]]:
+    step_type = step.get("type")
+    if step_type not in {"_card_enter", "_card_return", "_card_error"}:
+        return None
+    targets: List[str] = []
+    if step_type == "_card_enter":
+        if not isinstance(step.get("input", {}), dict):
+            errors.append(f"step {step_id}: card input must be an object")
+        try:
+            Draft202012Validator.check_schema(step.get("inputSchema", {"type": "object"}))
+        except Exception as exc:
+            errors.append(f"step {step_id}: referenced card inputSchema is invalid: {exc}")
+        save_as = str(step.get("saveAs") or "")
+        if not SAVE_AS_RE.fullmatch(save_as) or save_as in save_names:
+            errors.append(f"step {step_id}: saveAs is required, unique, and must be a safe identifier")
+        else:
+            save_names.add(save_as)
+        targets.extend(filter(None, [str(step.get("next") or ""), _optional_target(step.get("onError"))]))
+        if not step.get("next"):
+            errors.append(f"step {step_id}: referenced card has no entry step")
+    elif step_type == "_card_return":
+        target = str(step.get("next") or "")
+        targets.extend(filter(None, [target]))
+        if not target:
+            errors.append(f"step {step_id}: card return next is required")
+    else:
+        targets.extend(filter(None, [_optional_target(step.get("next"))]))
+    return targets
+
+
+def _optional_target(value: Any) -> str:
+    target = str(value or "fail")
+    return "" if target in {"", "fail"} else target
+
+
+def _expand_or_error(definition: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return expand_card_steps(definition)
+    except ValueError as exc:
+        raise WorkflowValidationError([str(exc)]) from exc
+
+
 def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
     if not isinstance(definition, dict):
         raise WorkflowValidationError(["definition must be an object"])
+    definition = _expand_or_error(definition)
     if len(canonical_json(definition).encode("utf-8")) > MAX_DEFINITION_BYTES:
         errors.append(f"definition exceeds {MAX_DEFINITION_BYTES} bytes")
     if definition.get("schemaVersion") != 1:
@@ -289,10 +339,14 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
             errors.append(f"step {step_id} must be an object")
             continue
         step_type = step.get("type")
-        if step_type not in {"mcp", "condition", "delay", "ai", "end"}:
+        if step_type not in {"mcp", "condition", "delay", "ai", "end", "_card_enter", "_card_return", "_card_error"}:
             errors.append(f"step {step_id}: unsupported step type {step_type}")
             continue
         targets: List[str] = []
+        internal_targets = _validate_internal_card_step(str(step_id), step, errors, save_names)
+        if internal_targets is not None:
+            edges[str(step_id)] = internal_targets
+            continue
         if step_type == "mcp":
             ref = step.get("toolRef")
             if not isinstance(ref, dict) or not str(ref.get("name") or "").strip():
@@ -415,7 +469,7 @@ def compile_definition(definition: Dict[str, Any]) -> Dict[str, Any]:
     producers = {
         str(step.get("saveAs")): step_id
         for step_id, step in steps.items()
-        if isinstance(step, dict) and step.get("type") in {"mcp", "ai"} and step.get("saveAs")
+        if isinstance(step, dict) and step.get("type") in {"mcp", "ai", "_card_enter"} and step.get("saveAs")
     }
     predecessors: Dict[str, Set[str]] = {step_id: set() for step_id in steps}
     for source, targets in edges.items():

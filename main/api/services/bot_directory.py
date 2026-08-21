@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy import inspect
 from sqlmodel import Session, select
 
-from api.models import BotConnection, BotContact, BotSessionRoute, ChatSession
+from api.models import BotConnection, BotContact, BotSessionRoute, BotUserCursor, ChatSession
 from api.services.bot_credentials import decrypt_credentials, encrypt_credentials
 
 
@@ -21,6 +21,40 @@ class ContactTarget:
     connection: BotConnection
     contact: BotContact
     target: Dict[str, Any]
+
+
+def delete_ai_bot_directory(session: Session, *, user_id: int, ai_config_id: int) -> None:
+    """Delete one AI member's bot directory in foreign-key-safe order.
+
+    Callers must delete and flush chat sessions first because those rows may
+    still reference both bot contacts and connections.
+    """
+    routes = session.exec(select(BotSessionRoute).where(
+        BotSessionRoute.user_id == int(user_id),
+        BotSessionRoute.ai_config_id == int(ai_config_id),
+    )).all()
+    cursors = session.exec(select(BotUserCursor).where(
+        BotUserCursor.user_id == int(user_id),
+        BotUserCursor.ai_config_id == int(ai_config_id),
+    )).all()
+    contacts = session.exec(select(BotContact).where(
+        BotContact.user_id == int(user_id),
+        BotContact.ai_config_id == int(ai_config_id),
+    )).all()
+    connections = session.exec(select(BotConnection).where(
+        BotConnection.user_id == int(user_id),
+        BotConnection.ai_config_id == int(ai_config_id),
+    )).all()
+
+    for row in (*routes, *cursors):
+        session.delete(row)
+    session.flush()
+    for row in contacts:
+        session.delete(row)
+    session.flush()
+    for row in connections:
+        session.delete(row)
+    session.flush()
 
 
 def resolve_connection(
