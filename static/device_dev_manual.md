@@ -424,7 +424,7 @@ Content-Type: application/json
 
 ---
 
-## 9. 远程连接：画面、命令行与网页原生镜像（可选，默认不实施）
+## 9. 远程连接：画面、命令行、网页原生镜像与预设控制器（可选，默认不实施）
 
 > 仅当项目运行在"有屏幕或能开 shell 的主机"且用户明确要求时才实施本节。
 > 纯业务型服务直接跳过。这不是 AI 调工具，而是**真人操作者**在网页控制台实时
@@ -436,7 +436,7 @@ Content-Type: application/json
 | 能力字（`capabilities`） | `remote_control` | `remote_terminal` | `remote_web_mirror`（兼容 `remote.web_mirror`） |
 | 事件 / 通道 | `rc:*` + `control` | `rt:*` | 沿用 `rc:*`，新增 `web-state` / `web-resource` DataChannel |
 | 传输 | **WebRTC P2P**（仅 SDP/ICE 信令过服务器） | **Socket.IO relay**（字节流经服务器转发） | **WebRTC P2P**（DOM/资源不经过服务器 relay） |
-| 需要 TURN | 需要（公网跨 NAT，见 9.5） | 不需要 | 需要，与画面远程共用 |
+| 需要 TURN | 需要（公网跨 NAT，见 9.6） | 不需要 | 需要，与画面远程共用 |
 | 当前完成度 | 已有协议与参考实现 | Server relay 已加固、Web 已恢复 xterm 入口；端侧按平台版本实现 | P0 仅完成能力保留与协商字段；快照/端侧/UI 尚未完成 |
 
 在 `capabilities` 里声明哪个能力字就解锁哪条通道；都不声明就都不开。这些
@@ -505,11 +505,55 @@ ConPTY，Linux/macOS openpty）→ 持续读输出发 `rt:data`，退出发 `rt:
 `[0,1]` 的鼠标/键盘事件并注入本机 OS。实现成本远高于命令行远程，
 **多数第三方服务只接命令行远程即可**。
 
-### 9.4 网页原生镜像：Remote Web Mirror v1
+### 9.4 预设控制器接口（复用 `control` DataChannel）
+
+控制台当前内置四组预设：**方向遥控器、媒体、演示、浏览器**。它们不是新的
+HTTP/Socket.IO 接口，也不会把 `dpad.up` 这类 UI command 原样发给设备；控制台会
+把按钮转换为现有 `control` DataChannel 的白名单 JSON。因此已经完整实现 9.3
+输入协议的设备无需再注册能力字，只需接受下列载荷：
+
+```json
+{"type":"key","key":"ArrowUp","action":"tap"}
+{"type":"key","key":"MediaPlayPause","action":"tap"}
+{"kind":"browser","action":"reload"}
+```
+
+| 预设 | desktop / browser 发给设备 | android 发给设备 |
+| --- | --- | --- |
+| 方向 | `ArrowUp/Down/Left/Right`、`Enter` | `dpad_up/down/left/right/center` |
+| 导航 | `Escape`、`Home` | `back`、`home` |
+| 媒体 | `MediaPlayPause`、`MediaTrackPrevious/Next`、`AudioVolumeDown/Up/Mute` | `media_play_pause/previous/next`、`volume_down/up/mute` |
+| 演示 | `PageUp`、`PageDown`、`F5`、`Escape` | 当前不显示该预设 |
+| 浏览器 | `{"kind":"browser","action":"back|forward|reload"}` | 当前不显示该预设 |
+
+desktop / browser 的按键载荷带 `action: "tap"`；android 按键载荷不带 `action`。
+浏览器导航只在 browser 模式出现。设备必须按模式和键名做 allowlist，不得把 `key`
+解释为脚本、shell 或任意系统命令。当前版本的预设由 Web 内置，**尚无服务器端自定义
+预设 CRUD/Schema API**；设计中的可编辑预设库属于后续治理阶段，不能按已实现接口接入。
+
+### 9.5 网页原生镜像：Remote Web Mirror v1
 
 RWM 是画面远程的可选表面，不是把设备发来的 HTML 交给控制台直接执行。控制台
 请求 `requestedSurfaces: ["dom", "video"]`、`protocolVersions: [1]`；Server 只把
 白名单内、有长度上限的协商元数据转给设备。旧设备忽略新字段，继续使用视频。
+
+WebRTC 建立后，控制端先在 `control` 通道发送：
+
+```json
+{
+  "kind": "rc-hello",
+  "versions": [1],
+  "surfaces": ["dom", "video"],
+  "encodings": ["cbor", "json"],
+  "compressions": ["br", "gzip", "none"],
+  "maxChunkBytes": 16384,
+  "permissions": ["view", "interact"]
+}
+```
+
+设备用 `rc-hello-ack` 选择单一版本、编码和压缩算法，并返回 `features`、`limits`、
+viewport、`pageId`、`epoch`。超时、无共同版本或缺少 DataChannel 时必须继续视频，
+不能把旧设备判定为故障。
 
 协商成功后，设备创建两个可靠 DataChannel：
 
@@ -520,10 +564,35 @@ RWM 是画面远程的可选表面，不是把设备发来的 HTML 交给控制�
 `sessionId`、`pageId`、`epoch`、`seq`、`body`。顶层导航递增 epoch；Patch 的
 `baseSeq` 不等于控制端最后序号时必须请求全量重同步，不能猜测应用。
 
+`web-state` v1 的消息类型至少包括：`snapshot.begin` / `snapshot.end`、`patch`、
+`ack`、`resync.request`、`page.reset`、`surface.status`。快照二进制块与资源块走
+`web-resource`，每块携带 transfer id、index、total；完整内容必须校验长度和
+SHA-256。增量 `patch.body.ops` 只允许：`node.add/remove/move`、
+`attr.set/remove`、`text.set`、`style.set`、`state.set`、`box.set`、
+`scroll.set`、`focus.set`、`selection.set`、`resource.bind`、`pixel.update`。
+
 快照用稳定 node id、结构节点、去重 computed style、表单状态、focus/selection 和
 资源 manifest 描述页面。点击、输入、按键、滚动等只回传 `{requestId, nodeId,
 action, args, epoch}`；设备在真实页面重新校验节点可见、未遮挡且未过期后执行。
 密码值、Cookie、Token、网页存储和请求头不得进入快照。
+
+控制端的元素交互在 `control` 通道使用：
+
+```json
+{
+  "kind": "web-action",
+  "requestId": "act_xxx",
+  "pageId": "page_xxx",
+  "epoch": 3,
+  "target": {"nodeId": 23},
+  "action": "click",
+  "args": {},
+  "clientSeq": 42
+}
+```
+
+动作只允许 `click|doubleClick|contextMenu|type|key|scroll|select|focus`。设备返回
+`web-action-result`，状态为 `ok|stale|denied|failed`；`stale` 必须触发重同步。
 
 控制台必须在无脚本、无网络、无表单提交和无顶层导航能力的 sandbox iframe 中，
 用 DOM API 与标签/属性/样式白名单构树；禁止 `v-html`、`innerHTML` 和执行源脚本。
@@ -533,17 +602,17 @@ action, args, epoch}`；设备在真实页面重新校验节点可见、未遮�
 WebGL、视频、DRM、PDF、closed Shadow DOM、受限页面、超限快照或同步失败时，应
 发送表面状态并自动回退现有视频轨；HTML、DOM Patch 和资源始终不经 Server relay。
 
-### 9.5 TURN
+### 9.6 TURN
 
 命令行远程走 relay，公网直接可用。画面远程是 P2P：纯 STUN 在公网跨 NAT 常失败，
 需部署 TURN 中继（房主在网页管理控制台「远程控制（STUN/TURN）」卡片填凭据）。
 服务侧从登录响应或 `GET /api/rtc/ice-servers` 取 ICE 配置，**不要写死**。
 
-### 9.6 实施清单
+### 9.7 实施清单
 
 - 只要命令行远程：`capabilities` 加 `remote_terminal`，实现 9.2 + 本机 PTY。
-- 要画面远程：`capabilities` 加 `remote_control`，实现 9.3 + 按 9.5 取 ICE 配置。
-- 要网页原生镜像：同时加 `remote_control` 与 `remote_web_mirror`，实现 9.4；未完成
+- 要画面远程：`capabilities` 加 `remote_control`，实现 9.3 + 按 9.6 取 ICE 配置。
+- 要网页原生镜像：同时加 `remote_control` 与 `remote_web_mirror`，实现 9.5；未完成
   快照、Patch、安全渲染和视频回退前，不得只凭能力字宣称 RWM 可用。
 - 所有远程表面与第 8 节任务循环互不干扰：不进任务队列、不入库、不走聊天管线。
 
@@ -651,7 +720,7 @@ main()
 | 工具改名/增删后授权丢失 | 预期行为：服务器按当前上报清单剪授权，去面板重新勾选 |
 | 控制台建了动态 MCP 工具但调不到 | 预期行为：第三方服务不实现该通道（第 6 节） |
 | 命令行远程报"不支持" | `capabilities` 是否声明 `remote_terminal`（第 9 节） |
-| 画面远程公网连上就断 | STUN 打洞失败，需 TURN（9.4）；命令行远程无此问题 |
+| 画面远程公网连上就断 | STUN 打洞失败，需 TURN（9.6）；命令行远程无此问题 |
 | 命令行远程有回显但输入无效 | `rt:input` 的 `data` 是否 base64 |
 
 ---
