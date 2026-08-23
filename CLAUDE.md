@@ -13,7 +13,7 @@ server/
     api/                   ← 共享库（模型 / DB / 认证 / 服务 / 配置）
       core/                ← settings.py（配置总入口）/ logging / migrations
       models/              ← SQLModel/ORM 数据模型（约 20 个 .py）
-      services/            ← 业务逻辑，按域分 7 个子包（见下）
+      services/            ← 业务逻辑，按域分 8 个子包（见下）
         knowledge/         ← 知识库/图书馆（kb_store / librarian_* / knowledge_*）
         tasks/             ← 任务系统（task_system/schedule/plan/completion_notify）
         mcp/               ← MCP 工具服务（tool_runner/prompt_groups/stats/tool_aliases）
@@ -98,6 +98,7 @@ server/
 | Task 相关 | `models/ai_config.py` 等 | 任务/Job 与调度字段（以模型源码为准） |
 | `Device` / `DeviceBinding` | `models/device_binding.py` | 端侧设备注册与绑定 |
 | `DevicePresence` | `models/device_presence.py` | 端侧设备在线状态快照 |
+| `RemoteControllerTemplate` | `models/remote_controller_template.py` | 按用户保存的声明式遥控器模板与内置覆盖 |
 | `DeviceDynamicTool` | `models/device_dynamic_tool.py` | 设备上报工具定义 |
 | `DeviceDynamicToolVersion` | `models/device_dynamic_tool_version.py` | 动态工具版本 |
 | `DevicePermissionPolicy` | `models/device_permission_policy.py` | 设备 MCP 工具权限策略 |
@@ -147,6 +148,9 @@ server/
 | `device_tools/device_workspace_tools.py` | 设备工作区工具文件管理 |
 | `device_tools/device_runtime_tools/` | 出厂桌面动态 MCP：`run_command` / `desktop_observe` / `desktop_screenshot` / `desktop_action` / `clipboard` |
 | `device_tools/device_browser_runtime_tools/` | 出厂默认浏览器工具体 |
+| **`remote_control/`** | |
+| `remote_control/controller_schema.py` | RCT v1 严格模板、动作和 JSON Schema 合同 |
+| `remote_control/controller_templates.py` | 四个内置模板、按用户 CRUD、revision 锁与恢复逻辑 |
 | **`access/`** | |
 | `access/governance.py` | AI 成员治理（状态/权限/生命周期） |
 | `access/access_guards.py` | 用户越权拦截 |
@@ -182,6 +186,7 @@ server/
 | `repo_update.py` | `/repo` | Git 仓库检测并直接拉取更新 |
 | `world.py` | `/world` | 世界观数据（角色 / 知识快照） |
 | `rtc.py` | `/rtc` 等 | WebRTC / ICE 相关 |
+| `remote_controller_templates.py` | `/remote-controller-templates` | RCT 模板列表/schema/CRUD/恢复；不转发实时输入 |
 | `socket_relay.py` | `/socket` | Socket.IO 中继 |
 
 ## "改 X 去哪里"
@@ -202,7 +207,8 @@ server/
 | 固有属性/人格/系统提示词 | `main/api/services/knowledge/librarian_builtins.py` |
 | 知识库公共接口（propose/consult/read） | `main/api/services/knowledge/librarian_service.py` |
 | 机器人/连接器 | `connector_runtime/bots/`、`connector_runtime/dispatch/` |
-| 远程画面 / 命令行 | `connector_runtime/dispatch/remote_control.py` / `remote_terminal.py` |
+| 远程视频 / RWM 信令 / 命令行 | `connector_runtime/dispatch/remote_control.py` / `remote_terminal.py`；RWM 内容仅走 P2P |
+| 遥控器模板治理 | `main/api/services/remote_control/` + `gateway/routers/remote_controller_templates.py`；实时动作仅走 P2P |
 | 配置项 | `main/api/core/settings.py` |
 
 ## 错误排查路径

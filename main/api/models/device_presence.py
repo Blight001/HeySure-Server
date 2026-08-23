@@ -21,6 +21,10 @@ from typing import Optional
 from sqlalchemy import BigInteger, Column, Text
 from sqlmodel import Field, SQLModel
 
+# Compatibility re-export for the dependency-capped public ``api.models``
+# aggregator. The durable model implementation remains in its own module.
+from .remote_controller_template import RemoteControllerTemplate
+
 
 class DevicePresence(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

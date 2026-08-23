@@ -197,6 +197,8 @@ def _agent_capabilities(agent: Dict[str, Any], device_type: str) -> Set[str]:
         NON_MCP_CAPABILITIES = {
             "remote_control", "remote.control",
             "remote_terminal", "remote.terminal",
+            "remote_web_mirror", "remote.web_mirror",
+            "remote_controller_templates",
         }
     for cap in agent.get("capabilities") or []:
         name = str(cap or "").strip()

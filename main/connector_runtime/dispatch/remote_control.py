@@ -108,6 +108,10 @@ def _agent_supports_web_mirror(sid: str) -> bool:
     return bool(caps & RWM_CAPABILITIES)
 
 
+def _active_device_session(device_id: str) -> Optional[RcSession]:
+    return next((session for session in _SESSIONS.values() if session.device_id == device_id), None)
+
+
 def _purge_expired(now: Optional[float] = None) -> None:
     now = now if now is not None else time.time()
     stale = [sid for sid, s in _SESSIONS.items() if now - s.created_at > _SESSION_TTL_SECONDS]
@@ -194,6 +198,18 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
         await sio.emit(
             "rc:error",
             {"code": "unsupported", "message": "该设备版本不支持远程控制（请更新端侧客户端后重连）"},
+            to=controller_sid,
+        )
+        return
+
+    # The reference agents own one RTCPeerConnection/capture pipeline. Keep the
+    # server contract equally explicit so a second operator cannot tear down or
+    # cross-wire an already active peer. There is no await between this check
+    # and insertion, making the reservation atomic on the Socket.IO event loop.
+    if _active_device_session(device_id) is not None:
+        await sio.emit(
+            "rc:error",
+            {"code": "busy", "message": "该设备已有远程控制会话，请先结束后再重试"},
             to=controller_sid,
         )
         return

@@ -299,7 +299,8 @@ Content-Type: application/json
 - **保留前缀，禁止使用**（会被服务器归到别的通道或剥离）：
   - `browser_` / `card_` —— 浏览器扩展通道专用
   - `evolution.` / `librarian.` —— 知识与进化工坊专用
-  - `remote_control` / `remote.control`、`remote_terminal` / `remote.terminal`
+  - `remote_control` / `remote.control`、`remote_terminal` / `remote.terminal`、
+    `remote_web_mirror` / `remote.web_mirror`、`remote_controller_templates`
     —— 远程连接能力保留字（不是可调用工具，见第 9 节）
   - `rc:` / `rt:` —— 远程连接事件前缀
 - 只进 `capabilities` 不写 `toolDefs` 的工具也能被调用，但模型只能盲传参数。
@@ -424,20 +425,20 @@ Content-Type: application/json
 
 ---
 
-## 9. 远程连接：画面、命令行、网页原生镜像与预设控制器（可选，默认不实施）
+## 9. 远程连接：画面、命令行、网页原生镜像与预设控制器（按 capability 选配）
 
 > 仅当项目运行在"有屏幕或能开 shell 的主机"且用户明确要求时才实施本节。
 > 纯业务型服务直接跳过。这不是 AI 调工具，而是**真人操作者**在网页控制台实时
 > 驱动服务所在主机的独立数据面。
 
-| | **画面远程**（screen） | **命令行远程**（terminal） | **网页原生镜像**（RWM） |
-| --- | --- | --- | --- |
-| 用途 | 实时屏幕镜像 + 键鼠注入 | 交互式 shell（ANSI / TUI / Ctrl-C / resize） | HTML/CSS/文字矢量镜像 + 元素级交互 |
-| 能力字（`capabilities`） | `remote_control` | `remote_terminal` | `remote_web_mirror`（兼容 `remote.web_mirror`） |
-| 事件 / 通道 | `rc:*` + `control` | `rt:*` | 沿用 `rc:*`，新增 `web-state` / `web-resource` DataChannel |
-| 传输 | **WebRTC P2P**（仅 SDP/ICE 信令过服务器） | **Socket.IO relay**（字节流经服务器转发） | **WebRTC P2P**（DOM/资源不经过服务器 relay） |
-| 需要 TURN | 需要（公网跨 NAT，见 9.6） | 不需要 | 需要，与画面远程共用 |
-| 当前完成度 | 已有协议与参考实现 | Server relay 已加固、Web 已恢复 xterm 入口；端侧按平台版本实现 | P0 仅完成能力保留与协商字段；快照/端侧/UI 尚未完成 |
+| | **画面远程**（screen） | **命令行远程**（terminal） | **网页原生镜像**（RWM） | **预设控制器**（RCT） |
+| --- | --- | --- | --- | --- |
+| 用途 | 实时屏幕镜像 + 键鼠注入 | 交互式 shell（ANSI / TUI / Ctrl-C / resize） | HTML/CSS/文字矢量镜像 + 元素级交互 | 方向、媒体、演示、浏览器与自定义遥控器 |
+| 能力字（`capabilities`） | `remote_control` | `remote_terminal` | `remote_web_mirror`（兼容 `remote.web_mirror`） | 兼容动作使用 `remote_control`；原生 emit 再加 `remote_controller_templates` |
+| 事件 / 通道 | `rc:*` + `control` | `rt:*` | 沿用 `rc:*`，新增 `web-state` / `web-resource` DataChannel | 可靠 `control` + 可选无序 `controller-fast` DataChannel |
+| 传输 | **WebRTC P2P**（仅 SDP/ICE 信令过服务器） | **Socket.IO relay**（字节流经服务器转发） | **WebRTC P2P**（DOM/资源不经过服务器 relay） | **WebRTC P2P**；Server API 只治理低频模板 |
+| 需要 TURN | 需要（公网跨 NAT，见 9.6） | 不需要 | 需要，与画面远程共用 | 需要，与画面远程共用 |
+| 当前完成度 | 已有协议与参考实现 | Server relay 已加固、Web 已恢复 xterm 入口；端侧按平台版本实现 | Browser 已实现快照、Patch、资源、动作、重同步与视频回退；Web 已实现隔离渲染和交互 UI | Server 已实现严格 CRUD/内置模板；Web 已实现编辑与控件 UI；Browser 已实现原生 emit、快速通道与 dead-man |
 
 在 `capabilities` 里声明哪个能力字就解锁哪条通道；都不声明就都不开。这些
 能力字是**传输层保留字，不是 MCP 工具**（见 5.1）。RWM 依附已有 `rc:*`
@@ -448,7 +449,11 @@ Content-Type: application/json
 开会话时服务器统一校验：① 控制端（网页）用同一套用户 JWT（放 `rc:start` /
 `rt:open` 的 `token` 字段）；② 目标是该用户名下的在线服务；③ 该服务声明了对应
 能力字。不满足则回 `rc:error` / `rt:error`（`code`：`unauthorized` / `offline` /
-`forbidden` / `unsupported`）。会话按 `sessionId` 存服务器内存，任一方断线即清理。
+`forbidden` / `unsupported`）；同一设备已有画面远控时，第二个 `rc:start` 返回 `busy`。
+会话按 `sessionId` 存服务器内存，任一方断线即清理。
+
+命令行会话允许并行，但 Server 限制每用户最多 4 个、每设备最多 2 个；超限返回
+`rt:error {code:"session_limit"}`。端侧可以按自身资源设置更低上限。
 
 ### 9.2 命令行远程协议：`rt:*`
 
@@ -463,19 +468,22 @@ Content-Type: application/json
     rt:close   {sessionId}
 
 服务 → 服务器 → 控制端
+    rt:ready   {sessionId, shell?, cols?, rows?}  PTY 已实际建立（新端建议发送）
     rt:data    {sessionId, data}          PTY 输出（base64）
     rt:exit    {sessionId, code}          shell 退出（code 可为 null）
     rt:error   {sessionId, code, message}
 
 服务器 → 控制端
-    rt:opened  {sessionId, deviceId, shell}   受理后才开始发 rt:input
+    rt:opened  {sessionId, deviceId, shell}   仅表示 Server 已受理并转发
     rt:error   {code, message}
 ```
 
 服务侧实现要点：收到 `rt:open` 按 `shell`/`cols`/`rows`/`cwd` 起 PTY（Windows
-ConPTY，Linux/macOS openpty）→ 持续读输出发 `rt:data`，退出发 `rt:exit` →
+ConPTY，Linux/macOS openpty）→ 建立成功发 `rt:ready` → 持续读输出发 `rt:data`，退出发 `rt:exit` →
 `rt:input` 解 base64 写入，`rt:resize` 调行列，`rt:close` 杀进程 → 支持多会话
 （按 `sessionId` 路由）→ socket 断线时杀掉全部 PTY。
+Web 在匹配的 `rt:ready` 后开放输入；为兼容不发送 ready 的旧端，仅在
+`rt:opened` 后使用 500 ms 有界 legacy fallback，不能把 `rt:opened` 写成端侧 PTY 已就绪。
 **安全**：这是该用户对主机的完整 shell（服务器已做属主校验），PTY 应以不超出
 预期的权限与工作目录启动。
 
@@ -505,12 +513,32 @@ ConPTY，Linux/macOS openpty）→ 持续读输出发 `rt:data`，退出发 `rt:
 `[0,1]` 的鼠标/键盘事件并注入本机 OS。实现成本远高于命令行远程，
 **多数第三方服务只接命令行远程即可**。
 
-### 9.4 预设控制器接口（复用 `control` DataChannel）
+### 9.4 Remote Controller Template v1
 
-控制台当前内置四组预设：**方向遥控器、媒体、演示、浏览器**。它们不是新的
-HTTP/Socket.IO 接口，也不会把 `dpad.up` 这类 UI command 原样发给设备；控制台会
-把按钮转换为现有 `control` DataChannel 的白名单 JSON。因此已经完整实现 9.3
-输入协议的设备无需再注册能力字，只需接受下列载荷：
+服务器提供低频模板治理 API，控制台内置四组默认模板：**方向、媒体、演示、浏览器**。
+模板声明 schema 固定为 `remote_controller_template.v1`，只允许
+`button|dpad|keypad|slider|joystick|textInput` 控件和 `key|browser|emit` 动作；
+不接受 HTML、CSS、JavaScript、shell、URL 或任意 Socket 事件。限制为每用户 32 个
+自定义模板、每模板 64 个控件、64 KiB、名称 80 字符、label 40 字符、最多 12 列；
+slider 的 `min` / `max` 必须在 `[-1000000,1000000]` 内。
+
+所有接口使用用户 JWT，且只读取或修改该用户的数据：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/remote-controller-templates` | 内置 + 用户模板；可传 `deviceType` / `capability` |
+| `GET` | `/api/remote-controller-templates/schema` | Pydantic 生成的模板与实时事件 JSON Schema |
+| `POST` | `/api/remote-controller-templates` | 创建自定义模板 |
+| `GET` | `/api/remote-controller-templates/{id}` | 读取有效模板，响应带 ETag |
+| `PUT` | `/api/remote-controller-templates/{id}` | `expectedRevision` 乐观锁更新/覆盖内置模板 |
+| `DELETE` | `/api/remote-controller-templates/{id}?expectedRevision=N` | 删除自定义模板；内置模板不可删 |
+| `POST` | `/api/remote-controller-templates/{id}/restore` | body `{"expectedRevision":N}`，恢复内置默认 |
+
+revision 不匹配返回 409；恢复内置模板幂等，且已有覆盖的 revision 保持单调递增，
+不会重置为 1 形成 ABA 冲突。模板只经这些 API 同步，不走
+Socket.IO，也不会作为 MCP 工具暴露。实现原生 `controller-action` 后，设备同时声明
+`remote_control` 与非 MCP 能力 `remote_controller_templates`；旧设备无需声明新能力，
+仍可接收 Web 把内置 `key` / `browser` 动作翻译出的旧载荷：
 
 ```json
 {"type":"key","key":"ArrowUp","action":"tap"}
@@ -528,14 +556,56 @@ HTTP/Socket.IO 接口，也不会把 `dpad.up` 这类 UI command 原样发给设
 
 desktop / browser 的按键载荷带 `action: "tap"`；android 按键载荷不带 `action`。
 浏览器导航只在 browser 模式出现。设备必须按模式和键名做 allowlist，不得把 `key`
-解释为脚本、shell 或任意系统命令。当前版本的预设由 Web 内置，**尚无服务器端自定义
-预设 CRUD/Schema API**；设计中的可编辑预设库属于后续治理阶段，不能按已实现接口接入。
+解释为脚本、shell 或任意系统命令。
+
+原生模板动作固定只在 WebRTC DataChannel 发送，服务器看不到也不保存输入：
+
+```json
+{
+  "kind": "controller-action", "v": 1,
+  "templateId": "gamepad", "controlId": "left-stick", "event": "game.axis",
+  "seq": 1042, "phase": "update", "value": {"x": 0.2, "y": -0.8},
+  "ts": 1787558400000
+}
+```
+
+`phase` 仅 `trigger|start|update|end`；seq 按 `(templateId, controlId)` 严格递增。
+`value` 仅允许 `null`、有限数字、最多 1024 字符的字符串或轴值 `{x,y}`；轴值必须在
+`[-1,1]` 内。布尔值、数字字符串和 `{text: ...}` 包装对象都不是 v1 合同。
+`emit` 动作必须把模板中已校验的逻辑名放在顶层 `event`；key/browser 兼容动作不使用
+`controller-action`。设备不得把该值当 DOM event 名，只能派发固定 CustomEvent
+`heysure.controller-action`，并把逻辑名放入冻结的 `detail.event`。逻辑名必须匹配
+`^[a-z][a-z0-9_.-]{0,63}$`，并拒绝 `rc.` / `rc-` / `rt.` / `rt-` /
+`web-action` / `controller-action` 保留前缀；含 emit 的模板必须要求
+`remote_controller_templates` 能力，不能只写 `remote_control` 后下发给旧设备。
+按钮 trigger 和连续控件 start/end 始终走可靠有序 `control`。摇杆/滑杆 update 优先走
+设备协商后的 `controller-fast`（`ordered:false, maxRetransmits:0`），Web 每帧只保留
+最新值、最高 60 Hz，`bufferedAmount > 64 KiB` 时覆盖待发的旧中间值，并在 16 KiB 低水位
+恢复后只发最新值；fast 未协商、未打开或已关闭时才降级到可靠 control 且最高 20 Hz，
+已激活控件发现 fast 关闭时先可靠补发一次 fresh start，再继续 update；不能因 fast 暂时拥塞
+同时走可靠通道而造成跨通道乱序。连续控件保持按下时，Web 每 200 ms
+生成同值 update 心跳并复用同一合并/背压路径，end 或会话停止即清除。设备收到 start 后 500 ms 没有
+update/end 必须 dead-man release；fast close 只释放最后动作来源仍为 fast 的控件，不能释放可靠
+fresh start 已接管的状态；本地 release 不得占用控制端的下一个 seq。NaN、Infinity、
+越界轴值、额外字段、重复或倒序 seq 均须拒绝。
+
+RCT v1 的 Browser 接收端不保存 Server 模板注册表，只校验信封、event/value、seq 与 dead-man，
+并固定派发 `heysure.controller-action`；模板成员关系与 revision 由 Server 和 Web 的严格 schema
+共同约束。若后续需要端侧独立核验 `(templateId, controlId, event)`，必须另行协商带 revision/hash
+或签名的 template manifest，不能把它写成 v1 已具备的能力。
 
 ### 9.5 网页原生镜像：Remote Web Mirror v1
 
 RWM 是画面远程的可选表面，不是把设备发来的 HTML 交给控制台直接执行。控制台
 请求 `requestedSurfaces: ["dom", "video"]`、`protocolVersions: [1]`；Server 只把
 白名单内、有长度上限的协商元数据转给设备。旧设备忽略新字段，继续使用视频。
+
+当前端侧参考实现位于 Chromium Browser 扩展 `browser_MCP`；标准扩展与直接共享其源码构建的
+`browser_MCP_win` 新包都获得本实现。Windows 桌面、Android、Linux 与其他非 Browser 自建
+端侧在实际实现同一合同前不得声明 `remote_web_mirror`。Browser 实现覆盖普通页面的
+全量快照、增量 Patch、`img.currentSrc/src` 图片资源、ACK/重同步、元素动作和视频回退；跨域 iframe、
+closed Shadow DOM、Canvas/WebGL、视频/poster、CSS background、字体/DRM/PDF、受限浏览器页及超限内容仍回退视频，
+因此“原生镜像”表示结构化矢量显示，不等于任意网页像素级 100% 无损。
 
 WebRTC 建立后，控制端先在 `control` 通道发送：
 
@@ -544,37 +614,49 @@ WebRTC 建立后，控制端先在 `control` 通道发送：
   "kind": "rc-hello",
   "versions": [1],
   "surfaces": ["dom", "video"],
-  "encodings": ["cbor", "json"],
-  "compressions": ["br", "gzip", "none"],
+  "encodings": ["json"],
+  "compressions": ["gzip", "none"],
   "maxChunkBytes": 16384,
   "permissions": ["view", "interact"]
 }
 ```
 
 设备用 `rc-hello-ack` 选择单一版本、编码和压缩算法，并返回 `features`、`limits`、
-viewport、`pageId`、`epoch`。超时、无共同版本或缺少 DataChannel 时必须继续视频，
-不能把旧设备判定为故障。
+当前 Browser 选择 JSON + `none`；Web 能接收 gzip 不表示端侧已经生成压缩快照。
+ACK 不携带页面状态，viewport、`pageId` 和 `epoch` 由后续 `page.reset` / snapshot 状态提供。
+超时、无共同版本或缺少 DataChannel 时必须继续视频，不能把旧设备判定为故障。
 
 协商成功后，设备创建两个可靠 DataChannel：
 
 - `web-state`：可靠有序；传协议 envelope、全量快照、增量 Patch、ack 和 resync。
-- `web-resource`：可靠二进制分块；传内容寻址图片、字体和大快照，必须做背压。
+- `web-resource`：可靠二进制分块；传内容寻址图片和大快照，必须做背压。Web 接收器
+  预留字体 MIME，但当前 Browser producer 不采集字体。
 
 低延迟交互继续走现有 `control` DataChannel。消息 envelope 至少含 `v`、`type`、
 `sessionId`、`pageId`、`epoch`、`seq`、`body`。顶层导航递增 epoch；Patch 的
 `baseSeq` 不等于控制端最后序号时必须请求全量重同步，不能猜测应用。
 
-`web-state` v1 的消息类型至少包括：`snapshot.begin` / `snapshot.end`、`patch`、
+`web-state` v1 的消息类型包括：`snapshot.begin` / `snapshot.end`、`patch`、
 `ack`、`resync.request`、`page.reset`、`surface.status`。快照二进制块与资源块走
 `web-resource`，每块携带 transfer id、index、total；完整内容必须校验长度和
-SHA-256。增量 `patch.body.ops` 只允许：`node.add/remove/move`、
-`attr.set/remove`、`text.set`、`style.set`、`state.set`、`box.set`、
-`scroll.set`、`focus.set`、`selection.set`、`resource.bind`、`pixel.update`。
+SHA-256。当前 producer 的增量 `patch.body.ops` 精确为：`node.add/remove`、
+`attr.set/remove`、`text.set`、`style.define/style.set`、`state.set`、`box.set`、
+`scroll.set`、`focus.set`。未知 op 必须拒绝并请求重同步。
 
-快照用稳定 node id、结构节点、去重 computed style、表单状态、focus/selection 和
-资源 manifest 描述页面。点击、输入、按键、滚动等只回传 `{requestId, nodeId,
-action, args, epoch}`；设备在真实页面重新校验节点可见、未遮挡且未过期后执行。
-密码值、Cookie、Token、网页存储和请求头不得进入快照。
+当前 Browser 实现用 epoch 内稳定 node id、结构节点、去重 computed style、表单状态、focus、
+嵌套滚动和内容寻址图片描述页面；同一 epoch 的多次全量快照保持已有节点 ID，删除后不复用。
+snapshot payload 的 `resources` 是兼容保留字段，当前固定为空；DOM 先发布，随后每轮最多采集
+64 个 `HTMLImageElement.currentSrc || src`
+（`picture` 通过内部 img 间接覆盖），单件 4 MiB、会话唯一资源 64 MiB。跨源 public HTTP(S)
+图片由绑定当前 top-frame 会话的 extension-origin 受限代理以 omit credentials 获取；localhost、
+字面私网/loopback/link-local、凭据 URL 和不安全重定向均拒绝。图片新增、`src/srcset` 变化或 load 会合并触发最多每秒一次
+的全量快照。图片以独立 resource transfer 与 `{nodeId,slot}` bindings 尽力后送；Web 对已经被
+Patch 删除的 stale binding 直接忽略，不触发 resync。selection、字体、`node.move` 和像素岛尚未作为独立消息
+实现，DOM 移动以 remove + add 表达，无法结构化的区域继续使用视频。点击、输入、按键、滚动等
+只回传 `{requestId, nodeId, action, args, epoch}`；设备在真实页面重新校验节点可见、
+未遮挡且未过期后执行；`click|doubleClick|contextMenu|type|key|select|focus` 还要校验目标
+位于最上层，scroll 保留可滚动祖先检查。密码原值、Cookie、Token、网页存储和请求头不得进入快照；
+操作员仍可把新密码作为加密 P2P 的一次性 `type` 动作输入，控制台不得缓存或回显。
 
 控制端的元素交互在 `control` 通道使用：
 
@@ -612,6 +694,9 @@ WebGL、视频、DRM、PDF、closed Shadow DOM、受限页面、超限快照或�
 
 - 只要命令行远程：`capabilities` 加 `remote_terminal`，实现 9.2 + 本机 PTY。
 - 要画面远程：`capabilities` 加 `remote_control`，实现 9.3 + 按 9.6 取 ICE 配置。
+- 要原生遥控器模板动作：同时加 `remote_control` 与 `remote_controller_templates`，
+  实现 9.4 的 seq、动作白名单、fast channel 背压和 dead-man release；模板 CRUD 由 Web
+  调 Server API，设备不得向 Server relay 实时输入。
 - 要网页原生镜像：同时加 `remote_control` 与 `remote_web_mirror`，实现 9.5；未完成
   快照、Patch、安全渲染和视频回退前，不得只凭能力字宣称 RWM 可用。
 - 所有远程表面与第 8 节任务循环互不干扰：不进任务队列、不入库、不走聊天管线。
@@ -722,6 +807,9 @@ main()
 | 命令行远程报"不支持" | `capabilities` 是否声明 `remote_terminal`（第 9 节） |
 | 画面远程公网连上就断 | STUN 打洞失败，需 TURN（9.6）；命令行远程无此问题 |
 | 命令行远程有回显但输入无效 | `rt:input` 的 `data` 是否 base64 |
+| 设备文档只有视频/终端 | 文档或端侧版本偏旧；核对第 9 节、Browser 新构建及实际 capability |
+| 网页原生入口不出现 | 必须是重新构建安装的 `browser_MCP` / `browser_MCP_win`，并同时声明 `remote_control` + `remote_web_mirror` |
+| 遥控器 native emit 不出现 | Browser 新构建是否同时声明 `remote_control` + `remote_controller_templates`；旧端只使用 legacy key/browser 预设 |
 
 ---
 
@@ -736,7 +824,8 @@ main()
 3. 同名工具存在于多个绑定执行端时，优先派发给申报了该工具的那个；
 4. 绑定与授权按 `(用户, 服务id)` 持久化，跨重连、跨服务器重启保持；
 5. 动态 MCP 定义（第 6 节）只由服务器写入，不实现该通道不影响静态 `toolDefs` 调度；
-6. 远程连接两通道（第 9 节）开会话时统一做所有权校验，与任务循环互不干扰。
+6. 远程连接的四类表面（视频、命令行、RWM、RCT，第 9 节）开会话时统一做所有权与
+   capability 校验，与任务循环互不干扰；模板文档以外的实时内容不入库。
 
 协议演进以服务端实现为最终权威：`connector_runtime/dispatch/device_dispatch.py`
 （任务分发）、`remote_control.py`（`rc:*`）、`remote_terminal.py`（`rt:*`）。

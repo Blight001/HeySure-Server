@@ -89,6 +89,37 @@ def test_start_session_drops_dom_surface_without_device_capability(monkeypatch):
     remote_control._SESSIONS.clear()
 
 
+def test_start_session_rejects_second_operator_for_same_device(monkeypatch):
+    emitted = AsyncMock()
+    monkeypatch.setattr(remote_control.sio, "emit", emitted)
+    monkeypatch.setattr(remote_control, "_resolve_controller_user", lambda _token: 7)
+    monkeypatch.setattr(remote_control, "_find_device_sid", lambda _device_id: "device-sid")
+    monkeypatch.setattr(remote_control, "_agent_owner", lambda _sid: 7)
+    monkeypatch.setattr(remote_control, "_agent_supports_rc", lambda _sid: True)
+    remote_control._SESSIONS.clear()
+    remote_control._SESSIONS["rc_existing"] = remote_control.RcSession(
+        session_id="rc_existing",
+        device_id="browser-1",
+        user_id=7,
+        controller_sid="first-controller",
+        device_sid="device-sid",
+    )
+
+    asyncio.run(
+        remote_control.start_session(
+            "second-controller",
+            {"deviceId": "browser-1", "token": "valid"},
+        )
+    )
+
+    assert set(remote_control._SESSIONS) == {"rc_existing"}
+    assert emitted.await_count == 1
+    assert emitted.await_args.args[0] == "rc:error"
+    assert emitted.await_args.args[1]["code"] == "busy"
+    assert emitted.await_args.kwargs["to"] == "second-controller"
+    remote_control._SESSIONS.clear()
+
+
 @pytest.mark.parametrize(
     ("requested_surfaces", "protocol_versions"),
     [

@@ -23,10 +23,12 @@ from .binding_routing import online_devices_for_config
 #   remote_control  — 画面远程 (WebRTC screen mirror + input), gated by rc:* signaling
 #   remote_terminal — 命令行远程 (interactive PTY over the rt:* Socket.IO relay)
 #   remote_web_mirror — 网页原生镜像 (P2P DOM/resource data channels under rc:*)
+#   remote_controller_templates — 声明式遥控器动作 (P2P controller-action)
 NON_MCP_CAPABILITIES: Set[str] = {
     "remote_control", "remote.control",
     "remote_terminal", "remote.terminal",
     "remote_web_mirror", "remote.web_mirror",
+    "remote_controller_templates",
 }
 
 # ``device:register`` may carry an ``icon`` choice. Presets live under

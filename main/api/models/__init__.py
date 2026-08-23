@@ -61,7 +61,7 @@ from .defaults import (
 from .admin_audit import AdminAuditLog
 from .device_binding import DeviceAiBinding
 from .device_mcp_permission import DeviceTypeMcpPermission
-from .device_presence import DevicePresence
+from .device_presence import DevicePresence, RemoteControllerTemplate
 from .device_dynamic_tool import DeviceDynamicTool
 from .device_dynamic_tool_version import DeviceDynamicToolVersion
 from .device_permission_policy import DevicePermissionPolicy
@@ -127,6 +127,7 @@ __all__ = [
     "DeviceDynamicTool",
     "DeviceDynamicToolVersion",
     "DevicePermissionPolicy",
+    "RemoteControllerTemplate",
     "McpToolStat",
     "McpFailureEvent",
     "ExternalMcpCallAudit",

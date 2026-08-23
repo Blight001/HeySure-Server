@@ -30,6 +30,7 @@ def test_remote_control_capability_is_not_an_mcp_tool():
         "remote.control",
         "remote_web_mirror",
         "remote.web_mirror",
+        "remote_controller_templates",
     }
 
     assert mcp_capabilities(caps) == {"browser_action"}
