@@ -424,25 +424,26 @@ Content-Type: application/json
 
 ---
 
-## 9. 远程连接：画面远程 + 命令行远程（可选，默认不实施）
+## 9. 远程连接：画面、命令行与网页原生镜像（可选，默认不实施）
 
 > 仅当项目运行在"有屏幕或能开 shell 的主机"且用户明确要求时才实施本节。
 > 纯业务型服务直接跳过。这不是 AI 调工具，而是**真人操作者**在网页控制台实时
 > 驱动服务所在主机的独立数据面。
 
-| | **画面远程**（screen） | **命令行远程**（terminal） |
-| --- | --- | --- |
-| 用途 | 实时屏幕镜像 + 键鼠注入 | 交互式 shell（ANSI / TUI / Ctrl-C / resize） |
-| 能力字（`capabilities`） | `remote_control` | `remote_terminal` |
-| 事件前缀 | `rc:*` | `rt:*` |
-| 传输 | **WebRTC P2P**（仅 SDP/ICE 信令过服务器） | **Socket.IO relay**（字节流经服务器转发） |
-| 需要 TURN | 需要（公网跨 NAT，见 9.4） | 不需要 |
-| 官方参考实现 | 服务端 `connector_runtime/dispatch/remote_control.py`；Windows `src-tauri/src/rc.rs` + `src/remote-control.ts` | 服务端 `connector_runtime/dispatch/remote_terminal.py`；Windows `src-tauri/src/pty.rs` + `src/remote-terminal.ts` |
+| | **画面远程**（screen） | **命令行远程**（terminal） | **网页原生镜像**（RWM） |
+| --- | --- | --- | --- |
+| 用途 | 实时屏幕镜像 + 键鼠注入 | 交互式 shell（ANSI / TUI / Ctrl-C / resize） | HTML/CSS/文字矢量镜像 + 元素级交互 |
+| 能力字（`capabilities`） | `remote_control` | `remote_terminal` | `remote_web_mirror`（兼容 `remote.web_mirror`） |
+| 事件 / 通道 | `rc:*` + `control` | `rt:*` | 沿用 `rc:*`，新增 `web-state` / `web-resource` DataChannel |
+| 传输 | **WebRTC P2P**（仅 SDP/ICE 信令过服务器） | **Socket.IO relay**（字节流经服务器转发） | **WebRTC P2P**（DOM/资源不经过服务器 relay） |
+| 需要 TURN | 需要（公网跨 NAT，见 9.5） | 不需要 | 需要，与画面远程共用 |
+| 当前完成度 | 已有协议与参考实现 | Server relay 已加固、Web 已恢复 xterm 入口；端侧按平台版本实现 | P0 仅完成能力保留与协商字段；快照/端侧/UI 尚未完成 |
 
-在 `capabilities` 里声明哪个能力字就解锁哪条通道；都不声明就都不开。这两个
-能力字是**传输层保留字，不是 MCP 工具**（见 5.1）。
+在 `capabilities` 里声明哪个能力字就解锁哪条通道；都不声明就都不开。这些
+能力字是**传输层保留字，不是 MCP 工具**（见 5.1）。RWM 依附已有 `rc:*`
+会话，因此设备必须同时声明 `remote_control`，不能只声明网页镜像能力。
 
-### 9.1 会话所有权闸门（两通道通用）
+### 9.1 会话所有权闸门（所有远程表面通用）
 
 开会话时服务器统一校验：① 控制端（网页）用同一套用户 JWT（放 `rc:start` /
 `rt:open` 的 `token` 字段）；② 目标是该用户名下的在线服务；③ 该服务声明了对应
@@ -484,7 +485,7 @@ ConPTY，Linux/macOS openpty）→ 持续读输出发 `rt:data`，退出发 `rt:
 
 ```
 控制端（web） → 服务器 → 服务
-    rc:start   {deviceId, token}
+    rc:start   {deviceId, token, qualityPreset?, requestedSurfaces?, protocolVersions?}
     rc:answer  {sessionId, sdp}
     rc:ice     {sessionId, candidate}
     rc:stop    {sessionId}
@@ -504,17 +505,47 @@ ConPTY，Linux/macOS openpty）→ 持续读输出发 `rt:data`，退出发 `rt:
 `[0,1]` 的鼠标/键盘事件并注入本机 OS。实现成本远高于命令行远程，
 **多数第三方服务只接命令行远程即可**。
 
-### 9.4 TURN
+### 9.4 网页原生镜像：Remote Web Mirror v1
+
+RWM 是画面远程的可选表面，不是把设备发来的 HTML 交给控制台直接执行。控制台
+请求 `requestedSurfaces: ["dom", "video"]`、`protocolVersions: [1]`；Server 只把
+白名单内、有长度上限的协商元数据转给设备。旧设备忽略新字段，继续使用视频。
+
+协商成功后，设备创建两个可靠 DataChannel：
+
+- `web-state`：可靠有序；传协议 envelope、全量快照、增量 Patch、ack 和 resync。
+- `web-resource`：可靠二进制分块；传内容寻址图片、字体和大快照，必须做背压。
+
+低延迟交互继续走现有 `control` DataChannel。消息 envelope 至少含 `v`、`type`、
+`sessionId`、`pageId`、`epoch`、`seq`、`body`。顶层导航递增 epoch；Patch 的
+`baseSeq` 不等于控制端最后序号时必须请求全量重同步，不能猜测应用。
+
+快照用稳定 node id、结构节点、去重 computed style、表单状态、focus/selection 和
+资源 manifest 描述页面。点击、输入、按键、滚动等只回传 `{requestId, nodeId,
+action, args, epoch}`；设备在真实页面重新校验节点可见、未遮挡且未过期后执行。
+密码值、Cookie、Token、网页存储和请求头不得进入快照。
+
+控制台必须在无脚本、无网络、无表单提交和无顶层导航能力的 sandbox iframe 中，
+用 DOM API 与标签/属性/样式白名单构树；禁止 `v-html`、`innerHTML` 和执行源脚本。
+资源由设备侧读取后按 SHA-256 分块传输，控制端不得自行访问网页域名补资源。
+
+普通 HTML/CSS/文字可获得矢量清晰显示，但不能承诺任意页面 100% 无损。Canvas、
+WebGL、视频、DRM、PDF、closed Shadow DOM、受限页面、超限快照或同步失败时，应
+发送表面状态并自动回退现有视频轨；HTML、DOM Patch 和资源始终不经 Server relay。
+
+### 9.5 TURN
 
 命令行远程走 relay，公网直接可用。画面远程是 P2P：纯 STUN 在公网跨 NAT 常失败，
 需部署 TURN 中继（房主在网页管理控制台「远程控制（STUN/TURN）」卡片填凭据）。
 服务侧从登录响应或 `GET /api/rtc/ice-servers` 取 ICE 配置，**不要写死**。
 
-### 9.5 实施清单
+### 9.6 实施清单
 
 - 只要命令行远程：`capabilities` 加 `remote_terminal`，实现 9.2 + 本机 PTY。
-- 要画面远程：`capabilities` 加 `remote_control`，实现 9.3 + 按 9.4 取 ICE 配置。
-- 两条通道与第 8 节任务循环互不干扰：不进任务队列、不入库、不走聊天管线。
+- 要画面远程：`capabilities` 加 `remote_control`，实现 9.3 + 按 9.5 取 ICE 配置。
+- 要网页原生镜像：同时加 `remote_control` 与 `remote_web_mirror`，实现 9.4；未完成
+  快照、Patch、安全渲染和视频回退前，不得只凭能力字宣称 RWM 可用。
+- 所有远程表面与第 8 节任务循环互不干扰：不进任务队列、不入库、不走聊天管线。
 
 ---
 

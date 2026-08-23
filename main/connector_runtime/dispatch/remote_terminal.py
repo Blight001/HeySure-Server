@@ -1,64 +1,58 @@
-"""Human-driven interactive remote terminal (命令行远程 / PTY over Socket.IO).
+"""Human-operated PTY byte relay over the endpoint Socket.IO connection.
 
-This is the **second remote-connection data plane**, a sibling of the WebRTC
-screen mirror in ``remote_control.py``. Where screen-remote pushes ~30fps video
-peer-to-peer (and therefore needs STUN/TURN to punch through NAT), a terminal is
-just a low-bandwidth byte stream — so it rides the **Socket.IO relay itself**.
-The bytes hop controller ↔ server ↔ device over the same agent socket that
-carries registration and task dispatch; there is no WebRTC peer, no SDP/ICE, and
-crucially **no TURN dependency** — the terminal works across the public internet
-in exactly the setups where screen-remote can't. See device/read.md「统一远程连接」.
+The server never interprets terminal contents and never persists them. It
+authenticates the controller, verifies device ownership/capability, bounds each
+message, and relays only the events allowed for that peer direction.
 
-A live operator opens the web console, clicks a desktop device, and gets a real
-shell: keystrokes flow browser → device PTY, PTY output (ANSI, cursor moves, TUI
-apps) flows device → browser. None of it is persisted, queued, or routed through
-the chat pipeline — those exist for AI tool calls and are far too heavy for an
-interactive keystroke/output loop.
+Protocol (``data`` is strict base64 of raw PTY bytes):
 
-Signaling + data protocol (event names shared by both ends; payloads carry
-``sessionId``; ``data`` is base64 of the raw terminal bytes so control sequences
-survive intact):
+* controller -> device: ``rt:open``, ``rt:input``, ``rt:resize``, ``rt:close``
+* device -> controller: ``rt:data``, ``rt:ready`` (optional), ``rt:exit``,
+  ``rt:error``
+* server -> controller: ``rt:opened`` and validation/authentication errors
 
-    controller (web)  → server → device
-        rt:open       {deviceId, token, shell?, cols?, rows?, cwd?}   open a session
-        rt:input      {sessionId, data}     keystrokes into the PTY (base64 bytes)
-        rt:resize     {sessionId, cols, rows}   window resize
-        rt:close      {sessionId}           tear down
-
-    device            → server → controller
-        rt:data       {sessionId, data}     PTY output (base64 bytes)
-        rt:exit       {sessionId, code}     the shell process exited
-        rt:error      {sessionId, code, message}
-
-    server            → controller
-        rt:opened     {sessionId, deviceId, shell}   session accepted
-        rt:error      {code, message}                start refused
-
-Ownership is enforced at ``rt:open``: the controller proves its identity with the
-same user JWT the agent uses, and the target device must be a live agent owned by
-that user that advertises the ``remote_terminal`` capability. Mirrors
-``remote_control.start_session`` exactly so the two channels share one gate.
+``rt:opened`` retains its historical meaning: the server accepted and
+forwarded the request. New devices may additionally send ``rt:ready`` after
+the PTY has actually spawned; older devices remain compatible.
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from api.sio import agents, sio, resolve_agent_user, is_agent_shared_secret
+from api.sio import agents, is_agent_shared_secret, resolve_agent_user, sio
 
 
 logger = logging.getLogger(__name__)
 
-# Capability the device advertises in device:register to unlock this channel.
 RT_CAPABILITY = "remote_terminal"
-
-# Sessions with no activity past this are reaped so a dropped peer never leaks a
-# live PTY (the shell keeps running/draining resources otherwise).
 _SESSION_TTL_SECONDS = 60 * 60
+_REAPER_INTERVAL_SECONDS = 30
+_MAX_SESSIONS_PER_USER = 4
+_MAX_SESSIONS_PER_DEVICE = 2
+_MAX_DEVICE_ID_LENGTH = 256
+_MAX_SHELL_LENGTH = 128
+_MAX_CWD_LENGTH = 2048
+_MAX_ERROR_CODE_LENGTH = 64
+_MAX_MESSAGE_LENGTH = 512
+_MAX_REASON_LENGTH = 128
+_MAX_TERMINAL_BYTES = 256 * 1024
+_MAX_BASE64_LENGTH = ((_MAX_TERMINAL_BYTES + 2) // 3) * 4
+_MIN_COLS = 2
+_MAX_COLS = 500
+_MIN_ROWS = 1
+_MAX_ROWS = 300
+
+_CONTROLLER_EVENTS = frozenset({"rt:input", "rt:resize", "rt:close"})
+_DEVICE_EVENTS = frozenset({"rt:data", "rt:ready", "rt:exit", "rt:error"})
+_TERMINAL_EVENTS = frozenset({"rt:close", "rt:exit", "rt:error"})
 
 
 @dataclass
@@ -69,18 +63,25 @@ class RtSession:
     controller_sid: str
     device_sid: str
     created_at: float = field(default_factory=time.time)
+    last_activity: float = field(default_factory=time.time)
 
 
-# sessionId -> RtSession
+@dataclass(frozen=True)
+class OpenRequest:
+    device_id: str
+    shell: Optional[str]
+    cols: Optional[int]
+    rows: Optional[int]
+    cwd: Optional[str]
+
+
 _SESSIONS: Dict[str, RtSession] = {}
+_REAPER_TASK: Optional[asyncio.Task[None]] = None
 
 
 def _find_device_sid(device_id: str) -> Optional[str]:
-    target = str(device_id or "").strip()
-    if not target:
-        return None
     for sid, agent in agents.items():
-        if str(agent.get("id")) == target:
+        if str(agent.get("id")) == device_id:
             return sid
     return None
 
@@ -95,143 +96,292 @@ def _agent_owner(sid: str) -> Optional[int]:
 
 def _agent_supports_rt(sid: str) -> bool:
     caps = (agents.get(sid) or {}).get("capabilities") or []
-    return RT_CAPABILITY in caps
-
-
-def _purge_expired(now: Optional[float] = None) -> None:
-    now = now if now is not None else time.time()
-    stale = [sid for sid, s in _SESSIONS.items() if now - s.created_at > _SESSION_TTL_SECONDS]
-    for session_id in stale:
-        _SESSIONS.pop(session_id, None)
+    return RT_CAPABILITY in caps or "remote.terminal" in caps
 
 
 def _resolve_controller_user(token: Any) -> Optional[int]:
-    """Verify the controller's identity from its user JWT (or shared secret)."""
     raw = str(token or "").strip()
-    if not raw:
-        return None
-    if is_agent_shared_secret(raw):
-        # Shared-secret callers are server-trusted; ownership is re-checked
-        # against the device's bound user below, so a user_id is still needed.
+    if not raw or is_agent_shared_secret(raw):
         return None
     resolved = resolve_agent_user(raw)
     return int(resolved[0]) if resolved else None
 
 
-async def open_session(controller_sid: str, data: Dict[str, Any]) -> None:
-    """Handle ``rt:open`` from the web console."""
-    _purge_expired()
-    data = data if isinstance(data, dict) else {}
-    device_id = str(data.get("deviceId") or "").strip()
-    if not device_id:
-        await sio.emit("rt:error", {"code": "bad_request", "message": "deviceId required"}, to=controller_sid)
-        return
+def _optional_text(value: Any, maximum: int) -> Optional[str]:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError("must be a string")
+    normalized = value.strip()
+    if not normalized or len(normalized) > maximum:
+        raise ValueError(f"must contain 1..{maximum} characters")
+    return normalized
 
-    user_id = _resolve_controller_user(data.get("token"))
+
+def _bounded_int(value: Any, minimum: int, maximum: int) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("must be an integer") from exc
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(f"must be between {minimum} and {maximum}")
+    return parsed
+
+
+def _required_bounded_int(value: Any, minimum: int, maximum: int) -> int:
+    parsed = _bounded_int(value, minimum, maximum)
+    if parsed is None:
+        raise ValueError("must be an integer")
+    return parsed
+
+
+def _parse_open_request(data: Any) -> OpenRequest:
+    if not isinstance(data, dict):
+        raise ValueError("payload must be an object")
+    raw_device_id = data.get("deviceId")
+    if not isinstance(raw_device_id, str):
+        raise ValueError("deviceId must be a string")
+    device_id = raw_device_id.strip()
+    if not device_id or len(device_id) > _MAX_DEVICE_ID_LENGTH:
+        raise ValueError(f"deviceId must contain 1..{_MAX_DEVICE_ID_LENGTH} characters")
+    return OpenRequest(
+        device_id=device_id,
+        shell=_optional_text(data.get("shell"), _MAX_SHELL_LENGTH),
+        cols=_bounded_int(data.get("cols"), _MIN_COLS, _MAX_COLS),
+        rows=_bounded_int(data.get("rows"), _MIN_ROWS, _MAX_ROWS),
+        cwd=_optional_text(data.get("cwd"), _MAX_CWD_LENGTH),
+    )
+
+
+async def _emit_error(sid: str, code: str, message: str, session_id: str = "") -> None:
+    payload = {"code": code, "message": message}
+    if session_id:
+        payload["sessionId"] = session_id
+    await sio.emit("rt:error", payload, to=sid)
+
+
+async def _safe_emit(event: str, payload: Dict[str, Any], target: str) -> None:
+    try:
+        await sio.emit(event, payload, to=target)
+    except Exception:
+        logger.exception("remote-terminal lifecycle notification failed event=%s", event)
+
+
+async def _expire_session(session: RtSession) -> None:
+    payload = {"sessionId": session.session_id, "reason": "idle_timeout"}
+    await _safe_emit("rt:close", payload, session.device_sid)
+    await _safe_emit("rt:exit", {**payload, "code": None}, session.controller_sid)
+    logger.info("remote-terminal expired session=%s", session.session_id)
+
+
+async def _purge_expired(now: Optional[float] = None) -> int:
+    current = time.time() if now is None else now
+    stale = [
+        session
+        for session in _SESSIONS.values()
+        if current - session.last_activity > _SESSION_TTL_SECONDS
+    ]
+    expired = 0
+    for session in stale:
+        if _SESSIONS.pop(session.session_id, None) is not None:
+            expired += 1
+            await _expire_session(session)
+    return expired
+
+
+async def _reaper_loop() -> None:
+    global _REAPER_TASK
+    try:
+        while _SESSIONS:
+            await asyncio.sleep(_REAPER_INTERVAL_SECONDS)
+            await _purge_expired()
+    finally:
+        _REAPER_TASK = None
+
+
+def _ensure_reaper() -> None:
+    global _REAPER_TASK
+    if _REAPER_TASK is None or _REAPER_TASK.done():
+        _REAPER_TASK = asyncio.create_task(_reaper_loop(), name="remote-terminal-reaper")
+
+
+def _session_limit_error(user_id: int, device_id: str) -> Optional[str]:
+    sessions = tuple(_SESSIONS.values())
+    if sum(item.user_id == user_id for item in sessions) >= _MAX_SESSIONS_PER_USER:
+        return "该账号的命令行远程会话数已达上限"
+    if sum(item.device_id == device_id for item in sessions) >= _MAX_SESSIONS_PER_DEVICE:
+        return "该设备的命令行远程会话数已达上限"
+    return None
+
+
+async def _authorize_open(
+    controller_sid: str, request: OpenRequest, token: Any
+) -> Optional[tuple[int, str]]:
+    user_id = _resolve_controller_user(token)
     if user_id is None:
-        await sio.emit(
-            "rt:error",
-            {"code": "unauthorized", "message": "登录态无效，请重新登录后再发起命令行远程"},
-            to=controller_sid,
-        )
-        return
-
-    device_sid = _find_device_sid(device_id)
+        await _emit_error(controller_sid, "unauthorized", "登录态无效，请重新登录后再发起命令行远程")
+        return None
+    device_sid = _find_device_sid(request.device_id)
     if not device_sid:
-        await sio.emit(
-            "rt:error",
-            {"code": "offline", "message": "目标设备不在线"},
-            to=controller_sid,
-        )
-        return
-
+        await _emit_error(controller_sid, "offline", "目标设备不在线")
+        return None
     if _agent_owner(device_sid) != user_id:
-        await sio.emit(
-            "rt:error",
-            {"code": "forbidden", "message": "无权控制该设备"},
-            to=controller_sid,
-        )
-        return
-
+        await _emit_error(controller_sid, "forbidden", "无权控制该设备")
+        return None
     if not _agent_supports_rt(device_sid):
-        await sio.emit(
-            "rt:error",
-            {"code": "unsupported", "message": "该设备版本不支持命令行远程（请更新端侧客户端后重连）"},
-            to=controller_sid,
-        )
-        return
+        await _emit_error(controller_sid, "unsupported", "该设备版本不支持命令行远程（请更新端侧客户端后重连）")
+        return None
+    limit_error = _session_limit_error(user_id, request.device_id)
+    if limit_error:
+        await _emit_error(controller_sid, "session_limit", limit_error)
+        return None
+    return user_id, device_sid
 
+
+async def open_session(controller_sid: str, data: Dict[str, Any]) -> None:
+    """Validate, authorize, and forward ``rt:open`` from the web console."""
+    await _purge_expired()
+    try:
+        request = _parse_open_request(data)
+    except ValueError as exc:
+        await _emit_error(controller_sid, "bad_request", str(exc))
+        return
+    authorized = await _authorize_open(controller_sid, request, data.get("token"))
+    if authorized is None:
+        return
+    user_id, device_sid = authorized
     session_id = f"rt_{uuid.uuid4().hex[:12]}"
     _SESSIONS[session_id] = RtSession(
         session_id=session_id,
-        device_id=device_id,
+        device_id=request.device_id,
         user_id=user_id,
         controller_sid=controller_sid,
         device_sid=device_sid,
     )
-    logger.info("remote-terminal open session=%s device=%s user=%s", session_id, device_id, user_id)
-    # Tell the device to spawn the PTY. Forward the requested shell/geometry/cwd
-    # verbatim — the device is the authority on what it can honor.
+    _ensure_reaper()
+    logger.info("remote-terminal open session=%s device=%s user=%s", session_id, request.device_id, user_id)
     await sio.emit(
         "rt:open",
         {
             "sessionId": session_id,
-            "shell": data.get("shell"),
-            "cols": data.get("cols"),
-            "rows": data.get("rows"),
-            "cwd": data.get("cwd"),
+            "shell": request.shell,
+            "cols": request.cols,
+            "rows": request.rows,
+            "cwd": request.cwd,
         },
         to=device_sid,
     )
-    # Ack the controller so it can wire up its terminal and start sending input.
     await sio.emit(
         "rt:opened",
-        {"sessionId": session_id, "deviceId": device_id, "shell": data.get("shell")},
+        {"sessionId": session_id, "deviceId": request.device_id, "shell": request.shell},
         to=controller_sid,
     )
 
 
-_TERMINAL_EVENTS = ("rt:close", "rt:exit", "rt:error")
+def _valid_base64(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > _MAX_BASE64_LENGTH:
+        return False
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(decoded) <= _MAX_TERMINAL_BYTES
+
+
+def _bounded_message(value: Any, maximum: int, *, allow_none: bool = False) -> Optional[str]:
+    if value is None and allow_none:
+        return None
+    if not isinstance(value, str) or len(value) > maximum:
+        raise ValueError(f"text must be at most {maximum} characters")
+    return value
+
+
+def _normalize_relay_payload(event: str, data: Dict[str, Any], session_id: str) -> Dict[str, Any]:
+    if event in {"rt:input", "rt:data"}:
+        if not _valid_base64(data.get("data")):
+            raise ValueError("data must be valid bounded base64")
+        return {"sessionId": session_id, "data": data["data"]}
+    if event == "rt:resize":
+        return {
+            "sessionId": session_id,
+            "cols": _required_bounded_int(data.get("cols"), _MIN_COLS, _MAX_COLS),
+            "rows": _required_bounded_int(data.get("rows"), _MIN_ROWS, _MAX_ROWS),
+        }
+    if event == "rt:ready":
+        return {
+            "sessionId": session_id,
+            "shell": _optional_text(data.get("shell"), _MAX_SHELL_LENGTH),
+            "cols": _bounded_int(data.get("cols"), _MIN_COLS, _MAX_COLS),
+            "rows": _bounded_int(data.get("rows"), _MIN_ROWS, _MAX_ROWS),
+        }
+    if event == "rt:exit":
+        code = data.get("code")
+        if code is not None:
+            code = _bounded_int(code, -(2**31), 2**31 - 1)
+        return {
+            "sessionId": session_id,
+            "code": code,
+            "reason": _bounded_message(data.get("reason"), _MAX_REASON_LENGTH, allow_none=True),
+        }
+    if event == "rt:error":
+        return {
+            "sessionId": session_id,
+            "code": _bounded_message(data.get("code"), _MAX_ERROR_CODE_LENGTH),
+            "message": _bounded_message(data.get("message"), _MAX_MESSAGE_LENGTH),
+        }
+    return {"sessionId": session_id}
+
+
+def _relay_target(session: RtSession, sid: str, event: str) -> Optional[str]:
+    if sid == session.controller_sid:
+        return session.device_sid if event in _CONTROLLER_EVENTS else None
+    if sid == session.device_sid:
+        return session.controller_sid if event in _DEVICE_EVENTS else None
+    return None
 
 
 async def relay(sid: str, event: str, data: Dict[str, Any]) -> None:
-    """Forward one terminal message to the *other* peer of its session.
-
-    Direction-agnostic (like ``remote_control.relay``): the sender is matched
-    against the session's controller / device socket and the payload is delivered
-    to whichever side it is not. Terminal events also drop the session so a closed
-    terminal frees the device's PTY.
-    """
-    data = data if isinstance(data, dict) else {}
-    session = _SESSIONS.get(str(data.get("sessionId") or ""))
-    if not session:
+    """Relay one validated message only in its declared protocol direction."""
+    await _purge_expired()
+    payload = data if isinstance(data, dict) else {}
+    session_id = str(payload.get("sessionId") or "")
+    session = _SESSIONS.get(session_id)
+    if session is None:
         return
-    if sid == session.controller_sid:
-        target = session.device_sid
-    elif sid == session.device_sid:
-        target = session.controller_sid
-    else:
-        return  # sid is not a member of this session — ignore (spoofing guard)
-    payload = dict(data)
-    payload["sessionId"] = session.session_id
-    await sio.emit(event, payload, to=target)
+    target = _relay_target(session, sid, event)
+    if target is None:
+        if sid in {session.controller_sid, session.device_sid}:
+            await _emit_error(sid, "invalid_direction", "该终端事件不允许由当前连接发送", session_id)
+        return
+    try:
+        normalized = _normalize_relay_payload(event, payload, session_id)
+    except ValueError as exc:
+        await _emit_error(sid, "bad_payload", str(exc), session_id)
+        return
+    session.last_activity = time.time()
+    await sio.emit(event, normalized, to=target)
     if event in _TERMINAL_EVENTS:
-        _SESSIONS.pop(session.session_id, None)
-        logger.info("remote-terminal end (%s) session=%s", event, session.session_id)
+        _SESSIONS.pop(session_id, None)
+        logger.info("remote-terminal end (%s) session=%s", event, session_id)
 
 
 async def handle_disconnect(sid: str) -> None:
-    """Tear down any session whose controller or device socket dropped."""
-    for session in [s for s in _SESSIONS.values() if s.controller_sid == sid or s.device_sid == sid]:
-        _SESSIONS.pop(session.session_id, None)
+    """Notify the surviving peer and tear down every session for ``sid``."""
+    await _purge_expired()
+    sessions = [item for item in _SESSIONS.values() if sid in {item.controller_sid, item.device_sid}]
+    for session in sessions:
+        if _SESSIONS.pop(session.session_id, None) is None:
+            continue
         if session.controller_sid == sid:
-            # Operator closed the tab — tell the device to kill the PTY.
-            await sio.emit("rt:close", {"sessionId": session.session_id}, to=session.device_sid)
+            await _safe_emit("rt:close", {"sessionId": session.session_id}, session.device_sid)
         else:
-            # Device dropped — tell the operator the terminal ended.
-            await sio.emit(
+            await _safe_emit(
                 "rt:exit",
                 {"sessionId": session.session_id, "code": None, "reason": "device_disconnected"},
-                to=session.controller_sid,
+                session.controller_sid,
             )
         logger.info("remote-terminal cleanup on disconnect session=%s sid=%s", session.session_id, sid)

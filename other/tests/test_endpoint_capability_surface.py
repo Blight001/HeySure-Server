@@ -24,6 +24,12 @@ def test_desktop_defaults_are_action_grouped():
 
 
 def test_remote_control_capability_is_not_an_mcp_tool():
-    caps = {"browser_action", "remote_control", "remote.control"}
+    caps = {
+        "browser_action",
+        "remote_control",
+        "remote.control",
+        "remote_web_mirror",
+        "remote.web_mirror",
+    }
 
     assert mcp_capabilities(caps) == {"browser_action"}

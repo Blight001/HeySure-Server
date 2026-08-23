@@ -29,7 +29,7 @@ def register_agent_socket_events() -> None:
     async def rt_open(sid, data):
         await remote.terminal_open(sid, data)
 
-    for event in ("rt:input", "rt:resize", "rt:data", "rt:exit", "rt:error", "rt:close"):
+    for event in ("rt:input", "rt:resize", "rt:data", "rt:ready", "rt:exit", "rt:error", "rt:close"):
         async def terminal_relay(sid, data, event_name=event):
             await remote.terminal_relay(sid, event_name, data)
 

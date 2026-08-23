@@ -18,7 +18,8 @@ server**: they ride a peer-to-peer WebRTC connection (video track + a
 Signaling protocol (event names shared by both ends; payloads carry sessionId):
 
     controller (web)  → server → agent (android)
-        rc:start      {deviceId, token, qualityPreset?} open a session
+        rc:start      {deviceId, token, qualityPreset?, requestedSurfaces?,
+                       protocolVersions?} open a session
         rc:answer     {sessionId, sdp}             SDP answer to the offer
         rc:ice        {sessionId, candidate}       trickle ICE
         rc:stop       {sessionId}                  tear down
@@ -54,11 +55,15 @@ logger = logging.getLogger(__name__)
 
 # WebRTC capability the Android client advertises in device:register.
 RC_CAPABILITY = "remote_control"
+RWM_CAPABILITIES = frozenset({"remote_web_mirror", "remote.web_mirror"})
 
 # Sessions with no activity past this are reaped so a dropped peer never leaks a
 # half-open mirror (the device keeps capturing/draining battery otherwise).
 _SESSION_TTL_SECONDS = 60 * 30
 _QUALITY_PRESETS = {"smooth", "balanced", "clear"}
+_REQUESTED_SURFACES = {"video", "dom"}
+_SUPPORTED_PROTOCOL_VERSIONS = {1}
+_MAX_NEGOTIATION_ITEMS = 8
 
 
 @dataclass
@@ -95,7 +100,12 @@ def _agent_owner(sid: str) -> Optional[int]:
 
 def _agent_supports_rc(sid: str) -> bool:
     caps = (agents.get(sid) or {}).get("capabilities") or []
-    return RC_CAPABILITY in caps
+    return RC_CAPABILITY in caps or "remote.control" in caps
+
+
+def _agent_supports_web_mirror(sid: str) -> bool:
+    caps = set((agents.get(sid) or {}).get("capabilities") or [])
+    return bool(caps & RWM_CAPABILITIES)
 
 
 def _purge_expired(now: Optional[float] = None) -> None:
@@ -116,6 +126,33 @@ def _resolve_controller_user(token: Any) -> Optional[int]:
         return None
     resolved = resolve_agent_user(raw)
     return int(resolved[0]) if resolved else None
+
+
+def _requested_surfaces(value: Any) -> list[str]:
+    """Return the bounded Remote Web Mirror surface request.
+
+    Unknown values are never forwarded to the device.  Malformed or absent
+    negotiation remains equivalent to the legacy video-only ``rc:start``.
+    """
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value[:_MAX_NEGOTIATION_ITEMS]:
+        surface = item.strip().lower() if isinstance(item, str) else ""
+        if surface in _REQUESTED_SURFACES and surface not in normalized:
+            normalized.append(surface)
+    return normalized
+
+
+def _protocol_versions(value: Any) -> list[int]:
+    """Return supported, unique protocol versions from a bounded input list."""
+    if not isinstance(value, list):
+        return []
+    normalized: list[int] = []
+    for item in value[:_MAX_NEGOTIATION_ITEMS]:
+        if type(item) is int and item in _SUPPORTED_PROTOCOL_VERSIONS and item not in normalized:
+            normalized.append(item)
+    return normalized
 
 
 async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
@@ -175,11 +212,16 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
     quality_preset = str(data.get("qualityPreset") or "balanced").strip().lower()
     if quality_preset not in _QUALITY_PRESETS:
         quality_preset = "balanced"
-    await sio.emit(
-        "rc:start",
-        {"sessionId": session_id, "qualityPreset": quality_preset},
-        to=device_sid,
-    )
+    start_payload: Dict[str, Any] = {"sessionId": session_id, "qualityPreset": quality_preset}
+    requested_surfaces = _requested_surfaces(data.get("requestedSurfaces"))
+    if "dom" in requested_surfaces and not _agent_supports_web_mirror(device_sid):
+        requested_surfaces.remove("dom")
+    protocol_versions = _protocol_versions(data.get("protocolVersions"))
+    if requested_surfaces:
+        start_payload["requestedSurfaces"] = requested_surfaces
+    if protocol_versions:
+        start_payload["protocolVersions"] = protocol_versions
+    await sio.emit("rc:start", start_payload, to=device_sid)
     # Ack the controller so it can wire up its RTCPeerConnection and wait for
     # the offer.
     await sio.emit("rc:started", {"sessionId": session_id, "deviceId": device_id}, to=controller_sid)
