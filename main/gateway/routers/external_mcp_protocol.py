@@ -293,12 +293,27 @@ async def _tools_call(principal: ExternalMcpPrincipal, params: Any) -> DispatchR
             principal.ai_config_id,
         )
         failed, error = tool_result_failed(result)
-    except Exception:
-        _record_mcp_stat(principal, tool, False, "tool_execution_error")
-        raise RpcFault(
-            -32603,
-            "Internal error",
-            audit_code="tool_execution_error",
+    except Exception as exc:
+        # A tool can intentionally reject caller-supplied input (for example a
+        # workflow compiler returning HTTP 422).  In split-runtime mode this
+        # arrives here as an HTTP client exception.  Preserve safe 4xx details
+        # as an MCP tool result so clients can repair the request instead of
+        # seeing the misleading JSON-RPC "Internal error".
+        result = _request_rejection_result(tool, exc)
+        if result is None:
+            _record_mcp_stat(principal, tool, False, "tool_execution_error")
+            raise RpcFault(
+                -32603,
+                "Internal error",
+                audit_code="tool_execution_error",
+                tool_name=tool,
+            ) from exc
+        failed, error = tool_result_failed(result)
+        _record_mcp_stat(principal, tool, False, "tool_rejected")
+        return DispatchResult(
+            _tool_result_payload(result, failed, error),
+            success=False,
+            error_code="tool_rejected",
             tool_name=tool,
         )
     _record_mcp_stat(
@@ -314,6 +329,78 @@ async def _tools_call(principal: ExternalMcpPrincipal, params: Any) -> DispatchR
         error_code="tool_failed" if failed else "",
         tool_name=tool,
     )
+
+
+def _request_rejection_result(tool: str, exc: Exception) -> Optional[dict]:
+    """Convert safe client-facing 4xx tool rejections into a normal MCP result."""
+
+    status_code: Optional[int] = None
+    detail: Any = None
+    if isinstance(exc, HTTPException):
+        status_code = exc.status_code
+        detail = exc.detail
+    else:
+        response = getattr(exc, "response", None)
+        raw_status = getattr(response, "status_code", None)
+        if isinstance(raw_status, int):
+            status_code = raw_status
+            try:
+                payload = response.json()
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                detail = payload.get("detail")
+
+    # Server faults must remain opaque; only ordinary client-side request
+    # rejections are safe and actionable to expose through external MCP.
+    if not isinstance(status_code, int) or not 400 <= status_code < 500:
+        return None
+
+    safe_detail = _safe_request_rejection_detail(detail)
+    return {
+        "tool": tool,
+        "destructive": False,
+        "result": {
+            "success": False,
+            "failure_type": "request_rejected",
+            "status_code": status_code,
+            "error": _request_rejection_message(safe_detail, status_code),
+            "detail": safe_detail,
+        },
+    }
+
+
+def _safe_request_rejection_detail(detail: Any) -> Any:
+    """Keep a bounded JSON-safe detail payload without exposing server traces."""
+
+    try:
+        encoded = jsonable_encoder(detail)
+        encoded_json = json.dumps(encoded, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "Request rejected"
+    if len(encoded_json) > 8_000:
+        return "Request rejected; response detail was too large"
+    return encoded
+
+
+def _request_rejection_message(detail: Any, status_code: int) -> str:
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+    if isinstance(detail, dict):
+        errors = detail.get("errors")
+        if isinstance(errors, list) and errors:
+            text = "; ".join(str(item) for item in errors if str(item).strip())
+            if text:
+                return text[:4_000]
+        for key in ("message", "error", "code"):
+            value = detail.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(detail, list):
+        text = "; ".join(str(item) for item in detail if str(item).strip())
+        if text:
+            return text[:4_000]
+    return f"Tool request rejected (HTTP {status_code})"
 
 
 def _tool_result_payload(result: Any, failed: bool, error: str) -> dict:

@@ -239,6 +239,47 @@ def test_tools_call_rechecks_eligibility_dispatches_and_records_stats(monkeypatc
     assert json.loads(outcome.payload["content"][0]["text"])["result"]["value"] == 42
 
 
+def test_tools_call_exposes_split_runtime_4xx_as_actionable_error(monkeypatch):
+    observed = {}
+
+    monkeypatch.setattr(
+        "api.services.mcp.capability_view.ensure_tool_eligible",
+        lambda *_args: None,
+    )
+
+    async def rejected_call(*_args):
+        error = RuntimeError("422 Client Error")
+        error.response = SimpleNamespace(
+            status_code=422,
+            json=lambda: {"detail": {
+                "code": "CARD_VALIDATION_FAILED",
+                "errors": ["step upload: saveAs is required"],
+                "warnings": [],
+            }},
+        )
+        raise error
+
+    monkeypatch.setattr(protocol, "call_mcp_or_endpoint_tool", rejected_call)
+    monkeypatch.setattr(
+        protocol.mcp_stats,
+        "record_call",
+        lambda **kwargs: observed.update(kwargs),
+    )
+
+    outcome = asyncio.run(protocol._tools_call(
+        _principal(), {"name": "automation.manage", "arguments": {"action": "create"}}
+    ))
+
+    encoded = json.loads(outcome.payload["content"][0]["text"])
+    assert outcome.payload["isError"] is True
+    assert outcome.error_code == "tool_rejected"
+    assert observed["error"] == "tool_rejected"
+    assert encoded["result"]["success"] is False
+    assert encoded["result"]["status_code"] == 422
+    assert encoded["result"]["detail"]["code"] == "CARD_VALIDATION_FAILED"
+    assert "saveAs is required" in encoded["result"]["error"]
+
+
 def test_unknown_tool_is_invalid_params(monkeypatch):
     from fastapi import HTTPException
 
