@@ -77,7 +77,10 @@ def test_postgres_enforces_user_isolation_and_revision_lock():
             if user_ids:
                 rows = session.exec(
                     select(RemoteControllerTemplate).where(
-                        RemoteControllerTemplate.user_id.in_(user_ids)
+                        RemoteControllerTemplate.user_id.in_(user_ids),
+                        RemoteControllerTemplate.template_id.in_(
+                            [template_id, private_template_id]
+                        ),
                     )
                 ).all()
                 for row in rows:
