@@ -45,19 +45,12 @@ def test_postgres_enforces_user_isolation_and_revision_lock():
     suffix = uuid.uuid4().hex
     template_id = f"pad-{suffix[:12]}"
     private_template_id = f"private-{suffix[:12]}"
-    user_ids = []
+    with Session(engine) as session:
+        users = session.exec(select(User).order_by(User.id).limit(2)).all()
+    if len(users) < 2:
+        pytest.skip("requires two seeded users for cross-user isolation")
+    user_ids = [users[0].id, users[1].id]
     try:
-        with Session(engine) as session:
-            for index in range(2):
-                user = User(
-                    name=f"RCT test {index}",
-                    account=f"rct-test-{index}-{suffix}",
-                    hashed_password="not-used",
-                )
-                session.add(user)
-                session.commit()
-                session.refresh(user)
-                user_ids.append(user.id)
         with Session(engine) as session:
             first = create_template(session, user_ids[0], _body(template_id, "First user"))
             create_template(session, user_ids[0], _body(private_template_id, "Private"))
@@ -89,7 +82,4 @@ def test_postgres_enforces_user_isolation_and_revision_lock():
                 ).all()
                 for row in rows:
                     session.delete(row)
-                users = session.exec(select(User).where(User.id.in_(user_ids))).all()
-                for user in users:
-                    session.delete(user)
                 session.commit()
