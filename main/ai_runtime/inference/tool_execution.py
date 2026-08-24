@@ -23,6 +23,9 @@ from connector_runtime.dispatch.desktop_device_tools import (
     is_endpoint_agent_tool,
     is_workshop_tool,
 )
+from connector_runtime.dispatch.automation_card_compat import (
+    normalize_automation_card_arguments,
+)
 from mcp_runtime.mcp import registry
 
 
@@ -57,6 +60,7 @@ async def call_mcp_or_endpoint_tool(
     arguments: dict,
     ai_config_id: Optional[int],
 ) -> Dict[str, object]:
+    arguments = normalize_automation_card_arguments(tool, arguments)
     # Server-owned names are reserved.  A device may accidentally advertise a
     # tool with the same name, but it must never shadow the toolbox contract.
     # Workshop tools are the only intentional endpoint-first namespace.

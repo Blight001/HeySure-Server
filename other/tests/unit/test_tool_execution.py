@@ -119,6 +119,51 @@ def test_call_routes_endpoint_tool_to_connector_runtime(monkeypatch):
     assert result["result"]["success"] is True
 
 
+def test_call_normalizes_native_card_steps_before_connector_dispatch(monkeypatch):
+    observed = {}
+
+    async def fake_runtime_dispatch(
+        runtime_url,
+        tool,
+        user_id,
+        arguments,
+        ai_config_id,
+        timeout_seconds,
+    ):
+        observed["arguments"] = arguments
+        return {"success": True}
+
+    monkeypatch.setattr(tool_execution, "is_workshop_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda _tool: True)
+    monkeypatch.setattr(tool_execution.settings, "service_role", "gateway")
+    monkeypatch.setattr(
+        tool_execution.settings,
+        "connector_runtime_url",
+        "http://connector-runtime:3002",
+    )
+    monkeypatch.setattr(tool_execution.settings, "api_gateway_url", "http://api-gateway:3000")
+    monkeypatch.setattr(tool_execution, "endpoint_dispatch_timeout", lambda *_args: 120)
+    monkeypatch.setattr(tool_execution, "dispatch_endpoint_via_runtime", fake_runtime_dispatch)
+
+    asyncio.run(
+        tool_execution.call_mcp_or_endpoint_tool(
+            "aifree.manage+card",
+            1,
+            {
+                "action": "write",
+                "cardData": {
+                    "steps": [
+                        {"type": "mcp", "tool": "aifree.browser+action"},
+                    ],
+                },
+            },
+            4,
+        )
+    )
+
+    assert observed["arguments"]["cardData"]["steps"][0]["tool"] == "browser_action"
+
+
 def test_registered_server_tool_cannot_be_shadowed_by_device(monkeypatch):
     observed = {}
 
