@@ -5,6 +5,45 @@ from unittest.mock import AsyncMock
 from connector_runtime.dispatch import dispatch_results
 
 
+def test_prepare_result_promotes_nested_business_failure(monkeypatch):
+    monkeypatch.setattr(
+        dispatch_results,
+        "_resolve_result_context",
+        lambda _data: {"device_id": "device-a", "tool": "aifree.manage+card"},
+    )
+
+    envelope = dispatch_results._prepare_result({
+        "taskId": "task-a",
+        "success": True,
+        "result": {
+            "success": False,
+            "errorCode": "CARD_STEP_FAILED",
+            "error": "自动化步骤执行失败",
+        },
+    })
+
+    assert envelope.success is False
+    assert envelope.summary == "CARD_STEP_FAILED: 自动化步骤执行失败"
+
+
+def test_prepare_result_keeps_nested_success(monkeypatch):
+    monkeypatch.setattr(
+        dispatch_results,
+        "_resolve_result_context",
+        lambda _data: {"device_id": "device-a", "tool": "aifree.manage+card"},
+    )
+
+    envelope = dispatch_results._prepare_result({
+        "taskId": "task-a",
+        "success": True,
+        "summary": "done",
+        "result": {"success": True, "result": {"value": 7}},
+    })
+
+    assert envelope.success is True
+    assert envelope.summary == "done"
+
+
 def test_result_persists_releases_waiter_emits_and_resumes(monkeypatch):
     envelope = dispatch_results.ResultEnvelope(
         task_id="task-a",

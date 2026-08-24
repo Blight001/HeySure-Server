@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from sqlmodel import Session, select
 
+from api.common.tool_outcomes import find_reported_failure, reported_failure_detail
 from api.models import AgentDispatchTask, ChatMessageCreate
 from api.services.chat.chat_persistence import _save_message
 from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
@@ -134,8 +135,15 @@ async def handle_task_error(data: Dict[str, Any]) -> bool:
 def _prepare_result(data) -> ResultEnvelope:
     context = _resolve_result_context(data)
     tool = str(data.get("tool") or context.get("tool") or "")
-    success = bool(data.get("success", True))
     result = data.get("result")
+    reported_failure = find_reported_failure(data)
+    success = bool(data.get("success", True)) and reported_failure is None
+    summary = str(data.get("summary") or "")
+    if reported_failure is not None:
+        summary = reported_failure_detail(
+            reported_failure,
+            summary or "agent reported failure",
+        )
     screenshot = bool(canonical_screenshot_tool_name(tool))
     if success and screenshot:
         result = _persist_screenshot(context, tool, result)
@@ -147,7 +155,7 @@ def _prepare_result(data) -> ResultEnvelope:
         device_id=str(context.get("device_id") or data.get("deviceId") or "unknown"),
         success=success,
         tool=tool,
-        summary=str(data.get("summary") or ""),
+        summary=summary,
         result=result,
         screenshot=screenshot,
     )

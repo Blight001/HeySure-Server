@@ -8,6 +8,7 @@ from api.chat_runtime.chat_prompt_utils import (
     _build_mcp_display_result,
     _extract_mcp_error,
 )
+from api.common.tool_outcomes import find_reported_failure, reported_failure_detail
 from api.core.settings import settings
 from api.runtime.async_bridge import run_async
 from ai_runtime.inference.runtime_clients import (
@@ -128,21 +129,9 @@ async def call_mcp_or_endpoint_tool(
 
 
 def tool_result_failed(tool_result: Dict[str, object]) -> tuple[bool, str]:
-    result = tool_result.get("result") if isinstance(tool_result, dict) else None
-    if isinstance(result, dict) and result.get("success") is False:
-        detail = (
-            result.get("error")
-            or result.get("summary")
-            or result.get("stderr")
-            or result.get("output")
-            or result.get("failure_type")
-            or "Tool returned success=false"
-        )
-        if result.get("failure_type") and result.get("exit_code") is not None:
-            detail = f"{result.get('failure_type')} (exit_code={result.get('exit_code')}): {detail}"
-        elif result.get("failure_type"):
-            detail = f"{result.get('failure_type')}: {detail}"
-        return True, str(detail)
+    failure = find_reported_failure(tool_result)
+    if failure is not None:
+        return True, reported_failure_detail(failure)
     return False, ""
 
 

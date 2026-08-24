@@ -2,6 +2,7 @@
 
 Submodules:
 - ``value_utils`` — lenient value coercion (``to_bool`` / ``safe_json*``).
+- ``tool_outcomes`` — nested endpoint/tool failure detection and formatting.
 
 Import from the sub-modules directly:
     from api.common.value_utils import to_bool, safe_json_obj

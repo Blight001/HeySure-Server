@@ -9,6 +9,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Tuple
 
+from api.common.tool_outcomes import (
+    find_reported_failure,
+    reported_failure_code,
+    reported_failure_message,
+)
 from api.core.settings import DATA_DIR, settings
 
 
@@ -16,24 +21,25 @@ ROOT = Path(DATA_DIR) / "workflow_results"
 PREFIX = "workflow-result:"
 
 
-def _reported_failure(value: Any, depth: int = 0) -> dict[str, Any] | None:
-    if depth > 3 or not isinstance(value, dict):
+def _reported_failure(value: Any) -> dict[str, Any] | None:
+    failure = find_reported_failure(value)
+    if failure is None:
         return None
-    has_error = any(value.get(key) not in (None, "") for key in ("error", "errorCode", "code"))
-    if value.get("success") is False and has_error:
-        return {
-            "code": str(value.get("errorCode") or value.get("code") or "DEVICE_TOOL_FAILED")[:120],
-            "message": str(value.get("error") or value.get("message") or "device tool reported failure")[:2000],
-            "phase": "device_result",
-            "retryable": bool(value.get("retryable")),
-        }
-    return _reported_failure(value.get("result"), depth + 1)
+    return {
+        "code": reported_failure_code(failure),
+        "message": reported_failure_message(failure, "device tool reported failure"),
+        "phase": "device_result",
+        "retryable": bool(failure.get("retryable")),
+    }
 
 
 def device_step_error(
     *, success: bool, result: Any, transport_error: str | None
 ) -> dict[str, Any] | None:
     """Normalize transport or explicit tool-level failure for workflow state."""
+    reported = _reported_failure(result)
+    if reported is not None:
+        return reported
     if not success:
         return {
             "code": "DISPATCH_FAILED",
@@ -41,7 +47,7 @@ def device_step_error(
             "phase": "device",
             "retryable": False,
         }
-    return _reported_failure(result)
+    return None
 
 
 def save_result(user_id: int, run_id: str, value: Any, *, max_bytes: int | None = None) -> Tuple[str, int]:
