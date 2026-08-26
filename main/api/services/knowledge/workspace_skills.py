@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from sqlmodel import Session, select
@@ -18,18 +19,64 @@ from sqlmodel import Session, select
 from ...database import engine
 from ...models import AssistantAIConfig
 from ...services.storage.workspace_scope import member_workspace_dir
-from .librarian_core import (
-    _normalize_endpoint,
-    _normalize_triggers,
-    _parse_triggers_field,
-    _slugify,
-    _split_frontmatter,
-)
-
-
 WORKSPACE_SKILLS_DIR = "skills"
 WORKSPACE_SKILL_PREFIX = "workspace:"
 MAX_WORKSPACE_SKILL_CARD_BYTES = 512 * 1024
+
+
+def _slugify(title: str) -> str:
+    cleaned = re.sub(r"[^0-9a-z一-鿿]+", "-", str(title or "").strip().lower()).strip("-")
+    return (cleaned or "untitled")[:80]
+
+
+def _normalize_triggers(value: Any) -> List[str]:
+    if isinstance(value, list):
+        items = [str(x).strip() for x in value if str(x).strip()]
+    elif isinstance(value, str):
+        items = [piece.strip() for piece in re.split(r"[,，;；\n]+", value) if piece.strip()]
+    else:
+        items = []
+    seen = set()
+    result: List[str] = []
+    for item in items:
+        if item.casefold() in seen:
+            continue
+        seen.add(item.casefold())
+        result.append(item)
+    return result[:20]
+
+
+def _parse_triggers_field(raw: Any) -> List[str]:
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    value = str(raw or "").strip()
+    if value.startswith("[") and value.endswith("]"):
+        return [part.strip().strip("\"'") for part in value[1:-1].split(",") if part.strip()]
+    return [part.strip() for part in re.split(r"[,，;；\n]+", value) if part.strip()]
+
+
+def _normalize_endpoint(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"desktop", "windows", "linux", "desktop_windows", "desktop_linux"}:
+        return "desktop"
+    if raw in {"browser", "extension", "browser_extension", "browser-extension"}:
+        return "browser"
+    return "any"
+
+
+def _split_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
+    src = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not src.startswith("---\n"):
+        return {}, src
+    end = src.find("\n---\n", 4)
+    if end < 0:
+        return {}, src
+    meta: Dict[str, Any] = {}
+    for line in src[4:end].split("\n"):
+        if ":" in line:
+            key, _, value = line.partition(":")
+            meta[key.strip()] = value.strip()
+    return meta, src[end + 5:].lstrip("\n")
 
 
 def _unquote(value: Any) -> Any:
@@ -310,8 +357,6 @@ def update_workspace_skill_endpoint(
     item = find_workspace_skill(int(user_id), reference)
     if item is None:
         raise ValueError("workspace Skill not found")
-    from .librarian_core import _normalize_endpoint
-
     with open(str(item["_absolute_path"]), "r", encoding="utf-8") as handle:
         raw = handle.read(MAX_WORKSPACE_SKILL_CARD_BYTES + 1)
     if len(raw.encode("utf-8")) > MAX_WORKSPACE_SKILL_CARD_BYTES:
