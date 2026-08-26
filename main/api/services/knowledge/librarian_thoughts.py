@@ -58,6 +58,27 @@ def _inheritance_thoughts_payload(user_id: int) -> Dict[str, Any]:
         memory_id = str(entry.get("memory_id") or "").strip()
         if not memory_id:
             continue
+        if str(entry.get("kind") or "") == "workspace":
+            installed.append({
+                "slug": memory_id,
+                "memory_id": memory_id,
+                "displayName": str(entry.get("title") or memory_id),
+                "summary": str(entry.get("summary") or ""),
+                "triggers": entry.get("triggers") or [],
+                "version": None,
+                "ownerHandle": str(entry.get("owner_handle") or ""),
+                "source": "workspace",
+                "path": str(entry.get("file_path") or ""),
+                "installed_at": float(entry.get("created_at") or entry.get("updated_at") or 0),
+                "auto_enabled": False,
+                "endpoint_kind": str(entry.get("endpoint_kind") or "any"),
+                "scope": str(entry.get("scope") or "ai"),
+                "scope_target": entry.get("scope_target"),
+                "owner_ai_config_id": entry.get("source_ai_config_id"),
+                "present": True,
+                "kind": "workspace",
+            })
+            continue
         installed.append({
             "slug": memory_id,
             "memory_id": memory_id,
@@ -76,7 +97,7 @@ def _inheritance_thoughts_payload(user_id: int) -> Dict[str, Any]:
         })
     installed.sort(key=lambda item: float(item.get("installed_at") or 0), reverse=True)
     return {
-        "description": "传承知识以单文件 .md 落盘在 KnowledgeBase/topics/ 下（frontmatter 即元数据），可由 AI 主动创建或从 ClawHub / npx skills 安装；运行时只使用本地文件。",
+        "description": "传承知识与 Skill 以本地文件为真相源：KnowledgeBase/topics/ 下的共享条目，以及每个 AI 工作区 skills/*/SKILL.md；可由 AI 主动创建或从 ClawHub / npx skills 安装。",
         "registry_url": clawhub.registry_base_url(),
         "storage_root": _TOPICS_DIR,
         "installed_total": len(installed),
@@ -146,9 +167,21 @@ def _listed_thought(installed: Dict[str, Any], query: str, compact: bool) -> Opt
     }
 
 
-def read_inheritance_thought(*, user_id: int, thought_id: str) -> Dict[str, Any]:
+def read_inheritance_thought(
+    *, user_id: int, thought_id: str, ai_config_id: Optional[int] = None,
+) -> Dict[str, Any]:
     """Return one installed inheritance thought by the ID emitted by the list."""
     if _find_thought(int(user_id), thought_id) is None:
+        from .workspace_skills import read_workspace_skill
+
+        try:
+            return read_workspace_skill(
+                int(user_id), thought_id, ai_config_id=ai_config_id,
+            )
+        except PermissionError:
+            raise
+        except ValueError:
+            pass
         return read_topic_entry(user_id=int(user_id), memory_id=thought_id)
     from .librarian_clawhub import clawhub_installed_skill_detail
     detail = clawhub_installed_skill_detail(

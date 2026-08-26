@@ -147,6 +147,12 @@ from .librarian_clawhub import (
     _extract_skill_zip,
 )
 
+from .workspace_skills import (
+    list_workspace_skills,
+    find_workspace_skill,
+    read_workspace_skill,
+)
+
 from .librarian_topics import (
     delete_topic,
     update_topic_content,

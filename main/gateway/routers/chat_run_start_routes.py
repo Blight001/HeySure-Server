@@ -51,7 +51,13 @@ def _skill_context(user_id: int, ai_config_id, refs):
     blocks = []
     for ref in refs:
         try:
-            detail = librarian_service.read_inheritance_thought(user_id=int(user_id), thought_id=ref)
+            detail = librarian_service.read_inheritance_thought(
+                user_id=int(user_id),
+                thought_id=ref,
+                ai_config_id=ai_config_id,
+            )
+        except PermissionError:
+            raise HTTPException(status_code=403, detail=f"Skill is not available to this AI: {ref}")
         except (ValueError, OSError):
             raise HTTPException(status_code=400, detail=f"Skill not found: {ref}")
         skill = detail.get("skill") if isinstance(detail.get("skill"), dict) else {}

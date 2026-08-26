@@ -642,6 +642,41 @@ def _load_user_knowledge_entries(user_id: int) -> List[Dict[str, Any]]:
     except Exception as exc:
         logger.info(f"_load_user_knowledge_entries skills failed user={user_id}: {exc}")
 
+    # AI-member workspace Skills are a first-class, file-backed source too.
+    # Import lazily to keep this low-level module independent from the
+    # workspace scanner's metadata helpers.
+    try:
+        from .workspace_skills import list_workspace_skills
+
+        for item in list_workspace_skills(int(user_id)):
+            installed_at = float(item.get("installed_at") or time.time())
+            entries.append({
+                "memory_id": item["slug"],
+                "title": item.get("displayName") or item["slug"],
+                "triggers": item.get("triggers") or [],
+                "scope": item.get("scope") or "ai",
+                "scope_target": item.get("scope_target"),
+                "status": "active",
+                "confidence": 1.0,
+                "use_count": 0,
+                "last_used_at": None,
+                "file_path": item.get("file_path") or "",
+                "summary": item.get("summary") or "",
+                "source_job_id": None,
+                "source_generation": None,
+                "source_ai_config_id": item.get("owner_ai_config_id"),
+                "source_message_id": None,
+                "created_at": installed_at,
+                "updated_at": installed_at,
+                "source": "workspace",
+                "kind": "workspace",
+                "endpoint_kind": item.get("endpoint_kind") or "any",
+                "owner_handle": item.get("ownerHandle") or "",
+                "_absolute_path": item.get("_absolute_path"),
+            })
+    except Exception as exc:
+        logger.info(f"_load_user_knowledge_entries workspace skills failed user={user_id}: {exc}")
+
     return entries
 
 
@@ -655,13 +690,15 @@ def _entry_dict_from_file_entry(e: Dict[str, Any], *, with_body: bool = False, u
     ]}
     if with_body and user_id is not None:
         try:
-            fp = e.get("file_path") or ""
-            if fp:
-                path = _topic_path(user_id, fp)
-                raw = _read_text(path)
-                if raw is not None:
-                    _m, body = _split_frontmatter(raw)
-                    out["body"] = body
+            absolute = e.get("_absolute_path")
+            raw = _read_text(str(absolute)) if absolute else None
+            if raw is None:
+                fp = e.get("file_path") or ""
+                if fp:
+                    raw = _read_text(_topic_path(user_id, fp))
+            if raw is not None:
+                _m, body = _split_frontmatter(raw)
+                out["body"] = body
         except Exception:
             out["body"] = ""
     return out
