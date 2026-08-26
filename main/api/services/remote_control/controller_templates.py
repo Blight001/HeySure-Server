@@ -16,6 +16,7 @@ from .controller_schema import (
     BrowserAction,
     ControllerControl,
     ControllerLayout,
+    EmitAction,
     KeyAction,
     TemplateContent,
     TemplateCreate,
@@ -38,6 +39,18 @@ class TemplateLimitError(RuntimeError):
 
 def _button(control_id: str, label: str, action, tone: str = "default") -> ControllerControl:
     return ControllerControl(id=control_id, kind="button", label=label, tone=tone, action=action)
+
+
+def _slider(control_id: str, label: str, event: str) -> ControllerControl:
+    return ControllerControl.model_validate({
+        "id": control_id,
+        "kind": "slider",
+        "label": label,
+        "action": EmitAction(type="emit", event=event),
+        "min": 500,
+        "max": 2500,
+        "step": 1,
+    })
 
 
 def _keys(*items: tuple[str, str, str]) -> list[ControllerControl]:
@@ -95,6 +108,18 @@ def _builtin_templates() -> dict[str, TemplateCreate]:
                 _button("back", "后退", BrowserAction(type="browser", action="back")),
                 _button("reload", "刷新", BrowserAction(type="browser", action="reload"), "primary"),
                 _button("forward", "前进", BrowserAction(type="browser", action="forward")),
+            ],
+        ),
+        TemplateCreate(
+            schema=SCHEMA_NAME,
+            id="jibotarm",
+            name="AI Mechanical Arm",
+            deviceTypes=["custom"],
+            requiredCapabilities=["remote_control", "remote_controller_templates"],
+            layout=ControllerLayout(columns=2, gap="md"),
+            controls=[
+                _slider(f"joint{joint}", f"关节 {joint}", f"jibotarm.joint{joint}.position_p")
+                for joint in range(1, 7)
             ],
         ),
     ]

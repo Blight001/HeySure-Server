@@ -95,7 +95,7 @@ def test_persisted_catalog_hash_can_be_recomputed_for_diagnostics():
     row = DevicePresence(
         device_id="browser-1",
         device_type="browser",
-        capabilities_json='["browser.publish", "browser.upload"]',
+        capabilities_json='["browser.publish", "browser.upload", "remote_control", "remote_controller_templates"]',
         tool_defs_json='{"browser.publish":{"description":"Publish","input_schema":{"type":"object"},"destructive":false,"implementation":{},"permissions":[]},"browser.upload":{"description":"Upload","input_schema":{"type":"object"},"destructive":false,"implementation":{},"permissions":[]}}',
         reported_ai_description=prepared.reported_ai_description,
         catalog_protocol_version=2,

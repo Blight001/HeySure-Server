@@ -57,6 +57,21 @@ def canonical_message_total(message: Any) -> int:
     )[2]
 
 
+def active_context_message_total(message: Any) -> int:
+    """Return tokens that still contribute to the live conversation context.
+
+    Compression preserves the original usage components for accounting, while
+    ``compressed_away`` rows have already been replaced by a summary and must
+    not keep the automatic-compression threshold permanently exceeded.
+    """
+    tags = {
+        tag.strip()
+        for tag in str(getattr(message, "tags", "") or "").split(",")
+        if tag.strip()
+    }
+    return 0 if "compressed_away" in tags else canonical_message_total(message)
+
+
 def canonical_total_sql(model: Any):
     prompt = func.coalesce(model.prompt_tokens, 0)
     completion = func.coalesce(model.completion_tokens, 0)

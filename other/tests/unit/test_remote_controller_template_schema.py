@@ -35,13 +35,23 @@ def _valid_template(**overrides):
 
 
 def test_builtin_templates_are_strict_documents_and_stable():
-    assert set(BUILTIN_TEMPLATES) == {"direction", "media", "presentation", "browser"}
+    assert set(BUILTIN_TEMPLATES) == {"direction", "media", "presentation", "browser", "jibotarm"}
     for template_id in BUILTIN_TEMPLATES:
         document = _builtin_document(template_id)
         assert isinstance(document, TemplateDocument)
         assert document.id == template_id
         assert document.revision == 1
         assert document.builtin is True
+
+    arm = _builtin_document("jibotarm")
+    assert arm.device_types == ["custom"]
+    assert [control.action.event for control in arm.controls] == [
+        f"jibotarm.joint{joint}.position_p" for joint in range(1, 7)
+    ]
+    assert all(
+        control.minimum == 500 and control.maximum == 2500 and control.step == 1
+        for control in arm.controls
+    )
 
 
 @pytest.mark.parametrize(

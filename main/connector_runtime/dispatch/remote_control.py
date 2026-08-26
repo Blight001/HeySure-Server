@@ -108,8 +108,54 @@ def _agent_supports_web_mirror(sid: str) -> bool:
     return bool(caps & RWM_CAPABILITIES)
 
 
-def _active_device_session(device_id: str) -> Optional[RcSession]:
-    return next((session for session in _SESSIONS.values() if session.device_id == device_id), None)
+def _reserve_latest_session(session: RcSession) -> list[RcSession]:
+    """Atomically make ``session`` the only active controller for its device."""
+    superseded = [
+        current for current in _SESSIONS.values()
+        if current.device_id == session.device_id
+    ]
+    for current in superseded:
+        _SESSIONS.pop(current.session_id, None)
+    _SESSIONS[session.session_id] = session
+    return superseded
+
+
+async def _activate_latest_session(session: RcSession) -> bool:
+    """Reserve a device and tell every displaced peer that it was replaced."""
+    for previous in _reserve_latest_session(session):
+        await sio.emit(
+            "rc:stop",
+            {"sessionId": previous.session_id, "reason": "replaced"},
+            to=previous.device_sid,
+        )
+        await sio.emit(
+            "rc:stopped",
+            {
+                "sessionId": previous.session_id,
+                "reason": "replaced",
+                "message": "远程控制会话已被新的连接接管",
+            },
+            to=previous.controller_sid,
+        )
+        logger.info(
+            "remote-control replaced old_session=%s new_session=%s device=%s",
+            previous.session_id,
+            session.session_id,
+            session.device_id,
+        )
+    return _SESSIONS.get(session.session_id) is session
+
+
+async def _start_reserved_session(session: RcSession, payload: Dict[str, Any]) -> None:
+    """Start and acknowledge a reservation only while it remains current."""
+    await sio.emit("rc:start", payload, to=session.device_sid)
+    if _SESSIONS.get(session.session_id) is not session:
+        return
+    await sio.emit(
+        "rc:started",
+        {"sessionId": session.session_id, "deviceId": session.device_id},
+        to=session.controller_sid,
+    )
 
 
 def _purge_expired(now: Optional[float] = None) -> None:
@@ -202,26 +248,23 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
         )
         return
 
-    # The reference agents own one RTCPeerConnection/capture pipeline. Keep the
-    # server contract equally explicit so a second operator cannot tear down or
-    # cross-wire an already active peer. There is no await between this check
-    # and insertion, making the reservation atomic on the Socket.IO event loop.
-    if _active_device_session(device_id) is not None:
-        await sio.emit(
-            "rc:error",
-            {"code": "busy", "message": "该设备已有远程控制会话，请先结束后再重试"},
-            to=controller_sid,
-        )
-        return
-
+    # Reference agents own one RTCPeerConnection/capture pipeline. The newest
+    # authorized controller therefore becomes the sole owner of the device.
+    # Reservation is synchronous (no await), so concurrent starts have a strict
+    # last-reservation-wins order on the Socket.IO event loop.
     session_id = f"rc_{uuid.uuid4().hex[:12]}"
-    _SESSIONS[session_id] = RcSession(
+    session = RcSession(
         session_id=session_id,
         device_id=device_id,
         user_id=user_id,
         controller_sid=controller_sid,
         device_sid=device_sid,
     )
+    # A still newer start may take ownership while replacement notifications
+    # are awaiting delivery. A stale start must not resurrect its peer.
+    if not await _activate_latest_session(session):
+        return
+
     logger.info("remote-control start session=%s device=%s user=%s", session_id, device_id, user_id)
     # Tell the device to bring up capture + the peer connection (it offers).
     # Older agents ignore the optional preset and retain their legacy defaults.
@@ -237,10 +280,9 @@ async def start_session(controller_sid: str, data: Dict[str, Any]) -> None:
         start_payload["requestedSurfaces"] = requested_surfaces
     if protocol_versions:
         start_payload["protocolVersions"] = protocol_versions
-    await sio.emit("rc:start", start_payload, to=device_sid)
-    # Ack the controller so it can wire up its RTCPeerConnection and wait for
-    # the offer.
-    await sio.emit("rc:started", {"sessionId": session_id, "deviceId": device_id}, to=controller_sid)
+    # A newer request can supersede this session while the device start emit is
+    # in flight; the helper suppresses an acknowledgement for a stale owner.
+    await _start_reserved_session(session, start_payload)
 
 
 _TERMINAL_EVENTS = ("rc:stop", "rc:stopped", "rc:error")

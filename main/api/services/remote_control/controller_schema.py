@@ -16,7 +16,7 @@ MAX_COLUMNS = 12
 
 TemplateId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.-]{0,63}$")]
 ControlId = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_.-]{0,63}$")]
-DeviceType = Literal["desktop", "android", "browser"]
+DeviceType = Literal["desktop", "android", "browser", "custom"]
 Capability = Literal["remote_control", "remote.control", "remote_controller_templates"]
 ControlKind = Literal["button", "dpad", "keypad", "slider", "joystick", "textInput"]
 Tone = Literal["default", "primary", "danger"]
@@ -123,7 +123,7 @@ class ControllerControl(StrictModel):
 class TemplateContent(StrictModel):
     schema_name: Literal[SCHEMA_NAME] = Field(default=SCHEMA_NAME, alias="schema")
     name: str = Field(min_length=1, max_length=80)
-    device_types: list[DeviceType] = Field(alias="deviceTypes", min_length=1, max_length=3)
+    device_types: list[DeviceType] = Field(alias="deviceTypes", min_length=1, max_length=4)
     required_capabilities: list[Capability] = Field(
         alias="requiredCapabilities",
         min_length=1,

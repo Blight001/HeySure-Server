@@ -55,9 +55,13 @@ def _json_names(value: object) -> list[str]:
 
 
 def recompute_catalog_hash(row: DevicePresence) -> str:
+    # Import lazily because presence also imports the projection helpers above.
+    from .presence import mcp_capabilities
+
     definitions = _json_object(getattr(row, "tool_defs_json", "{}"))
+    capabilities = mcp_capabilities(set(_json_names(getattr(row, "capabilities_json", "[]"))))
     prepared = prepare_device_catalog({
-        "capabilities": _json_names(getattr(row, "capabilities_json", "[]")),
+        "capabilities": sorted(capabilities),
         "toolDefs": [
             {"name": name, **spec}
             for name, spec in definitions.items()

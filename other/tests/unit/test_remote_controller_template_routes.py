@@ -61,6 +61,24 @@ def test_list_uses_authenticated_user_scope(monkeypatch):
     assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
 
 
+def test_real_http_list_accepts_custom_device_type(client, monkeypatch):
+    captured = {}
+
+    def fake_list(_session, _user_id, **filters):
+        captured.update(filters)
+        return [_builtin_document("jibotarm")]
+
+    monkeypatch.setattr(routes, "list_templates", fake_list)
+    response = client.get(
+        f"{routes.PREFIX}?deviceType=custom",
+        headers={"Authorization": "Bearer token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["items"][0]["deviceTypes"] == ["custom"]
+    assert captured["device_type"] == "custom"
+    assert client.get(f"{routes.PREFIX}?deviceType=unsupported").status_code == 422
+
+
 def test_get_sets_revision_etag(monkeypatch):
     monkeypatch.setattr(routes, "get_current_user", lambda *_args: SimpleNamespace(id=3))
     monkeypatch.setattr(routes, "get_template", lambda *_args: _builtin_document("media"))

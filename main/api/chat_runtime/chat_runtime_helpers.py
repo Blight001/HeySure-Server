@@ -514,9 +514,9 @@ def _session_total_tokens(
     if ai_config_id is not None:
         stmt = stmt.where(ChatMessage.ai_config_id == ai_config_id)
     rows = session.exec(stmt).all()
-    from api.services.chat.token_usage import canonical_message_total
+    from api.services.chat.token_usage import active_context_message_total
 
-    persisted_total = int(sum(canonical_message_total(row) for row in rows))
+    persisted_total = int(sum(active_context_message_total(row) for row in rows))
 
     active_runs = session.exec(
         select(ChatRun).where(

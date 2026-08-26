@@ -96,3 +96,52 @@ def test_published_catalog_keeps_remote_transport_capabilities():
     })
 
     assert ctx.info["capabilities"] == ["demo.run", "remote_control", "remote_terminal"]
+
+
+def test_recorded_presence_keeps_remote_transport_capabilities(monkeypatch):
+    info = {
+        "capabilities": ["demo.run", "remote_control", "remote_controller_templates"],
+        "toolDefs": [],
+    }
+    ctx = _context(info)
+    ctx.user_id = None
+    catalog = SimpleNamespace(
+        capabilities=("demo.run",),
+        tool_defs=(),
+        tool_defs_map={"demo.run": {"description": "", "input_schema": {}}},
+        reported_ai_description="",
+        catalog_hash="c" * 64,
+        requested_generation=None,
+        protocol_version=2,
+    )
+    monkeypatch.setattr(
+        registration,
+        "_prepare_callable_catalog",
+        lambda _ctx: ({"name": "device", "platform": "custom"}, "custom", ["demo.run"], catalog),
+    )
+    captured = {}
+
+    def swap(update):
+        captured["capabilities"] = update.capabilities
+        return {
+            "catalog_generation": 4,
+            "catalog_hash": catalog.catalog_hash,
+            "catalog_protocol_version": 2,
+        }
+
+    from api.devices import presence_catalog_store
+
+    monkeypatch.setattr(presence_catalog_store, "swap_presence_catalog", swap)
+
+    registration._record_presence(ctx)
+
+    assert captured["capabilities"] == (
+        "demo.run",
+        "remote_control",
+        "remote_controller_templates",
+    )
+    assert ctx.info["capabilities"] == [
+        "demo.run",
+        "remote_control",
+        "remote_controller_templates",
+    ]

@@ -89,7 +89,7 @@ def test_start_session_drops_dom_surface_without_device_capability(monkeypatch):
     remote_control._SESSIONS.clear()
 
 
-def test_start_session_rejects_second_operator_for_same_device(monkeypatch):
+def test_start_session_replaces_previous_operator_for_same_device(monkeypatch):
     emitted = AsyncMock()
     monkeypatch.setattr(remote_control.sio, "emit", emitted)
     monkeypatch.setattr(remote_control, "_resolve_controller_user", lambda _token: 7)
@@ -112,11 +112,74 @@ def test_start_session_rejects_second_operator_for_same_device(monkeypatch):
         )
     )
 
-    assert set(remote_control._SESSIONS) == {"rc_existing"}
-    assert emitted.await_count == 1
-    assert emitted.await_args.args[0] == "rc:error"
-    assert emitted.await_args.args[1]["code"] == "busy"
-    assert emitted.await_args.kwargs["to"] == "second-controller"
+    assert "rc_existing" not in remote_control._SESSIONS
+    assert len(remote_control._SESSIONS) == 1
+    replacement = next(iter(remote_control._SESSIONS.values()))
+    assert replacement.controller_sid == "second-controller"
+    assert replacement.device_id == "browser-1"
+
+    events = emitted.await_args_list
+    assert [call.args[0] for call in events] == ["rc:stop", "rc:stopped", "rc:start", "rc:started"]
+    assert events[0].args[1] == {"sessionId": "rc_existing", "reason": "replaced"}
+    assert events[0].kwargs["to"] == "device-sid"
+    assert events[1].args[1]["sessionId"] == "rc_existing"
+    assert events[1].args[1]["reason"] == "replaced"
+    assert events[1].kwargs["to"] == "first-controller"
+    assert events[2].args[1]["sessionId"] == replacement.session_id
+    assert events[2].kwargs["to"] == "device-sid"
+    assert events[3].args[1]["sessionId"] == replacement.session_id
+    assert events[3].kwargs["to"] == "second-controller"
+    remote_control._SESSIONS.clear()
+
+
+def test_concurrent_starts_keep_only_the_last_reservation(monkeypatch):
+    monkeypatch.setattr(remote_control, "_resolve_controller_user", lambda _token: 7)
+    monkeypatch.setattr(remote_control, "_find_device_sid", lambda _device_id: "device-sid")
+    monkeypatch.setattr(remote_control, "_agent_owner", lambda _sid: 7)
+    monkeypatch.setattr(remote_control, "_agent_supports_rc", lambda _sid: True)
+    generated = iter(["a" * 32, "b" * 32])
+    monkeypatch.setattr(
+        remote_control.uuid,
+        "uuid4",
+        lambda: type("GeneratedUuid", (), {"hex": next(generated)})(),
+    )
+    remote_control._SESSIONS.clear()
+    remote_control._SESSIONS["rc_existing"] = remote_control.RcSession(
+        session_id="rc_existing",
+        device_id="browser-1",
+        user_id=7,
+        controller_sid="first-controller",
+        device_sid="device-sid",
+    )
+    calls = []
+    nested_started = False
+
+    async def emit(event, payload, *, to):
+        nonlocal nested_started
+        calls.append((event, dict(payload), to))
+        if event == "rc:stop" and payload["sessionId"] == "rc_existing" and not nested_started:
+            nested_started = True
+            await remote_control.start_session(
+                "last-controller",
+                {"deviceId": "browser-1", "token": "valid"},
+            )
+
+    monkeypatch.setattr(remote_control.sio, "emit", emit)
+    asyncio.run(
+        remote_control.start_session(
+            "middle-controller",
+            {"deviceId": "browser-1", "token": "valid"},
+        )
+    )
+
+    assert set(remote_control._SESSIONS) == {"rc_bbbbbbbbbbbb"}
+    assert remote_control._SESSIONS["rc_bbbbbbbbbbbb"].controller_sid == "last-controller"
+    assert [payload["sessionId"] for event, payload, _to in calls if event == "rc:start"] == [
+        "rc_bbbbbbbbbbbb"
+    ]
+    assert [(payload["sessionId"], to) for event, payload, to in calls if event == "rc:started"] == [
+        ("rc_bbbbbbbbbbbb", "last-controller")
+    ]
     remote_control._SESSIONS.clear()
 
 

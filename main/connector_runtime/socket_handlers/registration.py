@@ -165,19 +165,30 @@ def _prepare_callable_catalog(ctx: Registration):
     return agent, device_type, capabilities, catalog
 
 
-def _publish_committed_catalog(ctx: Registration, catalog: PreparedDeviceCatalog, committed: dict) -> None:
-    # The committed catalog contains callable MCP tools only. Keep transport
-    # capabilities from the original registration in the live socket record:
-    # remote-control/terminal/RWM/RCT session gates read them from ``agents`` and must
-    # not mistake catalog filtering for a device that lacks remote support.
+def _catalog_capabilities_with_transports(
+    info: Dict[str, Any],
+    catalog: PreparedDeviceCatalog,
+) -> list[str]:
+    """Merge callable tools with reserved remote-transport capabilities.
+
+    The callable catalog hash and permission surface intentionally exclude
+    transports, while presence and live socket projections must retain them so
+    the Web can advertise only remote surfaces the endpoint actually supports.
+    """
     from api.devices.presence import NON_MCP_CAPABILITIES
 
     transports = {
         str(capability or "").strip()
-        for capability in ctx.info.get("capabilities") or []
+        for capability in info.get("capabilities") or []
         if str(capability or "").strip() in NON_MCP_CAPABILITIES
     }
-    ctx.info["capabilities"] = sorted(set(catalog.capabilities) | transports)
+    return sorted(set(catalog.capabilities) | transports)
+
+
+def _publish_committed_catalog(ctx: Registration, catalog: PreparedDeviceCatalog, committed: dict) -> None:
+    # Keep the same complete capability surface in the live socket record that
+    # registration persists for cross-process Gateway projections.
+    ctx.info["capabilities"] = _catalog_capabilities_with_transports(ctx.info, catalog)
     ctx.info["toolDefs"] = list(catalog.tool_defs)
     ctx.info["aiDescription"] = catalog.reported_ai_description
     ctx.info["catalogGeneration"] = committed["catalog_generation"]
@@ -219,7 +230,7 @@ def _record_presence(ctx: Registration) -> tuple[Dict[Optional[int], bool], dict
         device_id=ctx.device_id,
         ai_config_id=ctx.ai_config_id,
         device_type=device_type,
-        capabilities=accepted_catalog.capabilities,
+        capabilities=tuple(_catalog_capabilities_with_transports(ctx.info, accepted_catalog)),
         tool_defs=accepted_catalog.tool_defs_map,
         name=agent.get("name"),
         platform=agent.get("platform"),

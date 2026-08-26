@@ -9,8 +9,8 @@ endpoint tools the same way.
 
 One row per logical ``device_id``. ``online`` is flipped on register / disconnect
 (and reset on a fresh gateway boot); ``ai_config_id`` tracks the current
-Workshop assignment; ``capabilities_json`` is the agent's type-filtered tool
-list. Discovery reads ``online`` rows; dispatch still uses the live socket on
+Workshop assignment; ``capabilities_json`` keeps the validated callable tools
+and reserved remote transports. Discovery reads ``online`` rows; dispatch still uses the live socket on
 the gateway, so a stale ``online`` row at worst offers a tool whose dispatch
 then fails gracefully.
 """
@@ -56,7 +56,8 @@ class DevicePresence(SQLModel, table=True):
     ai_description_override: str = Field(
         default="", sa_column=Column(Text, nullable=False, server_default="")
     )
-    # JSON array of the agent's (type-filtered) endpoint tool names.
+    # JSON array of the agent's validated endpoint capabilities: callable MCP
+    # tool names plus reserved remote-transport capability words.
     capabilities_json: str = Field(default="[]")
     # JSON object mapping each reported tool name to its self-described
     # ``{"description", "input_schema"}``. The agent owns its own tool schemas
