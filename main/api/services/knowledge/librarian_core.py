@@ -385,6 +385,10 @@ def _thought_meta_to_row(meta: Dict[str, Any], rel_path: str) -> Dict[str, Any]:
         installed_at = float(meta.get("installed_at") or 0)
     except (TypeError, ValueError):
         installed_at = 0.0
+    try:
+        owner_ai_config_id = int(meta.get("owner_ai_config_id")) if meta.get("owner_ai_config_id") not in (None, "", "null") else None
+    except (TypeError, ValueError):
+        owner_ai_config_id = None
     auto_enabled = str(meta.get("auto_enabled") or "").strip().lower() in ("true", "1", "yes")
     row: Dict[str, Any] = {
         "slug": str(meta.get("slug") or "").strip(),
@@ -398,6 +402,10 @@ def _thought_meta_to_row(meta: Dict[str, Any], rel_path: str) -> Dict[str, Any]:
         "installed_at": installed_at,
         "auto_enabled": auto_enabled,
         "endpoint_kind": _normalize_endpoint(meta.get("endpoint_kind")),
+        "scope": str(meta.get("scope") or "global"),
+        "scope_target": str(meta.get("scope_target") or "").strip() or None,
+        "owner_ai_config_id": owner_ai_config_id,
+        "source_plan_id": str(meta.get("source_plan_id") or "").strip() or None,
         "trust": {"verdict": str(meta.get("trust_verdict") or "")},
     }
     reg = str(meta.get("registry_url") or "").strip()
@@ -460,6 +468,11 @@ def _render_thought_md(row: Dict[str, Any], body: str) -> str:
         "slug": str(row.get("slug") or ""),
         "source": str(row.get("source") or "manual"),
         "endpoint_kind": _normalize_endpoint(row.get("endpoint_kind")),
+        "scope": str(row.get("scope") or "global"),
+        "scope_target": row.get("scope_target"),
+        "owner_ai_config_id": row.get("owner_ai_config_id"),
+        "source_plan_id": row.get("source_plan_id"),
+        "evolved_at": row.get("evolved_at"),
         "version": row.get("version"),
         "owner": str(row.get("ownerHandle") or ""),
         "installed_at": float(row.get("installed_at") or time.time()),
@@ -611,15 +624,15 @@ def _load_user_knowledge_entries(user_id: int) -> List[Dict[str, Any]]:
                 "memory_id": memory_id,
                 "title": name,
                 "triggers": item.get("triggers") or [],
-                "scope": "global",
-                "scope_target": None,
+                "scope": str(item.get("scope") or "global"),
+                "scope_target": item.get("scope_target") or item.get("owner_ai_config_id"),
                 "status": "active",
                 "confidence": 1.0,
                 "use_count": 0,
                 "last_used_at": None,
                 "file_path": skill_rel,
                 "summary": summary,
-                "source_job_id": None,
+                "source_job_id": item.get("source_plan_id"),
                 "source_generation": None,
                 "source_ai_config_id": None,
                 "source_message_id": None,

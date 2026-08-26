@@ -20,13 +20,21 @@ def _knowledge_search(user_id: int, args: Dict[str, Any], ai_config_id: Optional
     except Exception:
         k = 5
     include_body = bool((args or {}).get("include_body"))
+    scope = str((args or {}).get("scope") or "").strip() or None
 
-    items = kb_store.keyword_search_knowledge(user_id=int(user_id), query=query, k=k, include_body=include_body)
+    items = kb_store.keyword_search_knowledge(
+        user_id=int(user_id),
+        query=query,
+        k=k,
+        include_body=include_body,
+        scope=scope,
+        ai_config_id=ai_config_id,
+    )
     return {
         "query": query,
         "count": len(items),
         "items": items,
-        "mode": "keyword+file",
+        "mode": "keyword+file+scope",
     }
 
 
@@ -39,7 +47,7 @@ def knowledge_search_schema() -> Dict[str, Any]:
             "scope": {
                 "type": "string",
                 "enum": ["global", "ai", "project"],
-                "description": "可选作用域过滤（当前 keyword 模式下忽略）。",
+                "description": "可选作用域过滤；AI 私有 Skill 只对其所属 AI 可见。",
             },
             "include_body": {"type": "boolean", "description": "是否返回全文正文。"},
         },

@@ -96,7 +96,7 @@ def finalize_plan(
     phases = progress.get("phases") or []
     _mark_final_phase_compressed(context, final_phase_since_ts, now_ts)
     log_path = _finish_plan_and_write_log(context, plan_state, outcome, summary)
-    _trigger_knowledge_review(context, progress, outcome, summary, phases, log_path)
+    _trigger_skill_evolution(context, plan_state, progress, outcome, summary, phases, log_path)
     next_loop_job = _complete_task_job(context, summary, now_ts)
     _persist_completion_notice(context, outcome, log_path, next_loop_job)
 
@@ -171,8 +171,9 @@ def _finish_plan_and_write_log(
         return ""
 
 
-def _trigger_knowledge_review(
+def _trigger_skill_evolution(
     context: PlanFinalizeContext,
+    plan_state: Any,
     progress: dict,
     outcome: str,
     summary: str,
@@ -180,13 +181,12 @@ def _trigger_knowledge_review(
     log_path: str,
 ) -> None:
     try:
-        from api.services.knowledge.knowledge_review_trigger import (
-            trigger_plan_knowledge_review,
-        )
+        from api.services.knowledge.skill_evolution import trigger_plan_skill_evolution
 
-        trigger_plan_knowledge_review(
+        trigger_plan_skill_evolution(
             user_id=context.user_id,
             executor_ai_config_id=context.ai_config_id,
+            plan_id=str(getattr(plan_state, "plan_id", "") or ""),
             goal=progress.get("goal") or "",
             outcome=outcome,
             summary=summary,

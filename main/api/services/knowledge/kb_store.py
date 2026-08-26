@@ -817,11 +817,17 @@ def _list_searchable_md(user_id: int) -> list[str]:
 
 
 def keyword_search_knowledge(
-    user_id: int, query: str, k: int = 5, include_body: bool = False
+    user_id: int,
+    query: str,
+    k: int = 5,
+    include_body: bool = False,
+    scope: Optional[str] = None,
+    ai_config_id: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     """纯关键词匹配检索 KnowledgeBase 文件夹内容。
 
-    完全基于文件系统（KnowledgeBase/topics/ + skills），无向量/embedding 依赖。
+    完全基于文件系统（KnowledgeBase/topics/ + skills），无向量/embedding 依赖；
+    默认按 ai_config_id 隔离 AI 私有 Skill。
     """
     q = str(query or "").strip()
     if not q:
@@ -840,6 +846,13 @@ def keyword_search_knowledge(
             continue
         try:
             meta, body = _split_frontmatter(raw)
+            row_scope = str(meta.get("scope") or "global").strip().lower()
+            row_target = str(meta.get("scope_target") or meta.get("owner_ai_config_id") or "").strip()
+            requested_scope = str(scope or "").strip().lower()
+            if row_scope == "ai" and (ai_config_id is None or row_target != str(int(ai_config_id))):
+                continue
+            if requested_scope and requested_scope != row_scope:
+                continue
             title = (
                 str(meta.get("title") or meta.get("name") or "").strip()
                 or (re.search(r"^#\s+(.+)", body, re.M).group(1).strip() if re.search(r"^#\s+(.+)", body, re.M) else "")

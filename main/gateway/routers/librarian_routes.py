@@ -56,6 +56,53 @@ class InheritanceThoughtEndpointBody(BaseModel):
     endpoint_kind: str = "any"
 
 
+@router.get("/skills")
+def list_skill_mentions(
+    q: str = "",
+    limit: int = 20,
+    ai_config_id: Optional[int] = None,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Return compact Skill metadata for chat ``@`` autocomplete.
+
+    The body is deliberately omitted; the run-start path resolves the selected
+    slug again server-side so clients cannot inject arbitrary Skill content.
+    """
+    user = get_current_user(authorization, session)
+    query = str(q or "").strip().casefold()
+    bounded_limit = max(1, min(int(limit or 20), 100))
+    payload = librarian_service._inheritance_thoughts_payload(int(user.id))
+    items = []
+    for item in payload.get("installed") or []:
+        if str(item.get("kind") or "") == "knowledge":
+            continue
+        if item.get("present") is False:
+            continue
+        scope = str(item.get("scope") or "global").strip().lower()
+        target = str(item.get("scope_target") or item.get("owner_ai_config_id") or "").strip()
+        if scope == "ai" and (ai_config_id is None or target != str(int(ai_config_id))):
+            continue
+        slug = str(item.get("slug") or "").strip()
+        name = str(item.get("displayName") or slug).strip()
+        summary = str(item.get("summary") or "").strip()
+        searchable = " ".join((slug, name, summary, " ".join(str(x) for x in item.get("triggers") or []))).casefold()
+        if not slug or (query and query not in searchable):
+            continue
+        items.append({
+            "slug": slug,
+            "name": name,
+            "summary": summary[:240],
+            "triggers": item.get("triggers") or [],
+            "scope": item.get("scope") or "global",
+            "risk": item.get("risk") or "unknown",
+            "version": item.get("version"),
+            "endpoint_kind": item.get("endpoint_kind") or "any",
+        })
+    items.sort(key=lambda row: (row["name"].casefold(), row["slug"]))
+    return {"items": items[:bounded_limit], "total": len(items)}
+
+
 @router.get("/inheritance-tools/clawhub/search")
 def search_clawhub_skills(
     q: str,
