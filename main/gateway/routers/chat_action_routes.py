@@ -22,6 +22,7 @@ from mcp_runtime.mcp import get_project_root, registry
 from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMessageUpdate, ChatRun
 from .auth import get_current_user
 from api.services.model_presets import resolve_model_preset
+from api.services.storage.agent_instructions import append_agent_md_prompt
 from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, router
@@ -667,7 +668,7 @@ def stream_chat(
             raise HTTPException(status_code=400, detail="No available assistant AI config")
         api_key, base_url, model = resolve_model_preset(user, cfg)
         # 方案 A：人格 Prompt 直接读 KnowledgeBase/personas/*.md（文件缺失回退 DB）。
-        system_prompt = _strip_runtime_injected_sections(kb_store.effective_ai_prompt(user.id, cfg))
+        system_prompt = append_agent_md_prompt(user.id, cfg, _strip_runtime_injected_sections(kb_store.effective_ai_prompt(user.id, cfg)))
         if cfg.database_uri:
             system_prompt = _append_prompt_section(system_prompt, "AI 数据库连接", cfg.database_uri)
     else:
