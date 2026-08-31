@@ -48,6 +48,10 @@ def _docker_build_environment(root: Path) -> dict[str, str]:
         with socket.create_connection(("127.0.0.1", 7890), timeout=1):
             pass
     except OSError:
+        # An unusable proxy in .env must not leak into the build.  Empty
+        # process environment values take precedence over Compose's .env.
+        for name in ("DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "DOCKER_ALL_PROXY"):
+            environment[name] = ""
         return environment
     proxy = "http://127.0.0.1:7890"
     for name in ("DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "DOCKER_ALL_PROXY"):
