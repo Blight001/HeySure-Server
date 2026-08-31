@@ -251,8 +251,20 @@ def _ensure_ai_workspace_dir(user_id: int, ai_config_id: int) -> None:
     """
     try:
         from mcp_runtime.mcp import get_project_root
+        from api.services.storage.agent_instructions import ensure_agent_md
 
         get_project_root(user_id, ai_config_id)
+        cfg = None
+        # The caller has just persisted/refreshed the config; resolve it through
+        # the workspace helper's DB-backed path only when needed by the loader.
+        # Existing call sites pass ids, so avoid changing their signatures.
+        from api.database import engine
+        from api.models import AssistantAIConfig
+        from sqlmodel import Session
+        with Session(engine) as session:
+            cfg = session.get(AssistantAIConfig, ai_config_id)
+        if cfg is not None:
+            ensure_agent_md(user_id, cfg)
     except Exception:
         logger.exception(f"failed to create workspace dir for ai_config {ai_config_id}")
 

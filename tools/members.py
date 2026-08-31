@@ -245,7 +245,9 @@ def _create_member(session: Session, user: User, args: Dict[str, Any]) -> Assist
     session.refresh(cfg)
     try:
         from mcp_runtime.mcp import get_project_root
+        from api.services.storage.agent_instructions import ensure_agent_md
         get_project_root(user.id, cfg.id)
+        ensure_agent_md(int(user.id or 0), cfg)
     except Exception:
         pass
     try:

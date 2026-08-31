@@ -220,6 +220,7 @@ def build_runtime_system_prompt_and_tools(
     from api.services.tasks.task_system import TASK_RUNTIME_REQUIRED_TOOLS, TASK_PLAN_FLOW_PROMPT
     from api.services.mcp.capability_view import ToolViewRequest, resolve_scoped_tool_view
     from api.services.knowledge import kb_store
+    from api.services.storage.agent_instructions import render_agent_md_section
 
     uid = user.id
     if cfg is None or base_system_prompt is None:
@@ -264,6 +265,19 @@ def build_runtime_system_prompt_and_tools(
 
     if merged_system_prompt:
         system_prompt = merged_system_prompt
+    # Workspace instructions are loaded from the member-scoped agent.md file in
+    # both gateway preview and ai-runtime.  The loader is bounded and supports
+    # pre-rename <id>-slug directories for existing members.
+    system_prompt = _strip_prompt_section(system_prompt, "成员工作区说明（agent.md）")
+    if cfg is not None and ai_config_id is not None:
+        try:
+            agent_md_section = render_agent_md_section(uid, cfg)
+        except Exception:
+            agent_md_section = ""
+        if agent_md_section:
+            system_prompt = _append_prompt_section(
+                system_prompt, "成员工作区说明（agent.md）", agent_md_section
+            )
     # 数字社会成员名单：让每个 AI 知道同伴的 ai_config_id / 名字，否则
     # message.send+to 无从填目标 AI 的 ID（名单直接注入上下文）。
     if ai_config_id is not None:

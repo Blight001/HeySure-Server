@@ -227,6 +227,19 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
 
 def ensure_default_members_for_user(session: Session, user_id: int) -> None:
     cfgs = ensure_default_configs(session, user_id)
+    # Idempotently provision workspace instructions for both newly seeded and
+    # pre-existing members.  The helper preserves custom files and handles
+    # legacy slug directories after a member rename.
+    try:
+        from api.services.storage.agent_instructions import ensure_agent_md
+
+        all_cfgs = session.exec(
+            select(AssistantAIConfig).where(AssistantAIConfig.user_id == user_id)
+        ).all()
+        for cfg in all_cfgs:
+            ensure_agent_md(user_id, cfg)
+    except Exception:
+        pass
     changed = False
     for cfg in cfgs:
         status = session.exec(
