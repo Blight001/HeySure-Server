@@ -12,8 +12,19 @@ GitOutput = Callable[[list[str], float], str]
 
 
 def ensure_clean_worktree(git: Git, error_type: Type[RuntimeError]) -> None:
+    # Device is an independent deployment surface and is intentionally not
+    # part of the server Compose release.  A developer checkout on the host
+    # may therefore have platform submodule changes that must not block a
+    # server-only update or incorrectly poison deployment consistency.
     status = git(
-        ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"],
+        [
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+            "--",
+            ":(exclude)device",
+        ],
         30,
     )
     if status.stdout.strip():
