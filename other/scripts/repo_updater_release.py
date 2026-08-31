@@ -50,7 +50,17 @@ def _docker_build_environment(root: Path) -> dict[str, str]:
     except OSError:
         # An unusable proxy in .env must not leak into the build.  Empty
         # process environment values take precedence over Compose's .env.
-        for name in ("DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "DOCKER_ALL_PROXY"):
+        for name in (
+            "DOCKER_HTTP_PROXY",
+            "DOCKER_HTTPS_PROXY",
+            "DOCKER_ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ):
             environment[name] = ""
         return environment
     proxy = "http://127.0.0.1:7890"
