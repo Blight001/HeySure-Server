@@ -297,7 +297,7 @@ def deploy_release(
     )
     set_phase("restarting", "building and replacing web service")
     log("Runtime 已通过 readiness，开始构建 Web...")
-    run_streaming(_compose(compose_cmd, "build", "web"), 1800, None)
+    run_streaming(_compose(compose_cmd, "build", "web"), 1800, environment)
     run(_compose(compose_cmd, "up", "-d", "--no-deps", "web"), 300)
     _container_id(run, compose_cmd, "web")
     run(["curl", "-fsS", "http://127.0.0.1:3000/"], 30)
