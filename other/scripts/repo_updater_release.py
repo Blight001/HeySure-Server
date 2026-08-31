@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import json
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -19,6 +20,39 @@ RunCommand = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 RunStreaming = Callable[[list[str], float, Optional[dict[str, str]]], None]
 LogLine = Callable[[str], None]
 SetPhase = Callable[[str, str], None]
+
+
+def _proxy_configured(root: Path) -> bool:
+    """Return whether the checkout .env declares a Docker proxy."""
+    try:
+        lines = (root / ".env").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    names = {"DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "DOCKER_ALL_PROXY"}
+    return any(
+        "=" in line
+        and not line.lstrip().startswith("#")
+        and line.split("=", 1)[0].strip() in names
+        and bool(line.split("=", 1)[1].strip().strip("\"'"))
+        for line in lines
+    )
+
+
+def _docker_build_environment(root: Path) -> dict[str, str]:
+    """Use host networking and the loopback proxy for Docker builds when available."""
+    environment = dict(os.environ)
+    environment["DOCKER_BUILD_NETWORK"] = "host"
+    if not _proxy_configured(root):
+        return environment
+    try:
+        with socket.create_connection(("127.0.0.1", 7890), timeout=1):
+            pass
+    except OSError:
+        return environment
+    proxy = "http://127.0.0.1:7890"
+    for name in ("DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "DOCKER_ALL_PROXY"):
+        environment[name] = proxy
+    return environment
 
 
 class ReleaseSafetyError(RuntimeError):
@@ -238,7 +272,7 @@ def deploy_release(
     release_script = root / "deploy" / "server" / "other" / "scripts" / "rolling_release.py"
     if not release_script.is_file():
         raise ReleaseSafetyError("target version does not contain rolling_release.py")
-    environment = dict(os.environ)
+    environment = _docker_build_environment(root)
     environment["HEYSURE_COMPOSE_DIR"] = str(root.resolve())
     set_phase("rebuilding", "running readiness-gated server release")
     log("开始执行数据库迁移与四 Runtime 滚动发布...")
