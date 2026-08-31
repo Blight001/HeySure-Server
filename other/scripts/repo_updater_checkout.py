@@ -50,9 +50,18 @@ def verify_deployment_checkout(
     paths = list(DEPLOY_SUBMODULES)
     top_level = git_output(["submodule", "status", "--", *paths], 30).splitlines()
     recursive = git_output(["submodule", "status", "--recursive", "--", *paths], 60)
-    if len(top_level) != len(paths) or any(not line.startswith(" ") for line in top_level):
+    # The host updater's output helper strips surrounding whitespace, so a
+    # clean first submodule line may lose Git's leading space marker.  Reject
+    # only Git's explicit dirty/unmerged markers instead of requiring that
+    # formatting detail.
+    dirty_markers = ("+", "-", "U")
+    if len(top_level) != len(paths) or any(
+        not line or line[0] in dirty_markers for line in top_level
+    ):
         raise error_type("required deployment submodule checkout does not match gitlink")
-    if any(not line.startswith(" ") for line in recursive.splitlines()):
+    if any(
+        not line or line[0] in dirty_markers for line in recursive.splitlines()
+    ):
         raise error_type("nested deployment submodule checkout does not match gitlink")
     ensure_clean_worktree(git, error_type)
 
