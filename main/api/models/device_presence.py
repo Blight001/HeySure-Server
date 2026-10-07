@@ -71,5 +71,9 @@ class DevicePresence(SQLModel, table=True):
     )
     catalog_hash: str = Field(default="", max_length=64)
     catalog_protocol_version: int = Field(default=1)
+    # Local Codex bridge model catalogue reported by a Windows device.
+    # Stored separately from MCP tool definitions so model visibility does not
+    # accidentally grant a callable capability.
+    codex_models_json: str = Field(default="[]", sa_column=Column(Text, nullable=False, server_default="[]"))
     online: bool = Field(default=True, index=True)
     updated_at: float = Field(default_factory=time.time)

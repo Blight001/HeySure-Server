@@ -4,6 +4,7 @@ IS_ROUTER_ENTRY = False
 
 import json
 import threading
+import time
 import uuid
 
 from fastapi import Depends, Header, HTTPException
@@ -13,8 +14,10 @@ from ai_runtime.inference.core import _run_worker
 from ai_runtime.worker import notify_queue
 from api.chat_runtime.chat_runtime_helpers import _resolve_ai_runtime
 from api.core.settings import settings
-from api.database import get_session
-from api.models import ChatMessageCreate, ChatRun
+from api.database import engine, get_session
+from api.models import ChatMessageCreate, ChatRun, DevicePresence
+from api.runtime.internal_http import internal_post
+from api.services.codex_bridge import create_session as create_codex_session, models_for_user
 from api.services.chat.chat_attachments import (
     bind_message_attachments,
     model_attachment_section,
@@ -209,8 +212,71 @@ def _start_local_worker(run_id, user, context, extras):
     _RUN_THREADS[run_id] = worker
 
 
+def _codex_request(req: dict) -> tuple[str, str, str]:
+    provider = str(req.get("execution_provider") or req.get("executionProvider") or "").strip().lower()
+    device_id = str(req.get("codex_device_id") or req.get("codexDeviceId") or req.get("device_id") or "").strip()
+    model = str(req.get("codex_model") or req.get("codexModel") or req.get("model") or "").strip()
+    return provider, device_id, model
+
+
+def _validate_codex_request(req: dict, user, session: Session) -> tuple[str, str, str]:
+    provider, device_id, model = _codex_request(req)
+    if provider != "codex_local":
+        return provider, device_id, model
+    if not device_id or not model:
+        raise HTTPException(status_code=400, detail="codex_local requires codex_device_id and codex_model")
+    presence = session.exec(select(DevicePresence).where(
+        DevicePresence.user_id == user.id,
+        DevicePresence.device_id == device_id,
+        DevicePresence.online == True,  # noqa: E712
+    )).first()
+    if not presence:
+        raise HTTPException(status_code=409, detail="Codex device is offline")
+    advertised = {
+        str(item.get("id")) for item in models_for_user(user.id)
+        if str(item.get("deviceId")) == device_id
+    }
+    if model not in advertised:
+        raise HTTPException(status_code=400, detail="codex_model is not advertised by this device")
+    return provider, device_id, model
+
+
+async def _start_codex_run(run_id: str, user, context: dict, req: dict, session: Session) -> None:
+    provider, device_id, model = _validate_codex_request(req, user, session)
+    if provider != "codex_local":
+        return
+    create_codex_session(
+        user_id=user.id, device_id=device_id, model=model,
+        cwd=str(req.get("codex_cwd") or req.get("cwd") or ""),
+        ai_config_id=context["ai_config_id"], session_id=run_id,
+        sandbox_policy=str(req.get("sandbox_policy") or ""),
+        approval_policy=str(req.get("approval_policy") or ""),
+    )
+    base = str(settings.connector_runtime_url or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(status_code=503, detail="Codex bridge requires connector runtime")
+    common = {"session_id": run_id, "user_id": user.id, "device_id": device_id, "model": model,
+              "cwd": str(req.get("codex_cwd") or req.get("cwd") or "")}
+    try:
+        await internal_post(base, "/internal/codex/start", json=common)
+        await internal_post(base, "/internal/codex/run", json={
+            "session_id": run_id, "user_id": user.id, "input": context["model_content"],
+            "metadata": {"ai_config_id": context["ai_config_id"]},
+        })
+    except Exception as exc:
+        with Session(engine) as bg:
+            row = bg.exec(select(ChatRun).where(ChatRun.run_id == run_id)).first()
+            if row:
+                row.status = "error"
+                row.error_message = "Codex bridge unavailable"
+                row.finished_at = row.updated_at = time.time()
+                bg.add(row)
+                bg.commit()
+        raise HTTPException(status_code=503, detail="Codex bridge unavailable") from exc
+
+
 @router.post("/run/start")
-def start_chat_run(
+async def start_chat_run(
     req: dict,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
@@ -218,8 +284,11 @@ def start_chat_run(
     user = get_current_user(authorization, session)
     context = _prepare_context(session, user, req)
     _reject_active_run(session, user.id, context)
+    provider, _, _ = _validate_codex_request(req, user, session)
     run_id, message, extras = _persist_run(session, user, req, context)
-    if settings.ai_dispatch_mode == "remote":
+    if provider == "codex_local":
+        await _start_codex_run(run_id, user, context, req, session)
+    elif settings.ai_dispatch_mode == "remote":
         notify_queue(run_id)
     else:
         _start_local_worker(run_id, user, context, extras)

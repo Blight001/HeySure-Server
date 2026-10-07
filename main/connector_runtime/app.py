@@ -78,6 +78,28 @@ class DeviceUpdateBroadcastRequest(BaseModel):
     product_id: str
     target_id: str
     latest_version: str
+
+
+class CodexStartRequest(BaseModel):
+    session_id: str
+    user_id: int
+    device_id: str
+    model: str
+    cwd: str = ""
+    sandbox_policy: str = ""
+    approval_policy: str = ""
+
+
+class CodexRunRequest(BaseModel):
+    session_id: str
+    user_id: int
+    input: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CodexInterruptRequest(BaseModel):
+    session_id: str
+    user_id: int
     mandatory: bool = False
     release_notes: str = ""
 
@@ -294,6 +316,52 @@ def create_app() -> FastAPI:
     from connector_runtime.health_detail import connector_health_detail
 
     router.include_router(build_health_router("connector", detail_provider=connector_health_detail))
+
+    @router.post("/codex/start")
+    async def codex_start(req: CodexStartRequest) -> Dict[str, Any]:
+        from connector_runtime.codex_bridge import send_to_device
+
+        result = await send_to_device(device_id=req.device_id, event="codex:start", payload=req.model_dump())
+        if not result.get("ok"):
+            raise HTTPException(status_code=503, detail="Codex device is offline")
+        return result
+
+    @router.post("/codex/run")
+    async def codex_run(req: CodexRunRequest) -> Dict[str, Any]:
+        from api.services.codex_bridge import get_session
+        from connector_runtime.codex_bridge import send_to_device
+
+        row = get_session(req.user_id, req.session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Codex session not found")
+        # The Windows bridge currently runs a supervised ``codex exec --json``
+        # turn.  Keep requestId stable as the persisted session id so inbound
+        # JSONL events can be journaled without a second in-memory map.
+        payload = {
+            "requestId": req.session_id,
+            "sessionId": req.session_id,
+            "prompt": req.input,
+            "model": row.model,
+            "cwd": row.cwd,
+            "metadata": req.metadata,
+        }
+        result = await send_to_device(device_id=row.device_id, event="codex:run", payload=payload)
+        if not result.get("ok"):
+            raise HTTPException(status_code=503, detail="Codex device is offline")
+        return result
+
+    @router.post("/codex/interrupt")
+    async def codex_interrupt(req: CodexInterruptRequest) -> Dict[str, Any]:
+        from api.services.codex_bridge import get_session
+        from connector_runtime.codex_bridge import send_to_device
+
+        row = get_session(req.user_id, req.session_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Codex session not found")
+        result = await send_to_device(device_id=row.device_id, event="codex:interrupt", payload=req.model_dump())
+        if not result.get("ok"):
+            raise HTTPException(status_code=503, detail="Codex device is offline")
+        return result
 
     @router.post("/device-updates/broadcast")
     async def broadcast_device_update(req: DeviceUpdateBroadcastRequest) -> Dict[str, Any]:

@@ -89,6 +89,7 @@ from .workflow import (
     WorkflowRecording,
     WorkflowRecordingEvent,
 )
+from .codex import CodexEvent, CodexSession
 
 __all__ = [
     # defaults
@@ -178,4 +179,6 @@ __all__ = [
     "WorkflowStepRun",
     "WorkflowRecording",
     "WorkflowRecordingEvent",
+    "CodexSession",
+    "CodexEvent",
 ]

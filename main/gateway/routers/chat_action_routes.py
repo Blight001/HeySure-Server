@@ -17,9 +17,11 @@ from sqlmodel import Session, select
 
 from api.database import get_session
 from api.sio import sio
+from api.core.settings import settings
+from api.runtime.internal_http import InternalClient
 from api.runtime.http_client import ai_http_post
 from mcp_runtime.mcp import get_project_root, registry
-from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMessageUpdate, ChatRun
+from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMessageUpdate, ChatRun, CodexSession
 from .auth import get_current_user
 from api.services.model_presets import resolve_model_preset
 from api.services.storage.agent_instructions import append_agent_md_prompt
@@ -289,6 +291,17 @@ def stop_chat_run(
     row.updated_at = now
     session.add(row)
     session.commit()
+    codex_session = session.get(CodexSession, run_id)
+    if codex_session is not None and settings.connector_runtime_url:
+        try:
+            InternalClient(settings.connector_runtime_url, timeout=10).post(
+                "/internal/codex/interrupt",
+                {"session_id": run_id, "user_id": user.id},
+            )
+        except Exception:
+            # The DB stop flag is authoritative; a disconnected device will
+            # observe it when its late terminal event arrives.
+            pass
     _clear_run_live_text(run_id)
     return {"success": True, "run_id": run_id, "status": row.status, "stop_requested": True}
 

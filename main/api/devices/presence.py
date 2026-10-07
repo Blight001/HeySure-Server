@@ -525,6 +525,10 @@ def _include_inventory_device(device_id: str, device_type: str, seen: Set[str], 
 
 def _offline_device_projection(row: DevicePresence, device_id: str, device_type: str) -> dict:
     is_online = bool(row.online)
+    try:
+        codex_models = json.loads(getattr(row, "codex_models_json", "[]") or "[]")
+    except Exception:
+        codex_models = []
     return {
         "id": device_id,
         "name": _text_attr(row, "name") or device_id,
@@ -547,6 +551,7 @@ def _offline_device_projection(row: DevicePresence, device_id: str, device_type:
         "lastTaskStatus": None,
         "lastTaskAt": None,
         "lastError": None,
+        "codexModels": codex_models if isinstance(codex_models, list) else [],
     }
 
 

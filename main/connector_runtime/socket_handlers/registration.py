@@ -138,6 +138,7 @@ def _store_live_agent(ctx: Registration) -> None:
         "lastError": None,
         "source": "socket",
         "dispatchable": True,
+        "codexModels": list(ctx.info.get("codexModels") or []),
     }
 
 
@@ -378,6 +379,14 @@ async def handle_agent_register(sid: str, raw_info: object) -> None:
         )
         return
     _store_live_agent(ctx)
+    if ctx.user_id is not None and ctx.info.get("codexModels"):
+        try:
+            from api.services.codex_bridge import set_device_models
+
+            models = set_device_models(ctx.user_id, ctx.device_id, ctx.info.get("codexModels"))
+            agents[ctx.sid]["codexModels"] = models
+        except Exception:
+            logger.exception("Failed to persist Codex model catalogue: %s", ctx.device_id)
     logger.info(
         "Agent registered: %s user=%s ai=%s catalog_generation=%s",
         ctx.device_id, ctx.user_id, ctx.ai_config_id, committed["catalog_generation"],

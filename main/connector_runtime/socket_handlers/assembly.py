@@ -1,7 +1,7 @@
 """Assemble Connector-owned endpoint Agent Socket.IO events."""
 
 from api.sio import sio
-from connector_runtime.socket_handlers import disconnect, registration, remote, tasks
+from connector_runtime.socket_handlers import codex, disconnect, registration, remote, tasks
 
 
 def register_agent_socket_events() -> None:
@@ -9,6 +9,9 @@ def register_agent_socket_events() -> None:
     sio.on("task:progress")(tasks.progress)
     sio.on("task:result")(tasks.result)
     sio.on("task:error")(tasks.error)
+    sio.on("codex:models")(codex.models)
+    sio.on("codex:event")(codex.event)
+    sio.on("codex:started")(codex.started)
     sio.on("disconnect")(disconnect.handle_disconnect)
 
     @sio.on("flow:log")

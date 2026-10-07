@@ -21,6 +21,7 @@ class AgentRegistrationPayload(BaseModel):
     catalog_generation: Optional[int] = Field(default=None, alias="catalogGeneration", ge=0)
     catalog_protocol_version: int = Field(default=1, alias="catalogProtocolVersion", ge=1, le=100)
     dynamic_tools: List[Dict[str, Any]] = Field(default_factory=list, alias="dynamicTools")
+    codex_models: List[Dict[str, Any]] = Field(default_factory=list, alias="codexModels", max_length=256)
 
 
 class TaskProgressPayload(BaseModel):
