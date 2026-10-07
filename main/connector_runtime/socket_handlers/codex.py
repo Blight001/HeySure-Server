@@ -37,29 +37,37 @@ async def models(sid: str, data: object) -> None:
     await ui_sio.emit("codex:models", {"deviceId": device_id, "models": normalized}, room=f"user_{int(user_id)}")
 
 
-async def event(sid: str, data: object) -> None:
+def _event_context(sid: str, data: object):
     agent = _agent(sid)
     if not agent or not isinstance(data, dict):
-        return
+        return None
     session_id = str(data.get("sessionId") or data.get("requestId") or "").strip()
     if not session_id or agent.get("userId") is None:
-        return
+        return None
     from api.services.codex_bridge import get_session
 
     row = get_session(int(agent["userId"]), session_id)
     if row is None or str(row.device_id) != str(agent.get("id") or ""):
-        return
+        return None
     payload = data.get("payload") if "payload" in data else data.get("event", data)
-    if isinstance(payload, dict):
-        nested = payload.get("data")
-        nested_type = nested.get("type") if isinstance(nested, dict) else ""
-        event_type = str(
-            payload.get("type") or nested_type or data.get("type")
-            or data.get("eventType") or "event"
-        )[:120]
-    else:
-        event_type = str(data.get("type") or data.get("eventType") or "event")[:120]
-    sequence = data.get("sequence")
+    event_type = _event_type(data, payload)
+    return agent, session_id, payload, event_type, data.get("sequence")
+
+
+def _event_type(data: dict, payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return str(data.get("type") or data.get("eventType") or "event")[:120]
+    nested = payload.get("data")
+    nested_type = nested.get("type") if isinstance(nested, dict) else ""
+    return str(payload.get("type") or nested_type or data.get("type")
+               or data.get("eventType") or "event")[:120]
+
+
+async def event(sid: str, data: object) -> None:
+    context = _event_context(sid, data)
+    if context is None:
+        return
+    agent, session_id, payload, event_type, sequence = context
     record = append_event(user_id=int(agent["userId"]), session_id=session_id, event_type=event_type, payload=payload, sequence=sequence)
     if record is None:
         return
@@ -99,6 +107,18 @@ def _event_text(session_id: str, event_type: str, payload: Any) -> str:
     return _text_from_payload(payload) if lowered in {"agent_message", "assistant.message"} else ""
 
 
+def _terminal_status(row: ChatRun, event_type: str) -> str | None:
+    if event_type == "turn.started":
+        row.status = "running"
+        row.started_at = row.started_at or time.time()
+        return None
+    if event_type not in {"turn.completed", "turn.failed", "turn.interrupted"}:
+        return None
+    status = "completed" if event_type == "turn.completed" else (
+        "stopped" if event_type == "turn.interrupted" else "error")
+    return "stopped" if row.stop_requested and status == "completed" else status
+
+
 async def _update_chat_run(session_id: str, user_id: int, event_type: str, payload: Any) -> None:
     """Mirror Codex events into the existing ChatRun/UI stream when session_id
     is a run id. Standalone /api/codex sessions remain Codex-event-only."""
@@ -112,13 +132,8 @@ async def _update_chat_run(session_id: str, user_id: int, event_type: str, paylo
         if text:
             _CODEX_CHAT_TEXT[session_id] = _CODEX_CHAT_TEXT.get(session_id, "") + text
         now = time.time()
-        if event_type == "turn.started":
-            row.status = "running"
-            row.started_at = row.started_at or now
-        elif event_type in {"turn.completed", "turn.failed", "turn.interrupted"}:
-            terminal = "completed" if event_type == "turn.completed" else ("stopped" if event_type == "turn.interrupted" else "error")
-            if row.stop_requested and terminal == "completed":
-                terminal = "stopped"
+        terminal = _terminal_status(row, event_type)
+        if terminal:
             row.status = terminal
             row.error_message = "" if terminal == "completed" else _text_from_payload(payload)
             row.finished_at = now
