@@ -15,6 +15,7 @@ from api.sio import agents, ui_sio
 
 
 _CODEX_CHAT_TEXT: dict[str, str] = {}
+_CODEX_CHAT_DELTA_SEEN: set[str] = set()
 
 
 def _agent(sid: str) -> dict | None:
@@ -79,6 +80,25 @@ def _text_from_payload(value: Any) -> str:
     return _text_from_payload(nested)
 
 
+def _event_text(session_id: str, event_type: str, payload: Any) -> str:
+    """Prefer deltas and avoid appending item.completed snapshots twice.
+
+    ``codex exec --json`` normally emits ``item.delta`` followed by an
+    ``item.completed`` record containing the same final text.  Persisting both
+    would duplicate every assistant response.  If a bridge only emits the
+    completed record, it is still accepted as the fallback text.
+    """
+    lowered = str(event_type or "").lower()
+    if "delta" in lowered:
+        _CODEX_CHAT_DELTA_SEEN.add(session_id)
+        return _text_from_payload(payload)
+    if lowered in {"item.completed", "message.completed", "agent_message.completed"}:
+        if session_id in _CODEX_CHAT_DELTA_SEEN:
+            return ""
+        return _text_from_payload(payload)
+    return _text_from_payload(payload) if lowered in {"agent_message", "assistant.message"} else ""
+
+
 async def _update_chat_run(session_id: str, user_id: int, event_type: str, payload: Any) -> None:
     """Mirror Codex events into the existing ChatRun/UI stream when session_id
     is a run id. Standalone /api/codex sessions remain Codex-event-only."""
@@ -88,7 +108,7 @@ async def _update_chat_run(session_id: str, user_id: int, event_type: str, paylo
         )).first()
         if row is None:
             return
-        text = _text_from_payload(payload)
+        text = _event_text(session_id, event_type, payload)
         if text:
             _CODEX_CHAT_TEXT[session_id] = _CODEX_CHAT_TEXT.get(session_id, "") + text
         now = time.time()
@@ -114,6 +134,7 @@ async def _update_chat_run(session_id: str, user_id: int, event_type: str, paylo
         }
         if row.status in {"completed", "error", "stopped"}:
             text_value = _CODEX_CHAT_TEXT.pop(session_id, "")
+            _CODEX_CHAT_DELTA_SEEN.discard(session_id)
             if text_value and row.status == "completed":
                 codex_row = session.get(CodexSession, session_id)
                 _save_message(session, user_id, ChatMessageCreate(

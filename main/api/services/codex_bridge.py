@@ -15,7 +15,7 @@ from typing import Any, Iterable
 from sqlmodel import Session, select
 
 from api.database import engine
-from api.models import CodexEvent, CodexSession, DevicePresence
+from api.models import ChatRun, CodexEvent, CodexSession, DevicePresence
 
 
 def normalize_models(items: Iterable[Any] | None) -> list[dict]:
@@ -157,6 +157,31 @@ def events_for_session(*, user_id: int, session_id: str, after: int = 0) -> list
         except Exception:
             payload = row.payload_json
         result.append({"id": row.id, "sequence": row.sequence, "type": row.event_type,
+                       "payload": payload, "createdAt": row.created_at})
+    return result
+
+
+def events_for_chat_session(*, user_id: int, chat_session_id: str) -> list[dict]:
+    """Load persisted Codex events belonging to one HeySure chat session."""
+    with Session(engine) as session:
+        run_ids = session.exec(select(ChatRun.run_id).where(
+            ChatRun.user_id == int(user_id),
+            ChatRun.session_id == str(chat_session_id),
+        )).all()
+        if not run_ids:
+            return []
+        rows = session.exec(select(CodexEvent).where(
+            CodexEvent.user_id == int(user_id),
+            CodexEvent.session_id.in_([str(run_id) for run_id in run_ids]),
+        ).order_by(CodexEvent.created_at.asc(), CodexEvent.id.asc())).all()
+    result = []
+    for row in rows:
+        try:
+            payload = json.loads(row.payload_json or "{}")
+        except Exception:
+            payload = row.payload_json
+        result.append({"id": row.id, "sessionId": row.session_id,
+                       "sequence": row.sequence, "type": row.event_type,
                        "payload": payload, "createdAt": row.created_at})
     return result
 

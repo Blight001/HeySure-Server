@@ -12,7 +12,7 @@ from api.core.settings import settings
 from api.database import get_session
 from api.models import AssistantAIConfig, DevicePresence
 from api.runtime.internal_http import internal_post
-from api.services.codex_bridge import append_event, create_session, events_for_session, get_session as get_codex_session, models_for_user, sessions_for_user
+from api.services.codex_bridge import append_event, create_session, events_for_chat_session, events_for_session, get_session as get_codex_session, models_for_user, sessions_for_user
 from .auth import get_current_user
 
 router = APIRouter()
@@ -114,4 +114,11 @@ def codex_events(session_id: str, after: int = 0, db: Session = Depends(get_sess
     if get_codex_session(user.id, session_id) is None:
         raise HTTPException(status_code=404, detail="Codex session not found")
     return {"sessionId": session_id, "events": events_for_session(user_id=user.id, session_id=session_id, after=after)}
+
+
+@router.get("/chat-sessions/{chat_session_id}/events")
+def codex_chat_events(chat_session_id: str, db: Session = Depends(get_session), authorization: str = Header(None)):
+    user = get_current_user(authorization, db)
+    return {"chatSessionId": chat_session_id,
+            "events": events_for_chat_session(user_id=user.id, chat_session_id=chat_session_id)}
 
