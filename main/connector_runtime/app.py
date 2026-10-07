@@ -342,6 +342,7 @@ def create_app() -> FastAPI:
             "sessionId": req.session_id,
             "prompt": req.input,
             "model": row.model,
+            "threadId": row.codex_thread_id or None,
             "cwd": row.cwd,
             "metadata": req.metadata,
         }

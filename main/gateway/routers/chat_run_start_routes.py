@@ -15,9 +15,9 @@ from ai_runtime.worker import notify_queue
 from api.chat_runtime.chat_runtime_helpers import _resolve_ai_runtime
 from api.core.settings import settings
 from api.database import engine, get_session
-from api.models import ChatMessageCreate, ChatRun, DevicePresence
+from api.models import ChatMessageCreate, ChatRun, CodexSession, DevicePresence
 from api.runtime.internal_http import internal_post
-from api.services.codex_bridge import create_session as create_codex_session, models_for_user
+from api.services.codex_bridge import create_session as create_codex_session, models_for_user, set_thread_id
 from api.services.chat.chat_attachments import (
     bind_message_attachments,
     model_attachment_section,
@@ -245,6 +245,7 @@ async def _start_codex_run(run_id: str, user, context: dict, req: dict, session:
     provider, device_id, model = _validate_codex_request(req, user, session)
     if provider != "codex_local":
         return
+    previous_thread = _previous_codex_thread(session, user.id, context["session_id"], device_id, model)
     create_codex_session(
         user_id=user.id, device_id=device_id, model=model,
         cwd=str(req.get("codex_cwd") or req.get("cwd") or ""),
@@ -252,6 +253,8 @@ async def _start_codex_run(run_id: str, user, context: dict, req: dict, session:
         sandbox_policy=str(req.get("sandbox_policy") or ""),
         approval_policy=str(req.get("approval_policy") or ""),
     )
+    if previous_thread:
+        set_thread_id(user_id=user.id, session_id=run_id, thread_id=previous_thread)
     base = str(settings.connector_runtime_url or "").strip().rstrip("/")
     if not base:
         raise HTTPException(status_code=503, detail="Codex bridge requires connector runtime")
@@ -273,6 +276,17 @@ async def _start_codex_run(run_id: str, user, context: dict, req: dict, session:
                 bg.add(row)
                 bg.commit()
         raise HTTPException(status_code=503, detail="Codex bridge unavailable") from exc
+
+
+def _previous_codex_thread(session: Session, user_id: int, chat_session_id: str, device_id: str, model: str) -> str:
+    row = session.exec(select(CodexSession).join(
+        ChatRun, ChatRun.run_id == CodexSession.session_id,
+    ).where(
+        ChatRun.user_id == user_id, ChatRun.session_id == chat_session_id,
+        CodexSession.device_id == device_id, CodexSession.model == model,
+        CodexSession.codex_thread_id != "",
+    ).order_by(CodexSession.updated_at.desc())).first()
+    return str(row.codex_thread_id or "") if row else ""
 
 
 @router.post("/run/start")

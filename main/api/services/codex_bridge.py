@@ -95,6 +95,21 @@ def create_session(*, user_id: int, device_id: str, model: str, cwd: str = "",
     return row
 
 
+def set_thread_id(*, user_id: int, session_id: str, thread_id: str) -> bool:
+    value = str(thread_id or "").strip()
+    if not value:
+        return False
+    with Session(engine) as session:
+        row = session.get(CodexSession, str(session_id))
+        if row is None or row.user_id != int(user_id):
+            return False
+        row.codex_thread_id = value
+        row.updated_at = time.time()
+        session.add(row)
+        session.commit()
+    return True
+
+
 def get_session(user_id: int, session_id: str) -> CodexSession | None:
     with Session(engine) as session:
         row = session.get(CodexSession, str(session_id))

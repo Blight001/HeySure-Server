@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import ChatMessageCreate, ChatRun, CodexSession
 from api.services.chat.chat_persistence import _save_message
-from api.services.codex_bridge import append_event, set_device_models
+from api.services.codex_bridge import append_event, set_device_models, set_thread_id
 from api.sio import agents, ui_sio
 
 
@@ -72,7 +72,21 @@ async def event(sid: str, data: object) -> None:
     if record is None:
         return
     await ui_sio.emit("codex:event", {"sessionId": session_id, "sequence": record.sequence, "type": event_type, "payload": payload}, room=f"user_{int(agent['userId'])}")
+    if event_type == "thread.started":
+        thread_id = _thread_id(payload)
+        if thread_id:
+            set_thread_id(user_id=int(agent["userId"]), session_id=session_id, thread_id=thread_id)
     await _update_chat_run(session_id, int(agent["userId"]), event_type, payload)
+
+
+def _thread_id(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("thread_id", "threadId"):
+        if payload.get(key):
+            return str(payload[key]).strip()
+    nested = payload.get("data") or payload.get("thread") or payload.get("item")
+    return _thread_id(nested)
 
 
 def _text_from_payload(value: Any) -> str:
