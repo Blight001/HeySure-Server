@@ -7,7 +7,19 @@ from typing import Any, Dict, List
 from api.services import repo_update
 
 
-_RESTART_PHASES = {"queued_restart", "rebuilding", "restarting"}
+# The Gateway may restart while the host updater is publishing.  Its in-memory
+# state then comes back as ``checking``/``idle`` even though the host operation
+# has already reached a terminal phase.  Treat all active local phases as
+# eligible for terminal-state adoption so the UI cannot remain stuck forever.
+_ACTIVE_PHASES = {
+    "checking",
+    "pulling",
+    "backing_up",
+    "queued_restart",
+    "rebuilding",
+    "restarting",
+    "rolling_back",
+}
 _PHASE_MESSAGES = {
     "checking": "宿主更新服务正在检测版本…",
     "backing_up": "宿主更新服务正在备份数据库…",
@@ -91,5 +103,5 @@ def sync_remote_update_state() -> None:
     if bool(remote_state.get("running")):
         _adopt_active(remote_state, phase)
         return
-    if str(repo_update.get_state().get("phase") or "") in _RESTART_PHASES:
+    if str(repo_update.get_state().get("phase") or "") in _ACTIVE_PHASES:
         _apply_terminal(remote_state, phase)
