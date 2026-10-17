@@ -99,6 +99,10 @@ try:
     from repo_updater_http import make_handler
 except ModuleNotFoundError:
     from other.scripts.repo_updater_http import make_handler
+try:
+    from repo_updater_manifest import ReleaseManifestError, apply_manifest, fetch_manifest
+except ModuleNotFoundError:
+    from other.scripts.repo_updater_manifest import ReleaseManifestError, apply_manifest, fetch_manifest
 
 
 REQUIRED_ROOT = Path("/www/server/panel/data/compose/heysureai2")
@@ -129,6 +133,16 @@ def _read_dotenv_key(name: str) -> str:
             value = value[1:-1]
         return value.strip()
     return ""
+
+
+def _release_manifest() -> dict[str, Any]:
+    return fetch_manifest(_read_dotenv_key)
+
+
+def _apply_release_manifest(payload: dict[str, Any]) -> None:
+    backup = apply_manifest(ROOT, DATA_ROOT, payload)
+    release_id = str(payload.get("release_id") or "")[:12]
+    _append_log(f"已应用 CI release-manifest：{release_id}（.env 备份：{backup.name}）")
 
 
 TOKEN = (
@@ -290,8 +304,22 @@ def _verify_expected_checkout(expected_sha: str) -> None:
     verify_deployment_checkout(_git, _git_output, UpdateError)
 
 
-def _publish_checked_out_version(expected_sha: str) -> None:
+def _publish_checked_out_version(expected_sha: str, *, apply_ci_manifest: bool = True) -> None:
     _verify_expected_checkout(expected_sha)
+    manifest = None
+    if apply_ci_manifest:
+        manifest = _release_manifest()
+        if str(manifest.get("root_commit") or "") != expected_sha:
+            raise ReleaseManifestError("release-manifest root_commit 与目标版本不一致")
+        _apply_release_manifest(manifest)
+        _set_state(
+            release_manifest={
+                "release_id": manifest.get("release_id"),
+                "generated_at": manifest.get("generated_at"),
+                "root_commit": manifest.get("root_commit"),
+                "images": manifest.get("images"),
+            }
+        )
     deploy_release(
         ROOT,
         DATA_ROOT,
@@ -404,7 +432,7 @@ def _rollback_worker(from_sha: str, target: dict[str, Any]) -> None:
         _set_state(phase="queued_restart", message="rollback complete; compose rebuild queued")
         _append_log("代码版本已回退，已排队重建 Docker 服务")
         publish_started = True
-        _publish_checked_out_version(target_sha)
+        _publish_checked_out_version(target_sha, apply_ci_manifest=False)
     except Exception as exc:
         if reset_done and not publish_started:
             try:
