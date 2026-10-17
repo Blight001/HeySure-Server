@@ -6,10 +6,6 @@ from typing import Any, Callable, Dict, List
 
 from sqlmodel import Session
 
-from api.chat_runtime.chat_runtime_helpers import (
-    _is_task_finished_status,
-    _load_task_job_by_session,
-)
 from ai_runtime.inference import compression_flow, final_response_flow, phase_context
 from ai_runtime.inference.plan_flow import send_task_completion_notification
 from ai_runtime.inference.run_request import WorkerRequest
@@ -120,18 +116,12 @@ def _handle_compression(context, state, turn):
     state = _apply_compression_state(state, outcome.state)
     if outcome.handled:
         return state, True
-    state = _refresh_task_job(context, state)
-    task_finished = bool(
-        state.task_job
-        and _is_task_finished_status(str(state.task_job.status or ""))
-    )
-    outcome = compression_flow.maybe_auto_compress(
-        compression_context,
-        outcome.state,
-        turn.turn_calls,
-        task_finished,
-    )
-    return _apply_compression_state(state, outcome.state), outcome.continue_loop
+    # Automatic compression used to run here, after the model had emitted its
+    # response but before its MCP batch was executed.  That transition could
+    # drop tool calls or ask the model to generate a duplicate final answer.
+    # Compression is intentionally request-boundary work now; this post-turn
+    # hook only handles explicit ``conversation.manage(compress)`` calls.
+    return state, False
 
 
 def _apply_compression_state(state, compressed) -> PostTurnState:
@@ -143,19 +133,6 @@ def _apply_compression_state(state, compressed) -> PostTurnState:
         phase_started_at=compressed.phase_started_at,
         phase_mcp_statuses=compressed.phase_mcp_statuses,
     )
-
-
-def _refresh_task_job(context, state) -> PostTurnState:
-    if not context.setup.is_task_runtime:
-        return state
-    request = context.request
-    latest = _load_task_job_by_session(
-        context.session,
-        request.user_id,
-        request.ai_config_id,
-        request.session_id,
-    )
-    return replace(state, task_job=latest or state.task_job)
 
 
 def _flow_violation(context, state, turn) -> bool:

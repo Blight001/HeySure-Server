@@ -544,6 +544,19 @@ def test_settings_payload_includes_live_capability_summary_and_absolute_endpoint
     )
 
 
+def test_settings_credentials_list_excludes_revoked_rows():
+    class _CaptureSession:
+        statement = None
+
+        def exec(self, statement):
+            self.statement = statement
+            return _Rows([])
+
+    session = _CaptureSession()
+    assert settings_routes._credentials_for(session, user_id=7, config_id=19) == []
+    assert "externalmcpcredential.revoked_at IS NULL" in str(session.statement)
+
+
 def test_endpoint_outer_timeout_follows_dispatch_deadline_with_safety(monkeypatch):
     monkeypatch.setattr(
         "connector_runtime.dispatch.desktop_device_tools.is_endpoint_agent_tool",

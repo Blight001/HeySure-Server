@@ -143,6 +143,10 @@ def _credentials_for(session: Session, user_id: int, config_id: int):
         .where(
             ExternalMcpCredential.user_id == user_id,
             ExternalMcpCredential.ai_config_id == config_id,
+            # Revoked credentials cannot authenticate anymore and should not
+            # remain visible in the member settings list. Keep expired rows
+            # visible so clients can distinguish expiry from revocation.
+            ExternalMcpCredential.revoked_at == None,  # noqa: E711
         )
         .order_by(ExternalMcpCredential.created_at.desc())
         .limit(_MAX_LISTED_CREDENTIALS)

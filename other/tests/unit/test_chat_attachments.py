@@ -78,6 +78,32 @@ def test_bind_and_history_payload_keep_only_workspace_reference():
     assert payload["url"].startswith("/api/chat/attachments/")
 
 
+def test_attachment_payload_marks_video_for_inline_player():
+    engine = _engine()
+    with Session(engine) as session:
+        message = ChatMessage(user_id=7, role="system", content="视频")
+        session.add(message)
+        session.commit()
+        session.refresh(message)
+        bind_message_attachments(
+            session,
+            message_id=message.id,
+            user_id=7,
+            ai_config_id=9,
+            records=[{
+                "file_ref": "file_video",
+                "workspace_path": "Uploads/generated.mp4",
+                "file_name": "generated.mp4",
+                "mime_type": "video/mp4",
+                "bytes": 123,
+            }],
+        )
+        payload = message_attachment_map(session, [message.id])[message.id][0]
+
+    assert payload["is_video"] is True
+    assert payload["is_image"] is False
+
+
 def test_current_message_image_is_added_as_multimodal_block(tmp_path, monkeypatch):
     image = Path(tmp_path, "sample.png")
     image.write_bytes(b"\x89PNG\r\n\x1a\nsmall")

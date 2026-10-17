@@ -113,15 +113,9 @@ def test_manual_compression_returns_next_turn_with_reanchored_state(monkeypatch)
     assert outcome.state.phase_started_at == 5.0
 
 
-def test_auto_compression_refreshes_task_job_and_can_continue(monkeypatch):
+def test_post_turn_executes_tools_before_any_compression(monkeypatch):
     context, _ = _context(task_runtime=True)
-    latest_job = SimpleNamespace(status="running")
     _compression_passthrough(monkeypatch, auto_continue=True)
-    monkeypatch.setattr(
-        worker_post_turn_flow,
-        "_load_task_job_by_session",
-        lambda *args: latest_job,
-    )
 
     outcome = worker_post_turn_flow.handle_post_turn(
         context,
@@ -129,14 +123,13 @@ def test_auto_compression_refreshes_task_job_and_can_continue(monkeypatch):
         _turn(calls=[{"tool": "workspace.read"}]),
     )
 
-    assert outcome.action is worker_post_turn_flow.PostTurnAction.NEXT_TURN
-    assert outcome.state.task_job is latest_job
+    assert outcome.action is worker_post_turn_flow.PostTurnAction.EXECUTE_TOOLS
+    assert outcome.state.task_job.status == "queued"
 
 
 def test_allowed_tool_batch_proceeds_to_explicit_execution(monkeypatch):
     context, _ = _context(task_runtime=True)
     _compression_passthrough(monkeypatch)
-    monkeypatch.setattr(worker_post_turn_flow, "_load_task_job_by_session", lambda *args: None)
 
     outcome = worker_post_turn_flow.handle_post_turn(
         context,
@@ -150,7 +143,6 @@ def test_allowed_tool_batch_proceeds_to_explicit_execution(monkeypatch):
 def test_finish_gate_closes_native_calls_and_requests_next_turn(monkeypatch):
     context, events = _context(task_runtime=True)
     _compression_passthrough(monkeypatch)
-    monkeypatch.setattr(worker_post_turn_flow, "_load_task_job_by_session", lambda *args: None)
     calls = [{"tool": "workspace.read", "id": "call-1"}]
     state = _state(plan=SimpleNamespace(goal="ship"), awaiting=True)
 
@@ -169,7 +161,6 @@ def test_finish_gate_closes_native_calls_and_requests_next_turn(monkeypatch):
 def test_finish_gate_allows_todo_manage(monkeypatch):
     context, _ = _context(task_runtime=True)
     _compression_passthrough(monkeypatch)
-    monkeypatch.setattr(worker_post_turn_flow, "_load_task_job_by_session", lambda *args: None)
 
     outcome = worker_post_turn_flow.handle_post_turn(
         context,
@@ -183,7 +174,6 @@ def test_finish_gate_allows_todo_manage(monkeypatch):
 def test_text_flow_violation_appends_user_notice(monkeypatch):
     context, _ = _context(task_runtime=True)
     _compression_passthrough(monkeypatch)
-    monkeypatch.setattr(worker_post_turn_flow, "_load_task_job_by_session", lambda *args: None)
     state = _state(plan=SimpleNamespace(goal="ship"), awaiting=True)
 
     worker_post_turn_flow.handle_post_turn(

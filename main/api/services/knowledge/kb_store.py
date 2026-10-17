@@ -832,74 +832,20 @@ def keyword_search_knowledge(
     q = str(query or "").strip()
     if not q:
         return []
-    q_lower = q.lower()
-    q_tokens = _kb_tokenize(q)
+    from .kb_search import SearchAdapters, SearchRequest, search_documents
 
-    root = _kb_root(user_id)
-    candidates = _list_searchable_md(user_id)
-    scored: list[tuple[float, dict[str, Any]]] = []
-
-    for rel in candidates:
-        abs_p = os.path.join(root, rel)
-        raw = _read_text(abs_p)
-        if not raw:
-            continue
-        try:
-            meta, body = _split_frontmatter(raw)
-            row_scope = str(meta.get("scope") or "global").strip().lower()
-            row_target = str(meta.get("scope_target") or meta.get("owner_ai_config_id") or "").strip()
-            requested_scope = str(scope or "").strip().lower()
-            if row_scope == "ai" and (ai_config_id is None or row_target != str(int(ai_config_id))):
-                continue
-            if requested_scope and requested_scope != row_scope:
-                continue
-            title = (
-                str(meta.get("title") or meta.get("name") or "").strip()
-                or (re.search(r"^#\s+(.+)", body, re.M).group(1).strip() if re.search(r"^#\s+(.+)", body, re.M) else "")
-                or os.path.splitext(os.path.basename(rel))[0]
-            )
-            trig_raw = meta.get("triggers") or meta.get("keywords") or meta.get("tags") or ""
-            triggers = _parse_triggers_field(trig_raw)
-            if isinstance(triggers, str):
-                triggers = [t.strip() for t in re.split(r"[,，;；\n]+", triggers) if t.strip()]
-            summary = str(meta.get("summary") or meta.get("description") or "").strip()
-            if not summary:
-                summary = (body or "")[:180].replace("\n", " ").strip()
-            full_hay = " ".join([title, " ".join(triggers or []), summary, body or ""]).lower()
-
-            score = 0.0
-            # 精确触发词命中加权
-            for t in (triggers or []):
-                if t and str(t).lower() in q_lower:
-                    score += 3.0
-            # query token 匹配
-            for tk in q_tokens:
-                if tk and tk in full_hay:
-                    score += 1.0
-            # 标题包含 query 额外加分
-            if q_lower in title.lower():
-                score += 2.0
-            if score <= 0:
-                continue
-
-            excerpt = (body or summary or "").replace("\n", " ").strip()
-            if len(excerpt) > 280:
-                excerpt = excerpt[:280] + "…"
-
-            item: dict[str, Any] = {
-                "memory_id": str(meta.get("memory_id") or meta.get("id") or f"file:{rel}"),
-                "title": title,
-                "triggers": triggers or [],
-                "summary": summary,
-                "score": round(float(score), 6),
-                "file_path": rel,
-                "excerpt": excerpt,
-            }
-            if include_body:
-                item["body"] = body.strip()
-            scored.append((score, item))
-        except Exception:
-            continue
-
-    scored.sort(key=lambda x: (-x[0], x[1].get("title", "")))
-    return [it for _, it in scored[: max(1, int(k or 5))]]
+    return search_documents(SearchRequest(
+        root=_kb_root(user_id),
+        candidates=_list_searchable_md(user_id),
+        query=q,
+        k=k,
+        include_body=include_body,
+        scope=scope,
+        ai_config_id=ai_config_id,
+        tokenize=_kb_tokenize,
+        adapters=SearchAdapters(
+            read_text=_read_text,
+            split_frontmatter=_split_frontmatter,
+            parse_triggers=_parse_triggers_field,
+        ),
+    ))

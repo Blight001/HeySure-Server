@@ -184,6 +184,87 @@ class ConversationCompressTests(unittest.TestCase):
         self.assertIsNotNone(rebuilt)
         self.assertEqual(rebuilt[-1]["content"], "message-1")
 
+    def test_compression_preserves_historical_usage_counters(self):
+        events = []
+        rows = _history_rows()
+        session = _Session(rows, events)
+
+        with (
+            patch("api.services.chat.conversation_compress._save_message"),
+            patch(
+                "api.services.chat.conversation_compress.ai_http_post",
+                return_value=SimpleNamespace(
+                    headers={"content-type": "application/json"},
+                    raise_for_status=lambda: None,
+                    json=lambda: {"choices": [{"message": {"content": "摘要"}}]},
+                ),
+            ),
+        ):
+            rebuilt = _compress(session)
+
+        self.assertIsNotNone(rebuilt)
+        self.assertEqual([row.total_tokens for row in rows], [10] * len(rows))
+        self.assertTrue(all("compressed_away" in row.tags for row in rows[:-2]))
+
+    def test_compression_keeps_recent_mcp_turn_as_native_pair(self):
+        events = []
+        rows = [
+            SimpleNamespace(
+                id=1,
+                role="user",
+                content="读取文件",
+                tags="",
+                think=None,
+                total_tokens=1,
+            ),
+            SimpleNamespace(
+                id=2,
+                role="assistant",
+                content="",
+                tags="mcp_assistant_call",
+                think=None,
+                total_tokens=1,
+            ),
+            SimpleNamespace(
+                id=3,
+                role="system",
+                content=(
+                    "[MCP工具]\n工具: workspace.read\n状态: success\n\n"
+                    "[参数]\n{}\n\n[结果]\n内容"
+                ),
+                tags="mcp_tool_call",
+                think=None,
+                total_tokens=1,
+            ),
+            SimpleNamespace(
+                id=4,
+                role="user",
+                content="继续",
+                tags="",
+                think=None,
+                total_tokens=1,
+            ),
+        ]
+        session = _Session(rows, events)
+
+        with (
+            patch("api.services.chat.conversation_compress._save_message"),
+            patch(
+                "api.services.chat.conversation_compress.ai_http_post",
+                return_value=SimpleNamespace(
+                    headers={"content-type": "application/json"},
+                    raise_for_status=lambda: None,
+                    json=lambda: {"choices": [{"message": {"content": "摘要"}}]},
+                ),
+            ),
+        ):
+            rebuilt = _compress(session)
+
+        self.assertIsNotNone(rebuilt)
+        assistant = next(item for item in rebuilt if item.get("role") == "assistant")
+        self.assertEqual(assistant["tool_calls"][0]["function"]["name"], "workspace__read")
+        self.assertEqual(rebuilt[-2]["role"], "tool")
+
     def test_failed_summary_adds_terminal_notice(self):
         events = []
         session = _Session(_history_rows(), events)

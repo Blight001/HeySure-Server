@@ -76,6 +76,12 @@ def serve_chat_attachment(
         record["server_path"],
         media_type=row.mime_type or "application/octet-stream",
         filename=row.file_name,
-        content_disposition_type="inline" if row.mime_type.startswith("image/") else "attachment",
+        # Generated Infinite Canvas videos/audio must be streamable by the
+        # conversation UI.  Keep arbitrary documents as downloads.
+        content_disposition_type=(
+            "inline"
+            if str(row.mime_type or "").lower().startswith(("image/", "video/", "audio/"))
+            else "attachment"
+        ),
         headers={"Cache-Control": "private, max-age=31536000, immutable"},
     )

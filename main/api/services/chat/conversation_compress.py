@@ -185,7 +185,9 @@ def _load_compression_rows(
         if "compressed_away" in tags:
             return False
         if message.role == "system":
-            return "phase_summary" in tags
+            # Keep MCP bubbles in the compression input so a retained tool
+            # turn can be rebuilt as a valid assistant/tool protocol pair.
+            return "phase_summary" in tags or "mcp_tool_call" in tags
         return True
 
     return [message for message in session.exec(stmt).all() if included(message)]
@@ -255,7 +257,10 @@ def _persist_compression_result(
             if "compressed_away" not in tags:
                 tags.append("compressed_away")
             message.tags = ",".join(tags)
-            message.total_tokens = 0
+            # Compression changes only the active context view.  Historical
+            # usage is an accounting fact and must remain immutable; the
+            # ``compressed_away`` tag is enough for active-context queries to
+            # exclude this row.
             session.add(message)
         _save_message(
             session,
@@ -286,16 +291,35 @@ def _rebuild_conversation(
     summary_content: str,
     kept: List[ChatMessage],
 ) -> List[Dict[str, Any]]:
-    new_convo: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": summary_content},
-    ]
-    for message in kept:
-        item: Dict[str, Any] = {"role": message.role, "content": message.content}
-        if message.role == "assistant" and getattr(message, "think", None):
-            item["reasoning_content"] = message.think
-        new_convo.append(item)
-    return new_convo
+    # Reuse the normal history compiler.  It restores ``mcp_assistant_call`` +
+    # ``mcp_tool_call`` rows as one native assistant/tool pair, instead of
+    # emitting an assistant message without ``tool_calls``.
+    from ai_runtime.inference.conversation_history import build_conversation_history
+
+    retained = build_conversation_history(
+        kept,
+        system_prompt=system_prompt,
+        mcp_result_max_chars=8000,
+    )
+    retained.insert(1, {"role": "user", "content": summary_content})
+    return retained
+
+
+def _select_compression_boundary(
+    rows: List[ChatMessage], keep_recent: int
+) -> tuple[List[ChatMessage], List[ChatMessage]]:
+    """Choose a recent boundary without splitting a persisted MCP turn."""
+    effective = min(keep_recent, max(0, len(rows) - 1))
+    if effective <= 0:
+        return rows, []
+    boundary = len(rows) - effective
+    while boundary > 0:
+        tags = str(getattr(rows[boundary], "tags", "") or "")
+        if rows[boundary].role == "system" and "mcp_tool_call" in tags:
+            boundary -= 1
+            continue
+        break
+    return rows[:boundary], rows[boundary:]
 
 
 def compress_session(
@@ -320,9 +344,7 @@ def compress_session(
         return None
     # A manual compression request is an explicit MCP action. Always fold at
     # least one eligible row instead of turning short histories into a no-op.
-    effective_keep_recent = min(request.keep_recent, max(0, len(rows) - 1))
-    to_summarize = rows[:-effective_keep_recent] if effective_keep_recent > 0 else rows
-    kept = rows[-effective_keep_recent:] if effective_keep_recent > 0 else []
+    to_summarize, kept = _select_compression_boundary(rows, request.keep_recent)
     prompt = _build_compression_prompt(to_summarize, request.compression_prompt)
     # Loading history autobegins a read transaction. The summary model can
     # take longer than PostgreSQL's idle-in-transaction timeout, so release

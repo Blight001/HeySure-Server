@@ -423,8 +423,41 @@ def save_tool_bubble(request: ToolBubbleRequest) -> None:
             latency=request.latency,
         ),
     )
+    _persist_generated_media_attachments(request, message)
     _persist_screenshot_data(request, message, device_id, device_name)
     _deliver_screenshot(request, message, device_id, device_name)
+
+
+def _persist_generated_media_attachments(
+    request: ToolBubbleRequest,
+    message: ChatMessage,
+) -> None:
+    if not message.id or not request.tool_result:
+        return
+    from ai_runtime.inference.generated_media import persist_generated_media_attachments
+
+    persisted = persist_generated_media_attachments(
+        request.session,
+        message_id=int(message.id),
+        user_id=request.user_id,
+        ai_config_id=request.ai_config_id,
+        tool=request.tool,
+        tool_result=request.tool_result,
+    )
+    if persisted:
+        try:
+            from api.services.chat.chat_realtime import notify_history_changed
+
+            notify_history_changed(
+                user_id=request.user_id,
+                session_id=request.session_id,
+                ai_config_id=request.ai_config_id,
+                ai_kind=request.ai_kind,
+                message_id=message.id,
+                source="attachment_persistence",
+            )
+        except Exception:
+            logger.debug("generated media history notify skipped", exc_info=True)
 
 
 def _persist_screenshot_data(request, message, device_id, device_name) -> None:

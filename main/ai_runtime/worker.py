@@ -18,6 +18,7 @@ import time
 import traceback
 from typing import Any, Dict, Optional
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from api.core.settings import settings
@@ -51,6 +52,10 @@ _run_slots = threading.Semaphore(_MAX_CONCURRENT_RUNS)
 _active_runs_lock = threading.Lock()
 _active_run_ids: set[str] = set()
 _last_dispatch_at: Optional[float] = None
+# A completed run frees a semaphore slot without emitting another Postgres
+# NOTIFY.  Wake the safety-net dispatcher immediately so queued work does not
+# wait for the periodic tick.
+_queue_wakeup = threading.Event()
 WORKER_INSTANCE_ID = state_for("worker").instance_id
 
 
@@ -68,7 +73,13 @@ def active_runs() -> Dict[str, Any]:
 def health_detail() -> Dict[str, Any]:
     """Queue/concurrency detail for the standard health contract."""
     with Session(engine) as session:
-        queued = len(session.exec(select(ChatRun).where(ChatRun.status == "queued")).all())
+        # Health probes run frequently; count in PostgreSQL instead of loading
+        # every queued row into Python just to report a single integer.
+        queued = session.exec(
+            select(func.count())
+            .select_from(ChatRun)
+            .where(ChatRun.status == "queued")
+        ).one()
     runs = active_runs()
     state = state_for("worker").snapshot()
     return {
@@ -153,18 +164,16 @@ def notify_queue(run_id: str) -> None:
 def _claim_one_queued_run() -> Optional[ChatRun]:
     """Atomically claim one queued run; mark it running with a heartbeat."""
     with Session(engine) as session:
-        from sqlalchemy import text
-
-        row_id = session.exec(
-            text(
-                "SELECT id FROM chatrun WHERE status = 'queued' "
-                "ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"
-            )
-        ).scalar_one_or_none()
-        if row_id is None:
-            return None
-        run = session.get(ChatRun, int(row_id))
-        if not run:
+        # Fetch and lock the row in one round trip.  The previous raw-id
+        # query followed by ``session.get`` performed two queries for every
+        # claimed run, which becomes visible under a notification burst.
+        run = session.exec(
+            select(ChatRun)
+            .where(ChatRun.status == "queued")
+            .order_by(ChatRun.id)
+            .with_for_update(skip_locked=True)
+        ).first()
+        if run is None:
             return None
         now = time.time()
         run.status = "running"
@@ -288,6 +297,7 @@ def _execute_run_with_slot(run: ChatRun) -> None:
         with _active_runs_lock:
             _active_run_ids.discard(run.run_id)
         _run_slots.release()
+        _queue_wakeup.set()
 
 
 def _drain_dispatcher(limit: int = 32) -> int:
@@ -302,7 +312,13 @@ def _drain_dispatcher(limit: int = 32) -> int:
         # up when a slot frees up.
         if not _run_slots.acquire(blocking=False):
             return dispatched
-        run = _claim_one_queued_run()
+        try:
+            run = _claim_one_queued_run()
+        except Exception:
+            # A failed claim must not permanently consume a concurrency slot;
+            # otherwise one transient DB error gradually stalls this worker.
+            _run_slots.release()
+            raise
         if not run:
             _run_slots.release()
             return dispatched
@@ -327,7 +343,9 @@ def _retry_tick_loop(stop_evt: threading.Event) -> None:
     """
     RETRY_TICK_SECONDS = 10.0
     while not stop_evt.is_set():
-        if stop_evt.wait(RETRY_TICK_SECONDS):
+        _queue_wakeup.wait(RETRY_TICK_SECONDS)
+        _queue_wakeup.clear()
+        if stop_evt.is_set():
             return
         try:
             _drain_dispatcher()

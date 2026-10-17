@@ -167,33 +167,33 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
 
     # Existing users keep their current AI configs unchanged.
     if existing:
-        pass
-    else:
-        # Seed defaults only for first-time bootstrap.
-        for spec in _default_ai_specs():
-            # 人格 Prompt 列已删除：先记录，建表后写入 personas 文件。
-            row = AssistantAIConfig(
-                user_id=user_id,
-                switch_key=spec["switch_key"],
-                name=spec["name"],
-                description=spec["description"],
-                avatar="ai_avatars1.png",
-                ai_role=spec["ai_role"],
-                digital_member_role=spec.get("digital_member_role", "member"),
-                is_librarian=bool(spec.get("is_librarian", False)),
-                platform=spec["platform"],
-                generation=spec["generation"],
-                token_limit=spec["token_limit"],
-                lifecycle_status=spec["lifecycle_status"],
-                current_behavior=spec["current_behavior"],
-                project_id=spec["project_id"],
-                project_name=spec["project_name"],
-                workspace_root=None,
-                sort_order=spec["sort_order"],
-            )
-            session.add(row)
-            created.append(row)
-            _seed_persona_prompts.append((row, spec.get("prompt", GENERIC_MEMBER_PROMPT)))
+        return existing
+
+    # Seed defaults only for first-time bootstrap.
+    for spec in _default_ai_specs():
+        # 人格 Prompt 列已删除：先记录，建表后写入 personas 文件。
+        row = AssistantAIConfig(
+            user_id=user_id,
+            switch_key=spec["switch_key"],
+            name=spec["name"],
+            description=spec["description"],
+            avatar="ai_avatars1.png",
+            ai_role=spec["ai_role"],
+            digital_member_role=spec.get("digital_member_role", "member"),
+            is_librarian=bool(spec.get("is_librarian", False)),
+            platform=spec["platform"],
+            generation=spec["generation"],
+            token_limit=spec["token_limit"],
+            lifecycle_status=spec["lifecycle_status"],
+            current_behavior=spec["current_behavior"],
+            project_id=spec["project_id"],
+            project_name=spec["project_name"],
+            workspace_root=None,
+            sort_order=spec["sort_order"],
+        )
+        session.add(row)
+        created.append(row)
+        _seed_persona_prompts.append((row, spec.get("prompt", GENERIC_MEMBER_PROMPT)))
 
     if created:
         session.commit()
@@ -220,9 +220,7 @@ def ensure_default_configs(session: Session, user_id: int) -> list[AssistantAICo
                     bind_config_to_toolbox(user_id, row.id)
         except Exception:
             pass
-    return session.exec(
-        select(AssistantAIConfig).where(AssistantAIConfig.user_id == user_id)
-    ).all()
+    return created
 
 
 def ensure_default_members_for_user(session: Session, user_id: int) -> None:
@@ -233,22 +231,27 @@ def ensure_default_members_for_user(session: Session, user_id: int) -> None:
     try:
         from api.services.storage.agent_instructions import ensure_agent_md
 
-        all_cfgs = session.exec(
-            select(AssistantAIConfig).where(AssistantAIConfig.user_id == user_id)
-        ).all()
-        for cfg in all_cfgs:
+        for cfg in cfgs:
             ensure_agent_md(user_id, cfg)
     except Exception:
         pass
+    # Provision all runtime rows from one query.  The previous loop queried
+    # AIRuntimeStatus once per AI, which made startup cost grow linearly with
+    # the roster and was especially visible after a gateway restart.
+    statuses = session.exec(
+        select(AIRuntimeStatus).where(
+            AIRuntimeStatus.user_id == user_id,
+            AIRuntimeStatus.ai_kind == "assistant",
+        )
+    ).all()
+    status_by_config = {
+        int(status.ai_config_id): status
+        for status in statuses
+        if status.ai_config_id is not None
+    }
     changed = False
     for cfg in cfgs:
-        status = session.exec(
-            select(AIRuntimeStatus).where(
-                AIRuntimeStatus.user_id == user_id,
-                AIRuntimeStatus.ai_config_id == cfg.id,
-                AIRuntimeStatus.ai_kind == "assistant",
-            )
-        ).first()
+        status = status_by_config.get(int(cfg.id)) if cfg.id is not None else None
         if not status:
             status = AIRuntimeStatus(
                 user_id=user_id,

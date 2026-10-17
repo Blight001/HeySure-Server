@@ -2,7 +2,7 @@
 
 import base64
 import os
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from api.chat_runtime.chat_prompt_utils import _sanitize_large_media
 from api.services.mcp.mcp_tool_media import canonical_screenshot_tool_name
@@ -19,6 +19,98 @@ _IMAGE_URL_KEYS = ("image_url", "public_url")
 _IMAGE_PATH_KEYS = ("server_path", "path")
 _NESTED_PAYLOAD_KEYS = ("result", "payload", "data", "screenshot_result")
 _WORKSPACE_IMAGE_TOOL = "workspace.file+manage"
+_CANVAS_GENERATION_TOOLS = {
+    "canvas_image_generate",
+    "canvas_video_generate",
+}
+
+
+def _is_canvas_generation_tool(tool: str) -> bool:
+    """Recognize the Infinite Canvas generation tools, including namespaces."""
+
+    normalized = str(tool or "").strip().lower().replace("+", ".")
+    return any(
+        normalized == name or normalized.endswith(f".{name}")
+        for name in _CANVAS_GENERATION_TOOLS
+    )
+
+
+def _walk_payload(value: object, depth: int = 0) -> Iterator[dict[str, Any]]:
+    """Yield nested mappings from an endpoint/MCP result envelope.
+
+    Endpoint dispatch wraps the device result several times (``result`` /
+    ``payload`` / ``data``), while the device may itself return a list of
+    generated files.  Keep this traversal bounded because tool output is
+    untrusted and can contain cyclic/non-JSON objects in tests.
+    """
+
+    if depth > 7:
+        return
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_payload(child, depth + 1)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_payload(child, depth + 1)
+
+
+def _valid_generated_record(item: object) -> Optional[dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+    file_ref = str(item.get("file_ref") or "").strip()
+    workspace_path = str(item.get("workspace_path") or "").strip()
+    mime_type = str(item.get("mime_type") or "").strip().lower()
+    path_parts = workspace_path.replace("\\", "/").split("/")
+    if not file_ref or not workspace_path or workspace_path.startswith(("/", "\\")):
+        return None
+    if ".." in path_parts or not mime_type.startswith(("image/", "video/", "audio/")):
+        return None
+    try:
+        size = max(0, int(item.get("bytes") or 0))
+    except (TypeError, ValueError):
+        size = 0
+    return {
+        "file_ref": file_ref,
+        "workspace_path": workspace_path,
+        "file_name": str(item.get("file_name") or os.path.basename(workspace_path) or "generated-media").strip(),
+        "mime_type": mime_type,
+        "bytes": size,
+    }
+
+
+def generated_media_attachment_records(
+    tool: str,
+    tool_result: object,
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Extract server-workspace media uploaded by Infinite Canvas generation.
+
+    ``canvas_image_generate`` / ``canvas_video_generate`` return an
+    ``uploaded_files`` list after the device uploads generated artifacts to the
+    member workspace.  Returning these as chat attachments lets the history
+    API provide authenticated, durable URLs instead of exposing device-local
+    paths or expiring provider URLs.
+    """
+
+    if not _is_canvas_generation_tool(tool):
+        return []
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for mapping in _walk_payload(tool_result):
+        uploaded = mapping.get("uploaded_files")
+        if not isinstance(uploaded, list):
+            continue
+        for item in uploaded:
+            record = _valid_generated_record(item)
+            if not record or record["file_ref"] in seen:
+                continue
+            records.append(record)
+            seen.add(record["file_ref"])
+            if len(records) >= max(1, int(limit)):
+                return records
+    return records
 
 
 def is_image_input_unsupported_error(error_text: str) -> bool:

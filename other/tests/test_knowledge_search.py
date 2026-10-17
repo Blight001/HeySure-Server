@@ -47,3 +47,29 @@ def test_keyword_search_ranks_relevant_entry_first(monkeypatch):
 
     assert items, "expected keyword search to return results"
     assert items[0]["file_path"] == "topics/vector.md"
+
+
+def test_keyword_search_caches_unchanged_document_reads(monkeypatch):
+    tmp = tempfile.TemporaryDirectory()
+    monkeypatch.setattr(kb_store, "_kb_root", lambda _user_id: tmp.name)
+    os.makedirs(os.path.join(tmp.name, "topics"), exist_ok=True)
+    path = os.path.join(tmp.name, "topics", "cached.md")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("---\ntitle: 缓存\ntriggers: 缓存\n---\n正文\n")
+
+    reads = []
+    original_read = kb_store._read_text
+
+    def tracked_read(file_path):
+        reads.append(file_path)
+        return original_read(file_path)
+
+    monkeypatch.setattr(kb_store, "_read_text", tracked_read)
+    from api.services.knowledge import kb_search
+
+    kb_search._read_search_document.cache_clear()
+    first = kb_store.keyword_search_knowledge(user_id=1, query="缓存")
+    second = kb_store.keyword_search_knowledge(user_id=1, query="缓存")
+
+    assert first and second
+    assert sum(os.path.normpath(item) == os.path.normpath(path) for item in reads) == 1

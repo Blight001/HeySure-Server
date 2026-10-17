@@ -172,6 +172,7 @@ def attachment_url(row: ChatMessageAttachment) -> str:
 
 
 def attachment_payload(row: ChatMessageAttachment) -> dict[str, Any]:
+    mime_type = str(row.mime_type or "").lower()
     return {
         "id": row.id,
         "file_ref": row.file_ref,
@@ -179,7 +180,9 @@ def attachment_payload(row: ChatMessageAttachment) -> dict[str, Any]:
         "file_name": row.file_name,
         "mime_type": row.mime_type,
         "bytes": row.bytes,
-        "is_image": str(row.mime_type or "").startswith("image/"),
+        "is_image": mime_type.startswith("image/"),
+        "is_video": mime_type.startswith("video/"),
+        "is_audio": mime_type.startswith("audio/"),
         "url": attachment_url(row),
     }
 
