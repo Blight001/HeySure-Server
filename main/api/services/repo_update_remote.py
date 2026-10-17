@@ -47,6 +47,7 @@ def _adopt_active(remote_state: Dict[str, Any], phase: str) -> None:
         ),
         last_error="",
         logs=list(remote_state.get("logs") or [])[-120:],
+        release_manifest=remote_state.get("release_manifest"),
     )
 
 
@@ -58,6 +59,7 @@ def _apply_terminal(remote_state: Dict[str, Any], phase: str) -> None:
             message=_PHASE_MESSAGES["done"],
             last_error="",
             logs=list(remote_state.get("logs") or [])[-120:],
+            release_manifest=remote_state.get("release_manifest"),
         )
         repo_update._set_step(repo_update._STEP_PULL, "done")
         repo_update._set_step(repo_update._STEP_RESTART, "done")
