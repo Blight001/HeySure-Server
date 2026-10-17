@@ -396,8 +396,7 @@ async def dispatch_endpoint_tool(
     user_id: int,
     ai_config_id: Optional[int],
     tool: str,
-    args: Optional[Dict[str, Any]] = None,
-    timeout_seconds: int = 120,
+    args: Optional[Dict[str, Any]] = None, timeout_seconds: int = 120,
 ) -> Optional[str]:
     """Fire-and-forget variant of :func:`dispatch_endpoint_tool_and_wait`.
 
@@ -479,8 +478,7 @@ async def dispatch_endpoint_tool(
         tool=tool_name,
         args=args or {},
         allowed_tools=[tool_name],
-        wait_for_result=False,
-        timeout_seconds=max(1, int(timeout_seconds or 120)),
+        wait_for_result=False, timeout_seconds=max(1, int(timeout_seconds or 120)),
         suppress_session_message=True,
     )
     return str(result.get("taskId") or "") or None
@@ -561,13 +559,7 @@ def _endpoint_timeout_seconds(tool: str, args: Dict[str, Any], fallback: int) ->
         except (TypeError, ValueError):
             continue
         if parsed > 0:
-            normalized_tool = str(tool or "").strip().lower().replace("+", ".")
-            max_timeout = 600 if any(
-                normalized_tool == name
-                or normalized_tool.endswith(f".{name}")
-                for name in ("canvas_generation_video", "canvas_video_generate")
-            ) else 300
-            return max(1, min(max_timeout, parsed))
+            return max(1, min(300, parsed))
     if str(tool or "") == "browser_screenshot":
         return max(1, min(60, int(fallback or 35)))
     return max(1, int(fallback or 120))
