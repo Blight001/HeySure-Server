@@ -65,6 +65,11 @@ def _adopt_active(remote_state: Dict[str, Any], phase: str) -> None:
 
 def _apply_terminal(remote_state: Dict[str, Any], phase: str) -> None:
     if phase == "done":
+        deployed = remote_state.get("deployed_current") or {}
+        to_sha = str(deployed.get("sha") or remote_state.get("deployed_sha") or "")
+        from_sha = str(remote_state.get("update_from") or "")
+        if to_sha:
+            repo_update._record_last_update(from_sha=from_sha, to_sha=to_sha)
         repo_update._set_state(
             phase="done",
             running=False,
