@@ -27,14 +27,19 @@ def _rendered_services(data_root: Path) -> dict[str, object]:
     bind = lambda source, target: {"type": "bind", "source": str(source), "target": target}
     return {
         "db": {
+            "image": "postgres:16-alpine",
             "environment": {"PGDATA": "/var/lib/postgresql/data/postgres"},
             "volumes": [bind(data_root, "/var/lib/postgresql/data")],
         },
         **{
-            service: {"volumes": [bind(data_root / "app", "/app/data")]}
+            service: {
+                "image": "heysure-server@sha256:" + "a" * 64,
+                "volumes": [bind(data_root / "app", "/app/data")],
+            }
             for service in RUNTIME_SERVICES
         },
-        "web": {"volumes": []},
+        "db-migrate": {"image": "heysure-server@sha256:" + "a" * 64},
+        "web": {"image": "heysure-web@sha256:" + "b" * 64, "volumes": []},
     }
 
 
@@ -50,6 +55,24 @@ def test_rendered_compose_accepts_only_canonical_persistent_mounts(tmp_path: Pat
     services = _rendered_services(data_root)
 
     validate_rendered_compose(tmp_path, data_root, ["docker", "compose"], _rendered_runner(services))
+
+
+def test_rendered_compose_rejects_production_build_definition(tmp_path: Path):
+    data_root = (tmp_path / "data").resolve()
+    services = _rendered_services(data_root)
+    services["web"]["build"] = {"context": "./deploy/web"}
+
+    with pytest.raises(ReleaseSafetyError, match="must not build"):
+        validate_rendered_compose(tmp_path, data_root, ["docker", "compose"], _rendered_runner(services))
+
+
+def test_rendered_compose_rejects_mutable_image_tag(tmp_path: Path):
+    data_root = (tmp_path / "data").resolve()
+    services = _rendered_services(data_root)
+    services["web"]["image"] = "heysure-web:latest"
+
+    with pytest.raises(ReleaseSafetyError, match="immutable digest"):
+        validate_rendered_compose(tmp_path, data_root, ["docker", "compose"], _rendered_runner(services))
 
 
 @pytest.mark.parametrize("service", ["api-gateway", "web"])

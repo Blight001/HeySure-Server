@@ -1,9 +1,10 @@
-"""Readiness-gated Compose release with per-service image rollback.
+"""Readiness-gated Compose release with prebuilt, fixed images.
 
-Run from any directory after CI passes. The script builds the migration and
-runtime images first, migrates once, replaces one runtime at a time, and never
-advances until the new container reports ready. An old image is restored only
-when the database revision did not change during this release.
+Run from any directory after CI has published the images referenced by the
+Compose environment. The server only pulls those images, migrates once,
+replaces one runtime at a time, and never advances until the new container
+reports ready. An old image is restored only when the database revision did
+not change during this release.
 """
 
 from __future__ import annotations
@@ -105,7 +106,9 @@ def database_revision() -> str:
 
 def release(timeout: float) -> None:
     compose("up", "-d", "db")
-    compose("build", "db-migrate", *(service for service, _port in SERVICES))
+    # Production never builds on the host. Images are built and scanned by CI;
+    # this command only resolves the exact image references supplied by env.
+    compose("pull", "db-migrate", *(service for service, _port in SERVICES))
     revision_before = database_revision()
     compose("run", "--rm", "db-migrate")
     revision_changed = database_revision() != revision_before

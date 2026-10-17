@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import json
 import secrets
-import socket
 import subprocess
 import sys
 import time
@@ -20,53 +19,6 @@ RunCommand = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 RunStreaming = Callable[[list[str], float, Optional[dict[str, str]]], None]
 LogLine = Callable[[str], None]
 SetPhase = Callable[[str, str], None]
-
-
-def _proxy_configured(root: Path) -> bool:
-    """Return whether the checkout .env declares a Docker proxy."""
-    try:
-        lines = (root / ".env").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    names = {"DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "DOCKER_ALL_PROXY"}
-    return any(
-        "=" in line
-        and not line.lstrip().startswith("#")
-        and line.split("=", 1)[0].strip() in names
-        and bool(line.split("=", 1)[1].strip().strip("\"'"))
-        for line in lines
-    )
-
-
-def _docker_build_environment(root: Path) -> dict[str, str]:
-    """Use host networking and the loopback proxy for Docker builds when available."""
-    environment = dict(os.environ)
-    environment["DOCKER_BUILD_NETWORK"] = "host"
-    if not _proxy_configured(root):
-        return environment
-    try:
-        with socket.create_connection(("127.0.0.1", 7890), timeout=1):
-            pass
-    except OSError:
-        # An unusable proxy in .env must not leak into the build.  Empty
-        # process environment values take precedence over Compose's .env.
-        for name in (
-            "DOCKER_HTTP_PROXY",
-            "DOCKER_HTTPS_PROXY",
-            "DOCKER_ALL_PROXY",
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ):
-            environment[name] = ""
-        return environment
-    proxy = "http://127.0.0.1:7890"
-    for name in ("DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY", "DOCKER_ALL_PROXY"):
-        environment[name] = proxy
-    return environment
 
 
 class ReleaseSafetyError(RuntimeError):
@@ -212,6 +164,19 @@ def validate_rendered_compose(
     if any(_overlaps(source, expected_data) for _target, source, _kind in mounts("web")):
         raise ReleaseSafetyError("rendered compose exposes persistent data to Web")
 
+    image_services = (*RUNTIME_SERVICES, "db-migrate", "web")
+    for service in image_services:
+        definition = services[service]
+        if definition.get("build"):
+            raise ReleaseSafetyError(f"production Compose must not build images: {service}")
+        image = str(definition.get("image") or "").strip()
+        if not image:
+            raise ReleaseSafetyError(f"production Compose image is missing: {service}")
+        if "@sha256:" not in image:
+            raise ReleaseSafetyError(
+                f"production Compose image must use an immutable digest: {service}"
+            )
+
 
 def create_postgres_backup(
     root: Path,
@@ -286,7 +251,7 @@ def deploy_release(
     release_script = root / "deploy" / "server" / "other" / "scripts" / "rolling_release.py"
     if not release_script.is_file():
         raise ReleaseSafetyError("target version does not contain rolling_release.py")
-    environment = _docker_build_environment(root)
+    environment = dict(os.environ)
     environment["HEYSURE_COMPOSE_DIR"] = str(root.resolve())
     set_phase("rebuilding", "running readiness-gated server release")
     log("开始执行数据库迁移与四 Runtime 滚动发布...")
@@ -295,9 +260,9 @@ def deploy_release(
         2400,
         environment,
     )
-    set_phase("restarting", "building and replacing web service")
-    log("Runtime 已通过 readiness，开始构建 Web...")
-    run_streaming(_compose(compose_cmd, "build", "web"), 1800, environment)
+    set_phase("restarting", "pulling and replacing web service")
+    log("Runtime 已通过 readiness，开始拉取并替换 Web...")
+    run_streaming(_compose(compose_cmd, "pull", "web"), 600, environment)
     run(_compose(compose_cmd, "up", "-d", "--no-deps", "web"), 300)
     _container_id(run, compose_cmd, "web")
     run(["curl", "-fsS", "http://127.0.0.1:3000/"], 30)

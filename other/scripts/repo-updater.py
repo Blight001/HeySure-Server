@@ -5,7 +5,8 @@ The API gateway runs inside Docker and often does not have the host Git
 workspace mounted. This tiny HTTP service runs on the host, receives requests
 from the gateway, and performs the real deployment update in the workspace:
 
-    git fetch -> git pull --ff-only -> git submodule update -> docker compose up
+    git fetch -> git merge --ff-only -> sync deploy/server + deploy/web ->
+    docker compose pull -> readiness-gated Compose replacement
 
 Bind it to 0.0.0.0 and expose it to containers through host.docker.internal.
 """

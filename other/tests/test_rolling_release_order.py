@@ -1,7 +1,7 @@
 from other.scripts import rolling_release
 
 
-def test_release_builds_migration_image_before_running_migration(monkeypatch):
+def test_release_pulls_fixed_images_before_running_migration(monkeypatch):
     calls = []
     revisions = iter(["old", "new"])
 
@@ -12,10 +12,10 @@ def test_release_builds_migration_image_before_running_migration(monkeypatch):
 
     rolling_release.release(10)
 
-    build_index = next(i for i, call in enumerate(calls) if call[0] == "build")
+    pull_index = next(i for i, call in enumerate(calls) if call[0] == "pull")
     migrate_index = calls.index(("run", "--rm", "db-migrate"))
-    assert "db-migrate" in calls[build_index]
-    assert build_index < migrate_index
+    assert "db-migrate" in calls[pull_index]
+    assert pull_index < migrate_index
 
 
 def test_release_does_not_restore_old_image_after_revision_advance(monkeypatch):
