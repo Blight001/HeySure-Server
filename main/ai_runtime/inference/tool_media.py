@@ -22,6 +22,11 @@ _WORKSPACE_IMAGE_TOOL = "workspace.file+manage"
 _CANVAS_GENERATION_TOOLS = {
     "canvas_image_generate",
     "canvas_video_generate",
+    # Infinite Canvas MCP's current public contract uses the
+    # ``canvas_generation_*`` names. Keep the older aliases for devices that
+    # have not refreshed their advertised tool catalog yet.
+    "canvas_generation_image",
+    "canvas_generation_video",
 }
 
 
@@ -87,11 +92,11 @@ def generated_media_attachment_records(
 ) -> list[dict[str, Any]]:
     """Extract server-workspace media uploaded by Infinite Canvas generation.
 
-    ``canvas_image_generate`` / ``canvas_video_generate`` return an
-    ``uploaded_files`` list after the device uploads generated artifacts to the
-    member workspace.  Returning these as chat attachments lets the history
-    API provide authenticated, durable URLs instead of exposing device-local
-    paths or expiring provider URLs.
+    ``canvas_generation_image`` / ``canvas_generation_video`` return an
+    ``uploaded_files``/``heysure_attachments`` list after the device uploads
+    generated artifacts to the member workspace. Returning these as chat
+    attachments lets the history API provide authenticated, durable URLs
+    instead of exposing device-local paths or expiring provider URLs.
     """
 
     if not _is_canvas_generation_tool(tool):
@@ -99,17 +104,18 @@ def generated_media_attachment_records(
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
     for mapping in _walk_payload(tool_result):
-        uploaded = mapping.get("uploaded_files")
-        if not isinstance(uploaded, list):
-            continue
-        for item in uploaded:
-            record = _valid_generated_record(item)
-            if not record or record["file_ref"] in seen:
+        for key in ("uploaded_files", "heysure_attachments"):
+            uploaded = mapping.get(key)
+            if not isinstance(uploaded, list):
                 continue
-            records.append(record)
-            seen.add(record["file_ref"])
-            if len(records) >= max(1, int(limit)):
-                return records
+            for item in uploaded:
+                record = _valid_generated_record(item)
+                if not record or record["file_ref"] in seen:
+                    continue
+                records.append(record)
+                seen.add(record["file_ref"])
+                if len(records) >= max(1, int(limit)):
+                    return records
     return records
 
 
