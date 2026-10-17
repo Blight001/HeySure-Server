@@ -12,9 +12,30 @@ from connector_runtime.dispatch.device_dispatch import dispatch_endpoint_tool_an
 
 
 LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT = 900
+CANVAS_IMAGE_GENERATION_TIMEOUT = 300
+CANVAS_VIDEO_GENERATION_TIMEOUT = 600
 ENDPOINT_RESULT_DELIVERY_GRACE = 120
 ENDPOINT_DISPATCH_TIMEOUT_CAP = 1800
 WORKFLOW_CHAT_WAIT_GRACE_SECONDS = 300
+
+
+def _canvas_generation_timeout(tool: str) -> int:
+    """Return the synchronous wait budget for Infinite Canvas media tools."""
+
+    normalized = str(tool or "").strip().lower().replace("+", ".")
+    if normalized == "canvas_generation_image" or normalized.endswith(
+        ".canvas_generation_image"
+    ) or normalized == "canvas_image_generate" or normalized.endswith(
+        ".canvas_image_generate"
+    ):
+        return CANVAS_IMAGE_GENERATION_TIMEOUT
+    if normalized == "canvas_generation_video" or normalized.endswith(
+        ".canvas_generation_video"
+    ) or normalized == "canvas_video_generate" or normalized.endswith(
+        ".canvas_video_generate"
+    ):
+        return CANVAS_VIDEO_GENERATION_TIMEOUT
+    return 0
 
 
 def mcp_call_timeout(tool: str, arguments: dict) -> float:
@@ -88,6 +109,7 @@ async def dispatch_endpoint_via_runtime(
                 "ai_config_id": ai_config_id,
                 "tool": tool,
                 "arguments": arguments,
+                "timeout_seconds": int(timeout_seconds),
             },
         )
         response.raise_for_status()
@@ -156,6 +178,7 @@ async def _expire_dispatch(client, task_id, headers, timeout_seconds):
 
 def endpoint_dispatch_timeout(tool: str, arguments: dict) -> int:
     args = arguments if isinstance(arguments, dict) else {}
+    media_timeout = _canvas_generation_timeout(tool)
     raw = args.get("timeout_seconds")
     if raw is not None:
         try:
@@ -166,6 +189,8 @@ def endpoint_dispatch_timeout(tool: str, arguments: dict) -> int:
             )
         except (TypeError, ValueError):
             pass
+    if media_timeout:
+        return media_timeout
     action = str(args.get("action") or "").strip().lower()
     if (tool == "manage_card" and action in {"run", "execute"}) or tool == "run_card":
         return LONG_RUN_ENDPOINT_DEFAULT_TIMEOUT

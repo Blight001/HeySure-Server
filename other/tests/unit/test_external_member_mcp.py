@@ -574,6 +574,15 @@ def test_endpoint_outer_timeout_follows_dispatch_deadline_with_safety(monkeypatc
     assert external_transport.external_tool_timeout("workspace.search", {}) == 180
 
 
+def test_canvas_generation_wait_budgets_cover_slow_media_jobs():
+    from ai_runtime.inference.runtime_clients import endpoint_dispatch_timeout
+
+    assert endpoint_dispatch_timeout("canvas_generation_image", {}) == 300
+    assert endpoint_dispatch_timeout("canvas_generation_video", {}) == 600
+    assert endpoint_dispatch_timeout("canvas_image_generate", {}) == 300
+    assert endpoint_dispatch_timeout("canvas_video_generate", {}) == 600
+
+
 def test_workflow_timeout_reuses_internal_mcp_deadline_and_codex_covers_it(monkeypatch):
     monkeypatch.setattr(
         "connector_runtime.dispatch.desktop_device_tools.is_endpoint_agent_tool",

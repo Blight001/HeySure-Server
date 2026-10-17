@@ -44,6 +44,7 @@ async def device_dispatch(req: DeviceDispatchRequest) -> Dict[str, Any]:
             ai_config_id=req.ai_config_id,
             tool=req.tool,
             args=req.arguments,
+            timeout_seconds=req.timeout_seconds,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"dispatch failed: {exc}")
