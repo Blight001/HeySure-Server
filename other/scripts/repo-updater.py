@@ -125,6 +125,8 @@ _DEPLOYMENT_PATHS = (
     "docker-compose.yml",
     ".github/workflows/container-release.yml",
 )
+_MANIFEST_WAIT_ATTEMPTS = 12
+_MANIFEST_WAIT_SECONDS = 5.0
 
 
 def _read_dotenv_key(name: str) -> str:
@@ -263,6 +265,31 @@ def _metadata_only_update(target_sha: str) -> bool:
     )
 
 
+def _manifest_for_release(target_sha: str) -> dict[str, Any] | None:
+    """Wait briefly for CI to publish the manifest for a deployment commit."""
+    last_error: Exception | None = None
+    for attempt in range(_MANIFEST_WAIT_ATTEMPTS):
+        try:
+            manifest = _release_manifest()
+            if str(manifest.get("root_commit") or "") == target_sha:
+                return manifest
+            if _metadata_only_update(target_sha):
+                return None
+            last_error = ReleaseManifestError(
+                "release-manifest root_commit 与目标版本不一致"
+            )
+        except ReleaseManifestError as exc:
+            last_error = exc
+        if attempt + 1 < _MANIFEST_WAIT_ATTEMPTS:
+            _set_state(
+                phase="waiting_manifest",
+                message="等待 CI 发布匹配的 release-manifest…",
+            )
+            time.sleep(_MANIFEST_WAIT_SECONDS)
+    assert last_error is not None
+    raise last_error
+
+
 def _rollback_candidate(target_sha: str) -> tuple[str, dict[str, Any]]:
     result = rollback_candidate(_git_output, _server_git_output, target_sha)
     ensure_clean_worktree(_git, UpdateError)
@@ -349,27 +376,24 @@ def _publish_checked_out_version(expected_sha: str, *, apply_ci_manifest: bool =
     _verify_expected_checkout(expected_sha)
     manifest = None
     if apply_ci_manifest:
-        manifest = _release_manifest()
-        if str(manifest.get("root_commit") or "") != expected_sha:
-            if _metadata_only_update(expected_sha):
-                # Device/docs-only root commits deliberately do not produce a
-                # new container manifest.  Advance the deployed marker without
-                # touching images or restarting services.
-                version = _deployment_snapshot()
-                _write_version_file(version)
-                _append_log("仅非部署文件更新，已同步部署版本标记（无需重建容器）")
-                _set_state(
-                    running=False,
-                    phase="done",
-                    message="deployment metadata updated",
-                    last_error="",
-                    deployed_current=version.get("current"),
-                    checkout_sha=((version.get("current") or {}).get("sha")),
-                    deployed_sha=((version.get("current") or {}).get("sha")),
-                    deployment_consistent=True,
-                )
-                return
-            raise ReleaseManifestError("release-manifest root_commit 与目标版本不一致")
+        manifest = _manifest_for_release(expected_sha)
+        if manifest is None:
+            # Device/docs-only root commits deliberately do not produce a new
+            # container manifest.  Advance the marker without restarting.
+            version = _deployment_snapshot()
+            _write_version_file(version)
+            _append_log("仅非部署文件更新，已同步部署版本标记（无需重建容器）")
+            _set_state(
+                running=False,
+                phase="done",
+                message="deployment metadata updated",
+                last_error="",
+                deployed_current=version.get("current"),
+                checkout_sha=((version.get("current") or {}).get("sha")),
+                deployed_sha=((version.get("current") or {}).get("sha")),
+                deployment_consistent=True,
+            )
+            return
         _apply_release_manifest(manifest)
         _set_state(
             release_manifest={
