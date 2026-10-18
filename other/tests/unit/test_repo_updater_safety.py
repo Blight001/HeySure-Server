@@ -16,6 +16,7 @@ from other.scripts.repo_updater_commands import run_streaming
 from other.scripts.repo_updater_release import (
     RUNTIME_SERVICES,
     ReleaseSafetyError,
+    _wait_http,
     create_postgres_backup,
     validate_deployment_layout,
     validate_rendered_compose,
@@ -145,6 +146,21 @@ def test_streaming_command_times_out_without_output(tmp_path: Path):
         )
 
     assert time.monotonic() - started < 2
+
+
+def test_web_http_readiness_retries_after_container_start():
+    attempts = 0
+
+    def run(_command: list[str], _timeout: float) -> subprocess.CompletedProcess[str]:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RuntimeError("connection refused")
+        return subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+
+    _wait_http(run, "http://127.0.0.1:58150/", timeout=5)
+
+    assert attempts == 3
 
 
 def test_backup_is_validated_and_never_world_readable(tmp_path: Path, monkeypatch):

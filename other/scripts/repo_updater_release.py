@@ -238,6 +238,18 @@ def prepare_release(
     return create_postgres_backup(root, data_root, compose_cmd, run, target_sha)
 
 
+def _wait_http(run: RunCommand, url: str, timeout: float = 60.0) -> None:
+    """Wait for a freshly replaced HTTP service to accept requests."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            run(["curl", "-fsS", url], 10)
+            return
+        except Exception:
+            time.sleep(2)
+    raise ReleaseSafetyError(f"HTTP readiness timed out: {url}")
+
+
 def deploy_release(
     root: Path,
     data_root: Path,
@@ -265,6 +277,6 @@ def deploy_release(
     run_streaming(_compose(compose_cmd, "pull", "web"), 600, environment)
     run(_compose(compose_cmd, "up", "-d", "--no-deps", "web"), 300)
     _container_id(run, compose_cmd, "web")
-    run(["curl", "-fsS", "http://127.0.0.1:3000/"], 30)
-    run(["curl", "-fsS", "http://127.0.0.1:58150/"], 30)
+    _wait_http(run, "http://127.0.0.1:3000/")
+    _wait_http(run, "http://127.0.0.1:58150/")
     validate_deployment_layout(root, data_root, compose_cmd, run)
