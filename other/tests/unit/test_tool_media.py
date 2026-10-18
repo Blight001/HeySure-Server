@@ -39,6 +39,48 @@ def test_workspace_attachment_records_are_mime_agnostic():
     assert records[0]["resource_kind"] == "file"
 
 
+def test_asset_library_uploads_use_the_same_workspace_attachment_contract():
+    result = {
+        "items": [{"url": "/assets/library/local-preview.png"}],
+        "heysure_attachments": [
+            {
+                "file_ref": "file_" + "e" * 32,
+                "workspace_path": "Uploads/local-preview.png",
+                "file_name": "local-preview.png",
+                "mime_type": "image/png",
+                "bytes": 256,
+            },
+            {
+                "file_ref": "file_" + "f" * 32,
+                "workspace_path": "Uploads/guide.pdf",
+                "file_name": "guide.pdf",
+                "mime_type": "application/pdf",
+                "bytes": 512,
+            },
+            {
+                "file_ref": "file_" + "g" * 32,
+                "workspace_path": "Uploads/demo.mp4",
+                "file_name": "demo.mp4",
+                "mime_type": "video/mp4",
+                "bytes": 1024,
+            },
+        ],
+    }
+
+    records = workspace_attachment_records(result, limit=5)
+
+    assert [item["file_name"] for item in records] == [
+        "local-preview.png",
+        "guide.pdf",
+        "demo.mp4",
+    ]
+    assert [item["mime_type"] for item in records] == [
+        "image/png",
+        "application/pdf",
+        "video/mp4",
+    ]
+
+
 def test_infinite_canvas_generated_files_are_extracted_from_nested_dispatch_result():
     result = {
         "result": {

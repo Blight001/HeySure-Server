@@ -76,6 +76,9 @@ def test_bind_and_history_payload_keep_only_workspace_reference():
     assert payload["workspace_path"] == "Uploads/example.txt"
     assert "server_path" not in payload
     assert payload["url"].startswith("/api/chat/attachments/")
+    assert payload["resource_url"].startswith("/api/chat/resources/")
+    assert payload["preview_url"] == payload["resource_url"]
+    assert payload["download_url"] == payload["url"]
 
 
 def test_attachment_payload_marks_video_for_inline_player():
