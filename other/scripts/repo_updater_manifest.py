@@ -10,6 +10,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 DEFAULT_MANIFEST_URL = (
@@ -35,7 +36,19 @@ def fetch_manifest(
     read_env, *, timeout: float = 20.0, attempts: int = 3
 ) -> dict[str, Any]:
     url = manifest_url(read_env)
-    headers = {"Accept": "application/json", "User-Agent": "heysure-repo-updater/1"}
+    parts = urlsplit(url)
+    if parts.hostname == "raw.githubusercontent.com":
+        # Raw GitHub is fronted by a CDN.  A stale cached manifest is unsafe:
+        # the checkout can be newer than the digest manifest seen by the host.
+        query = parse_qsl(parts.query, keep_blank_values=True)
+        query.append(("_heysure_refresh", str(time.time_ns())))
+        url = urlunsplit(parts._replace(query=urlencode(query)))
+    headers = {
+        "Accept": "application/json",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "User-Agent": "heysure-repo-updater/1",
+    }
     token = os.environ.get("HEYSURE_RELEASE_MANIFEST_TOKEN") or read_env(
         "HEYSURE_RELEASE_MANIFEST_TOKEN"
     )
