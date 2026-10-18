@@ -31,7 +31,9 @@ def manifest_url(read_env) -> str:
     ).strip()
 
 
-def fetch_manifest(read_env, *, timeout: float = 20.0) -> dict[str, Any]:
+def fetch_manifest(
+    read_env, *, timeout: float = 20.0, attempts: int = 3
+) -> dict[str, Any]:
     url = manifest_url(read_env)
     headers = {"Accept": "application/json", "User-Agent": "heysure-repo-updater/1"}
     token = os.environ.get("HEYSURE_RELEASE_MANIFEST_TOKEN") or read_env(
@@ -40,11 +42,20 @@ def fetch_manifest(read_env, *, timeout: float = 20.0) -> dict[str, Any]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:  # pragma: no cover - network errors are integration concerns
-        raise ReleaseManifestError(f"无法读取 CI release-manifest：{exc}") from exc
+    last_error: Exception | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            break
+        except Exception as exc:  # pragma: no cover - network errors are integration concerns
+            last_error = exc
+            if attempt + 1 < max(1, attempts):
+                time.sleep(1.0 * (attempt + 1))
+    else:
+        raise ReleaseManifestError(
+            f"无法读取 CI release-manifest：{last_error}"
+        ) from last_error
     if not isinstance(payload, dict):
         raise ReleaseManifestError("release-manifest 格式无效")
     images = payload.get("images")
