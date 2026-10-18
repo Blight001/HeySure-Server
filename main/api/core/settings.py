@@ -172,6 +172,12 @@ class Settings(BaseSettings):
         description="Public HTTP(S) base URL used when generating externally fetchable "
         "links, for example https://api.example.com. Empty = derive from request host.",
     )
+    media_source_url: str = Field(
+        default="http://127.0.0.1:58112",
+        alias="HEYSURE_MEDIA_SOURCE_URL",
+        description="Trusted local media source used to import relative Infinite Canvas "
+        "resource paths into the member workspace before exposing chat attachments.",
+    )
     agent_socket_url: str = Field(
         default="",
         description="Public Socket.IO base URL endpoint agents should connect to. "
@@ -400,6 +406,7 @@ class Settings(BaseSettings):
         "clawhub_registry_url",
         "clawhub_api_token",
         "public_base_url",
+        "media_source_url",
         "agent_socket_url",
         "timezone",
         "workflow_encryption_secret",

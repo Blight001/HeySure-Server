@@ -1,4 +1,42 @@
-from ai_runtime.inference.tool_media import generated_media_attachment_records
+from ai_runtime.inference.tool_media import (
+    generated_media_attachment_records,
+    workspace_attachment_records,
+)
+
+
+def test_prompt_library_references_are_extracted_for_workspace_import():
+    result = {
+        "data": {
+            "items": [{
+                "name": "示例",
+                "reference_image": "/api/gpt-image-2/images/case1.jpg",
+                "reference_images": ["/api/gpt-image-2/images/case1.jpg"],
+            }],
+        },
+    }
+
+    records = generated_media_attachment_records("canvas_prompt_list", result)
+
+    assert len(records) == 1
+    assert records[0]["source_url"] == "/api/gpt-image-2/images/case1.jpg"
+    assert records[0]["file_name"] == "case1.jpg"
+
+
+def test_workspace_attachment_records_are_mime_agnostic():
+    result = {
+        "heysure_attachments": [{
+            "file_ref": "file_" + "d" * 32,
+            "workspace_path": "Uploads/report.pdf",
+            "file_name": "report.pdf",
+            "mime_type": "application/pdf",
+            "bytes": 128,
+        }],
+    }
+
+    records = workspace_attachment_records(result)
+
+    assert records[0]["mime_type"] == "application/pdf"
+    assert records[0]["resource_kind"] == "file"
 
 
 def test_infinite_canvas_generated_files_are_extracted_from_nested_dispatch_result():

@@ -65,8 +65,7 @@ async def upload_chat_attachment(
     return record
 
 
-@router.get("/attachments/{attachment_id}/{token}")
-def serve_chat_attachment(
+def _serve_chat_resource(
     attachment_id: int,
     token: str,
     session: Session = Depends(get_session),
@@ -76,12 +75,33 @@ def serve_chat_attachment(
         record["server_path"],
         media_type=row.mime_type or "application/octet-stream",
         filename=row.file_name,
-        # Generated Infinite Canvas videos/audio must be streamable by the
-        # conversation UI.  Keep arbitrary documents as downloads.
+        # Images, media, PDFs and text are safe browser previews. Office and
+        # archive formats remain downloads while sharing the same resource URL.
         content_disposition_type=(
             "inline"
-            if str(row.mime_type or "").lower().startswith(("image/", "video/", "audio/"))
+            if str(row.mime_type or "").lower().startswith(("image/", "video/", "audio/", "text/"))
+            or str(row.mime_type or "").lower() == "application/pdf"
             else "attachment"
         ),
         headers={"Cache-Control": "private, max-age=31536000, immutable"},
     )
+
+
+@router.get("/attachments/{attachment_id}/{token}")
+def serve_chat_attachment(
+    attachment_id: int,
+    token: str,
+    session: Session = Depends(get_session),
+):
+    return _serve_chat_resource(attachment_id, token, session)
+
+
+@router.get("/resources/{attachment_id}/{token}")
+def serve_chat_resource(
+    attachment_id: int,
+    token: str,
+    session: Session = Depends(get_session),
+):
+    """Stable MIME-agnostic alias for future image/audio/document clients."""
+
+    return _serve_chat_resource(attachment_id, token, session)

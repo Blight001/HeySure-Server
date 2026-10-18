@@ -171,8 +171,32 @@ def attachment_url(row: ChatMessageAttachment) -> str:
     return f"/api/chat/attachments/{row.id}/{row.token}"
 
 
+def attachment_kind(mime_type: str) -> str:
+    """Return the stable UI resource kind shared by every chat attachment."""
+
+    mime = str(mime_type or "").lower()
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("audio/"):
+        return "audio"
+    if mime.startswith("video/"):
+        return "video"
+    if mime == "application/pdf":
+        return "pdf"
+    if mime.startswith("text/") or mime in {"application/json", "application/xml"}:
+        return "text"
+    if "spreadsheet" in mime or mime in {"application/vnd.ms-excel", "text/csv"}:
+        return "spreadsheet"
+    if "word" in mime or "document" in mime or mime in {"application/rtf"}:
+        return "document"
+    return "binary"
+
+
 def attachment_payload(row: ChatMessageAttachment) -> dict[str, Any]:
     mime_type = str(row.mime_type or "").lower()
+    kind = attachment_kind(mime_type)
+    url = attachment_url(row)
+    resource_url = f"/api/chat/resources/{row.id}/{row.token}"
     return {
         "id": row.id,
         "file_ref": row.file_ref,
@@ -183,7 +207,17 @@ def attachment_payload(row: ChatMessageAttachment) -> dict[str, Any]:
         "is_image": mime_type.startswith("image/"),
         "is_video": mime_type.startswith("video/"),
         "is_audio": mime_type.startswith("audio/"),
-        "url": attachment_url(row),
+        "is_pdf": mime_type == "application/pdf",
+        "is_text": kind == "text",
+        "is_document": kind == "document",
+        "is_spreadsheet": kind == "spreadsheet",
+        "kind": kind,
+        "resource_type": kind,
+        "can_preview": kind in {"image", "audio", "video", "pdf", "text"},
+        "url": url,
+        "resource_url": resource_url,
+        "preview_url": resource_url,
+        "download_url": url,
     }
 
 
