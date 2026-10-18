@@ -250,6 +250,20 @@ def test_deployed_marker_is_written_only_after_expected_checkout_revalidation(mo
     monkeypatch.setattr(updater, "deploy_release", lambda *_args: events.append("deploy"))
     monkeypatch.setattr(updater, "_deployment_snapshot", lambda: events.append("snapshot") or version)
     monkeypatch.setattr(updater, "_write_version_file", lambda payload: events.append(("write", payload)))
+    monkeypatch.setattr(
+        updater,
+        "_release_manifest",
+        lambda: {
+            "release_id": "test-release",
+            "root_commit": "a" * 40,
+            "generated_at": "now",
+            "images": {
+                "server": {"reference": "server@sha256:" + "a" * 64},
+                "web": {"reference": "web@sha256:" + "b" * 64},
+            },
+        },
+    )
+    monkeypatch.setattr(updater, "_apply_release_manifest", lambda _payload: None)
     monkeypatch.setattr(updater, "_append_log", lambda _line: None)
     monkeypatch.setattr(updater, "_set_state", lambda **_fields: None)
 
@@ -285,3 +299,52 @@ def test_release_failure_consistency_uses_deployed_marker(
     updater._mark_release_failed("update failed", subprocess.TimeoutExpired("git fetch", 180))
 
     assert captured["deployment_consistent"] is expected_consistent
+
+
+def test_blocked_update_reconciles_current_checkout_before_retry(monkeypatch):
+    updater = _load_host_updater()
+    blocked = iter([True, False])
+    events: list[object] = []
+
+    monkeypatch.setattr(updater, "_deployment_blocked", lambda: next(blocked))
+    monkeypatch.setattr(updater, "_git_output", lambda *_args, **_kwargs: "a" * 40)
+    monkeypatch.setattr(
+        updater,
+        "_prepare_checked_out_release",
+        lambda *_args: events.append("prepare"),
+    )
+
+    def publish(*_args, **kwargs):
+        events.append(("publish", kwargs.get("apply_ci_manifest")))
+        updater._state["deployment_consistent"] = True
+
+    monkeypatch.setattr(updater, "_publish_checked_out_version", publish)
+    monkeypatch.setattr(updater, "_append_log", lambda line: events.append(line))
+    monkeypatch.setattr(
+        updater,
+        "_compare",
+        lambda: {
+            "ahead": 0,
+            "behind": 0,
+            "branch": "main",
+            "upstream": "origin/main",
+            "current": {"sha": "a" * 40},
+            "remote": {"sha": "a" * 40},
+        },
+    )
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(updater.threading, "Thread", ImmediateThread)
+    result = updater._check_and_update(True)
+
+    assert result["reconciled"] is True
+    assert "prepare" in events
+    assert ("publish", None) in events
+    assert updater._lock.acquire(blocking=False) is True
+    updater._lock.release()

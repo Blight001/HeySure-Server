@@ -384,6 +384,36 @@ def _rebuild_worker(prepared: bool = False) -> None:
         _lock.release()
 
 
+def _rebuild_then_update_worker() -> None:
+    """Reconcile a stale deployment marker, then retry the requested update.
+
+    A release can leave the Git checkout ahead of the last successfully
+    published version when a readiness check fails after the checkout has
+    moved.  Previously that state permanently rejected every subsequent
+    update with HTTP 409 and required an operator to discover the separate
+    rebuild button.  Rebuilding the checked-out version is the safe recovery
+    operation; once it publishes successfully the normal update path can run
+    again under the same lock.
+    """
+    succeeded = False
+    try:
+        target_sha = _git_output(["rev-parse", "HEAD"], timeout=15)
+        _prepare_checked_out_release(target_sha, target_sha)
+        # Use the same immutable CI manifest and readiness gates as a manual
+        # rebuild; reconciliation must not mark an unverified image as live.
+        _publish_checked_out_version(target_sha)
+        _append_log("当前部署已重新对齐，继续检测远程更新...")
+        succeeded = True
+    except Exception as exc:
+        _mark_release_failed("rebuild failed", exc)
+    finally:
+        # _check_and_update owns the lock while this worker runs.  Release it
+        # before entering the normal update path so that it can acquire it.
+        _lock.release()
+    if succeeded:
+        _check_and_update(True)
+
+
 def _queue_rebuild() -> dict[str, Any]:
     if not _lock.acquire(blocking=False):
         return {"ok": False, "busy": True, "error": "another update or rebuild is already running", "state": dict(_state)}
@@ -506,7 +536,30 @@ def _check_and_update(apply: bool) -> dict[str, Any]:
     publish_queued = False
     try:
         if apply and _deployment_blocked():
-            return {"ok": False, "blocked": True, "error": "当前部署不一致，请先重建当前版本"}
+            _set_state(
+                running=True,
+                phase="queued_restart",
+                operation="update",
+                operation_id=secrets.token_hex(8),
+                message="检测到部署版本未对齐，正在自动重建当前版本…",
+                last_error="",
+                logs=[],
+                deployment_consistent=False,
+            )
+            _append_log("检测到部署版本与代码不一致，先自动重建当前版本")
+            threading.Thread(
+                target=_rebuild_then_update_worker,
+                name="heysure-reconcile-and-update",
+                daemon=True,
+            ).start()
+            release_lock = False
+            return {
+                "ok": True,
+                "updated": True,
+                "restarting": True,
+                "reconciled": True,
+                "state": dict(_state),
+            }
         _set_state(
             running=True,
             phase="checking",
