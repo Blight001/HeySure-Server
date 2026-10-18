@@ -295,6 +295,35 @@ def test_deployed_marker_is_written_only_after_expected_checkout_revalidation(mo
 
 
 @pytest.mark.parametrize(
+    ("changed_paths", "expected_blocked"),
+    [
+        (["device"], False),
+        (["deploy/web", "device"], True),
+    ],
+)
+def test_device_only_root_commit_does_not_block_deployment(
+    monkeypatch, changed_paths: list[str], expected_blocked: bool
+):
+    updater = _load_host_updater()
+    deployed_sha, checkout_sha = "a" * 40, "b" * 40
+    updater._state.pop("deployment_consistent", None)
+    monkeypatch.setattr(
+        updater, "_read_version_file", lambda: {"current": {"sha": deployed_sha}}
+    )
+
+    def git_output(args, **_kwargs):
+        if args == ["rev-parse", "HEAD"]:
+            return checkout_sha
+        if args[:2] == ["diff", "--name-only"]:
+            return "\n".join(changed_paths)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_git_output", git_output)
+
+    assert updater._deployment_blocked() is expected_blocked
+
+
+@pytest.mark.parametrize(
     ("checkout_sha", "deployed_sha", "expected_consistent"),
     [
         ("a" * 40, "a" * 40, True),

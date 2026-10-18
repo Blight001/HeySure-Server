@@ -116,6 +116,16 @@ COMPOSE_CMD = shlex.split(os.environ.get("HEYSURE_REPO_UPDATER_COMPOSE_CMD", "do
 DATA_ROOT = (ROOT / "deploy/server/data" if ROOT != REQUIRED_ROOT else DEFAULT_DATA_ROOT).resolve()
 VERSION_FILE = DATA_ROOT / "app" / "deployed-version.json"
 
+# Root commits may advance device-only submodules without changing either
+# production image.  Those commits must not force a container rebuild or make
+# the host wait for a release manifest that CI intentionally does not publish.
+_DEPLOYMENT_PATHS = (
+    "deploy/server",
+    "deploy/web",
+    "docker-compose.yml",
+    ".github/workflows/container-release.yml",
+)
+
 
 def _read_dotenv_key(name: str) -> str:
     env_path = ROOT / ".env"
@@ -225,6 +235,34 @@ def _version_history(limit: int = DEFAULT_VERSION_LIMIT) -> dict[str, Any]:
     return version_history(_git_output, _server_git_output, limit)
 
 
+def _has_deployment_changes(base_sha: str, target_sha: str) -> bool:
+    """Return whether a root range changes files that require a release."""
+    if not base_sha or not target_sha or base_sha == target_sha:
+        return False
+    try:
+        changed = _git_output(
+            ["diff", "--name-only", f"{base_sha}..{target_sha}"], timeout=30
+        ).splitlines()
+    except Exception:
+        # A missing or malformed range must fail closed: never treat an
+        # uncertain checkout as metadata-only.
+        return True
+    return any(
+        path == prefix or path.startswith(prefix + "/")
+        for path in changed
+        for prefix in _DEPLOYMENT_PATHS
+    )
+
+
+def _metadata_only_update(target_sha: str) -> bool:
+    """Whether target only contains non-production root changes."""
+    cached = _read_version_file() or {}
+    deployed_sha = str((cached.get("current") or {}).get("sha") or "")
+    return bool(deployed_sha and deployed_sha != target_sha) and not _has_deployment_changes(
+        deployed_sha, target_sha
+    )
+
+
 def _rollback_candidate(target_sha: str) -> tuple[str, dict[str, Any]]:
     result = rollback_candidate(_git_output, _server_git_output, target_sha)
     ensure_clean_worktree(_git, UpdateError)
@@ -236,16 +274,19 @@ def _version() -> dict[str, Any]:
 
 
 def _deployment_blocked() -> bool:
-    if _state.get("deployment_consistent") is False:
-        return True
     cached = _read_version_file()
     if not cached:
-        return False
+        return _state.get("deployment_consistent") is False
     try:
         checkout_sha = _git_output(["rev-parse", "HEAD"], timeout=15)
     except Exception:
         return True
-    return ((cached.get("current") or {}).get("sha") or "") != checkout_sha
+    deployed_sha = str((cached.get("current") or {}).get("sha") or "")
+    if deployed_sha == checkout_sha:
+        return _state.get("deployment_consistent") is False
+    if not _has_deployment_changes(deployed_sha, checkout_sha):
+        return False
+    return True
 
 
 def _safe_version_history(limit: int) -> dict[str, Any]:
@@ -310,6 +351,24 @@ def _publish_checked_out_version(expected_sha: str, *, apply_ci_manifest: bool =
     if apply_ci_manifest:
         manifest = _release_manifest()
         if str(manifest.get("root_commit") or "") != expected_sha:
+            if _metadata_only_update(expected_sha):
+                # Device/docs-only root commits deliberately do not produce a
+                # new container manifest.  Advance the deployed marker without
+                # touching images or restarting services.
+                version = _deployment_snapshot()
+                _write_version_file(version)
+                _append_log("仅非部署文件更新，已同步部署版本标记（无需重建容器）")
+                _set_state(
+                    running=False,
+                    phase="done",
+                    message="deployment metadata updated",
+                    last_error="",
+                    deployed_current=version.get("current"),
+                    checkout_sha=((version.get("current") or {}).get("sha")),
+                    deployed_sha=((version.get("current") or {}).get("sha")),
+                    deployment_consistent=True,
+                )
+                return
             raise ReleaseManifestError("release-manifest root_commit 与目标版本不一致")
         _apply_release_manifest(manifest)
         _set_state(
