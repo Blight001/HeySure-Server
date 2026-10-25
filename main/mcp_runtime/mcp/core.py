@@ -17,7 +17,11 @@ from api.services.storage.workspace_visibility import workspace_tree
 from api.sio import sio
 
 logger = logging.getLogger(__name__)
-MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
+# Meta-tools are available before member/device bindings so external MCP
+# clients can discover capabilities and submit a bounded workflow. Nested
+# calls made by ``mcp.program`` still pass the normal per-tool eligibility
+# checks before execution.
+MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool", "mcp.program"}
 
 def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
     """Resolve the working directory available to an AI.

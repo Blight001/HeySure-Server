@@ -26,6 +26,12 @@ def _patch_sources(monkeypatch):
             "destructive": False,
         },
         {
+            "name": "mcp.program",
+            "description": "orchestrate",
+            "inputSchema": {"type": "object"},
+            "destructive": True,
+        },
+        {
             "name": "workspace.search",
             "description": "search",
             "inputSchema": {"type": "object"},
@@ -86,6 +92,7 @@ def test_scoped_view_unifies_server_device_and_binding_eligibility(monkeypatch):
 
     assert view.eligible_names == frozenset({
         "mcp.describe+tool",
+        "mcp.program",
         "workspace.search",
         "browser.publish",
     })
@@ -99,6 +106,7 @@ def test_selected_scope_only_narrows_and_preserves_introspection(monkeypatch):
 
     assert view.eligible_names == frozenset({
         "mcp.describe+tool",
+        "mcp.program",
         "browser.publish",
     })
 
@@ -120,7 +128,11 @@ def test_task_tool_hints_cannot_expand_device_authorization(monkeypatch):
         ),
     )
 
-    assert view.eligible_names == frozenset({"mcp.describe+tool", "workspace.search"})
+    assert view.eligible_names == frozenset({
+        "mcp.describe+tool",
+        "mcp.program",
+        "workspace.search",
+    })
 
 
 def test_server_automation_is_unavailable_without_toolbox_binding(monkeypatch):

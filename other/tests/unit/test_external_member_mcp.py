@@ -206,6 +206,28 @@ def test_tools_list_preserves_member_capability_contract(monkeypatch):
     }]}
 
 
+def test_tools_list_exposes_mcp_program_meta_tool(monkeypatch):
+    capability = SimpleNamespace(
+        description="Run a bounded MCP workflow",
+        input_schema={"type": "object", "required": ["program"]},
+        destructive=True,
+    )
+    view = SimpleNamespace(eligible={"mcp.program": capability})
+    monkeypatch.setattr(
+        "api.services.mcp.capability_view.scoped_tool_view_for_ids",
+        lambda user_id, config_id: view,
+    )
+
+    result = protocol._tools_list(_principal())
+
+    assert result["tools"] == [{
+        "name": "mcp.program",
+        "description": "Run a bounded MCP workflow",
+        "inputSchema": {"type": "object", "required": ["program"]},
+        "annotations": {"destructiveHint": True, "readOnlyHint": False},
+    }]
+
+
 def test_tools_call_rechecks_eligibility_dispatches_and_records_stats(monkeypatch):
     observed = {}
 
