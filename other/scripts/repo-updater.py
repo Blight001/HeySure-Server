@@ -14,6 +14,7 @@ Bind it to 0.0.0.0 and expose it to containers through host.docker.internal.
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -442,16 +443,22 @@ def _mark_release_failed(message: str, exc: Exception) -> None:
             verify_deployment_checkout(_git, _git_output, UpdateError)
         except Exception:
             checkout_consistent = False
+    detail = str(exc).strip().replace("\r", " ").replace("\n", " ")
+    detail = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1<redacted>", detail)
+    detail = re.sub(r"(?i)(token|password|secret)(\s*[=:]\s*)[^\s]+", r"\1\2<redacted>", detail)
+    detail = detail[:240]
+    if not detail:
+        detail = type(exc).__name__
     _set_state(
         running=False,
         phase="error",
         message=message,
-        last_error="发布未通过安全门禁或 readiness 验收，请查看宿主日志",
+        last_error=f"发布未通过安全门禁或 readiness 验收：{detail}",
         checkout_sha=checkout_sha,
         deployed_sha=deployed_sha,
         deployment_consistent=checkout_consistent,
     )
-    _append_log(f"发布失败（{type(exc).__name__}），未写入部署版本标记")
+    _append_log(f"发布失败（{type(exc).__name__}）：{detail}，未写入部署版本标记")
     print(f"host updater release failure: {type(exc).__name__}", flush=True)
 
 
@@ -618,31 +625,44 @@ def _check_and_update(apply: bool) -> dict[str, Any]:
     reset_done = False
     publish_queued = False
     try:
+        # A failed release can leave the checkout ahead of the deployment
+        # marker.  Rebuilding that checkout is normally the safest recovery,
+        # but it is not useful when a newer upstream commit is already
+        # available: the single mutable release-manifest branch may have
+        # moved on, so the old checkout can no longer pass the manifest gate.
+        # Compare upstream first in that case and reconcile directly to the
+        # newest verified commit instead of getting stuck on a stale one.
+        info = None
         if apply and _deployment_blocked():
-            _set_state(
-                running=True,
-                phase="queued_restart",
-                operation="update",
-                operation_id=secrets.token_hex(8),
-                message="检测到部署版本未对齐，正在自动重建当前版本…",
-                last_error="",
-                logs=[],
-                deployment_consistent=False,
+            info = _compare()
+            if info["behind"] <= 0:
+                _set_state(
+                    running=True,
+                    phase="queued_restart",
+                    operation="update",
+                    operation_id=secrets.token_hex(8),
+                    message="检测到部署版本未对齐，正在自动重建当前版本…",
+                    last_error="",
+                    logs=[],
+                    deployment_consistent=False,
+                )
+                _append_log("检测到部署版本与代码不一致，先自动重建当前版本")
+                threading.Thread(
+                    target=_rebuild_then_update_worker,
+                    name="heysure-reconcile-and-update",
+                    daemon=True,
+                ).start()
+                release_lock = False
+                return {
+                    "ok": True,
+                    "updated": True,
+                    "restarting": True,
+                    "reconciled": True,
+                    "state": dict(_state),
+                }
+            _append_log(
+                f"部署版本未对齐，但远程已有 {info['behind']} 个更新，直接发布最新版本"
             )
-            _append_log("检测到部署版本与代码不一致，先自动重建当前版本")
-            threading.Thread(
-                target=_rebuild_then_update_worker,
-                name="heysure-reconcile-and-update",
-                daemon=True,
-            ).start()
-            release_lock = False
-            return {
-                "ok": True,
-                "updated": True,
-                "restarting": True,
-                "reconciled": True,
-                "state": dict(_state),
-            }
         _set_state(
             running=True,
             phase="checking",
@@ -653,7 +673,7 @@ def _check_and_update(apply: bool) -> dict[str, Any]:
             logs=[],
         )
         _append_log("开始检测远程更新...")
-        info = _compare()
+        info = info or _compare()
         if info["ahead"] > 0:
             raise UpdateError("local branch has commits that are not on the deployment upstream")
         if info["behind"] <= 0:

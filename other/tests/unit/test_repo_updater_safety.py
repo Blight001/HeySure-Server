@@ -393,3 +393,63 @@ def test_blocked_update_reconciles_current_checkout_before_retry(monkeypatch):
     assert ("publish", None) in events
     assert updater._lock.acquire(blocking=False) is True
     updater._lock.release()
+
+
+def test_blocked_update_skips_stale_checkout_when_remote_is_newer(monkeypatch):
+    updater = _load_host_updater()
+    updater._state.update({"running": False, "logs": [], "deployment_consistent": False})
+    events: list[object] = []
+    current_sha = "a" * 40
+    target_sha = "b" * 40
+    head = {"sha": current_sha}
+
+    monkeypatch.setattr(updater, "_deployment_blocked", lambda: True)
+    monkeypatch.setattr(
+        updater,
+        "_compare",
+        lambda: {
+            "ahead": 0,
+            "behind": 1,
+            "branch": "main",
+            "upstream": "origin/main",
+            "current": {"sha": current_sha},
+            "remote": {"sha": target_sha},
+        },
+    )
+    monkeypatch.setattr(updater, "_git_output", lambda args, **_kwargs: head["sha"] if args == ["rev-parse", "HEAD"] else "")
+    monkeypatch.setattr(updater, "ensure_clean_worktree", lambda *_args: None)
+    monkeypatch.setattr(updater, "_prepare_checked_out_release", lambda *_args: events.append("prepare"))
+    monkeypatch.setattr(
+        updater,
+        "fast_forward_to",
+        lambda *_args: (events.append("fast-forward"), head.update(sha=target_sha)),
+    )
+    monkeypatch.setattr(updater, "sync_deployment_submodules", lambda *_args: events.append("sync"))
+    monkeypatch.setattr(updater, "safe_compose_definition", lambda *_args: True)
+    monkeypatch.setattr(updater, "_validate_checked_out_compose", lambda: events.append("validate"))
+    monkeypatch.setattr(updater, "_deployment_snapshot", lambda: {"current": {"sha": target_sha}})
+    monkeypatch.setattr(updater, "_append_log", lambda line: events.append(line))
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def rebuild(*_args, **_kwargs):
+        events.append("rebuild")
+        updater._lock.release()
+
+    monkeypatch.setattr(updater, "threading", type("_Threading", (), {"Thread": ImmediateThread}))
+    monkeypatch.setattr(updater, "_rebuild_worker", rebuild)
+
+    result = updater._check_and_update(True)
+
+    assert result["restarting"] is True
+    assert "reconciled" not in result
+    assert "prepare" in events
+    assert "rebuild" in events
+    assert any("远程已有 1 个更新" in str(event) for event in events)
+    assert updater._lock.acquire(blocking=False) is True
+    updater._lock.release()
