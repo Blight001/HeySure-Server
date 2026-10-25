@@ -245,9 +245,9 @@ def _cfg_response(cfg: AssistantAIConfig, user_id: int):
 def _ensure_ai_workspace_dir(user_id: int, ai_config_id: int) -> None:
     """Eagerly create the AI's effective working directory on creation.
 
-    Regular members and assistant admins get a readable ``<id>-<slug>`` folder;
-    manager members use the user workspace root. Failures are best-effort since
-    the directory is also created lazily on first workspace use.
+    Regular members get a readable ``<id>-<slug>`` folder; the digital-society
+    manager uses the user workspace root. Failures are best-effort since the
+    directory is also created lazily on first workspace use.
     """
     try:
         from mcp_runtime.mcp import get_project_root

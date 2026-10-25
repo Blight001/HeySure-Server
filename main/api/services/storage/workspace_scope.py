@@ -5,7 +5,11 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from api.core.config import ai_workspace_dirname, user_workspace_dir
+from api.core.config import (
+    ai_workspace_dirname,
+    is_digital_society_manager,
+    user_workspace_dir,
+)
 from api.database import engine
 from api.models import AssistantAIConfig
 
@@ -18,8 +22,9 @@ def member_workspace_dir(
 ) -> str:
     """Return the existing workspace scope used by MCP and persisted files.
 
-    Every configured AI is isolated in its own named subdirectory. Role fields
-    are labels and never widen filesystem access.
+    The digital-society manager owns the user workspace root. Ordinary digital
+    members remain isolated in their own named subdirectories. An unknown AI
+    id keeps the historical ``<id>-ai`` fallback and never widens access.
     """
 
     user_root = os.path.abspath(user_workspace_dir(int(user_id)))
@@ -34,6 +39,8 @@ def member_workspace_dir(
             ).first()
         if cfg is None:
             root = os.path.join(user_root, f"{int(ai_config_id)}-ai")
+        elif is_digital_society_manager(cfg.ai_role, cfg.digital_member_role):
+            root = user_root
         else:
             root = os.path.join(
                 user_root,

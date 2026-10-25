@@ -25,8 +25,9 @@ MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
 def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
     """Resolve the working directory available to an AI.
 
-    Every AI member uses its own ``<id>-<slug>`` subdirectory. Callers that
-    pass no ``ai_config_id`` get the user root.
+    The digital-society manager uses the user root; ordinary AI members use
+    their own ``<id>-<slug>`` subdirectory. Callers that pass no
+    ``ai_config_id`` also get the user root.
 
     Note: the shared knowledge base is resolved separately
     (``user_shared_knowledge_dir``) so it stays one-per-user across AIs.

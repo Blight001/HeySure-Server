@@ -33,6 +33,20 @@ def user_shared_knowledge_dir(user_id: int) -> str:
     return os.path.join(user_workspace_dir(user_id), "KnowledgeBase")
 
 
+def is_digital_society_manager(ai_role, digital_member_role) -> bool:
+    """Whether an AI is the user's digital-society administrator.
+
+    Only the built-in digital-member manager owns the user workspace root.
+    Other AI roles and ordinary digital members retain isolated directories.
+    Keeping this predicate here makes every filesystem caller use the same
+    role boundary instead of inferring it from a display name.
+    """
+    return (
+        str(ai_role or "").strip().casefold() == "digital_member"
+        and str(digital_member_role or "").strip().casefold() == "manager"
+    )
+
+
 def _ai_dir_slug(name: str) -> str:
     """Readable, filesystem-safe slug from an AI name (keeps CJK)."""
     raw = str(name or "").strip().lower()
@@ -43,11 +57,12 @@ def _ai_dir_slug(name: str) -> str:
 
 
 def ai_workspace_dirname(ai_config_id, name, ai_role) -> str:
-    """Per-AI working directory name under the user workspace.
+    """Per-AI working directory name for non-manager AIs.
 
-    Every AI, including assistant admins, gets a readable ``<id>-<slug>``
-    directory so workspace folders are no longer opaque integers or role-based
-    shared buckets.
+    The digital-society manager is resolved to the user root by
+    :func:`is_digital_society_manager` and does not call this naming helper.
+    Other AIs get a readable ``<id>-<slug>`` directory so workspace folders
+    are no longer opaque integers or role-based shared buckets.
     """
     slug = _ai_dir_slug(name)
     cid = int(ai_config_id or 0)

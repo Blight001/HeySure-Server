@@ -9,7 +9,11 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from api.core.config import user_workspace_dir, ai_workspace_dirname
+from api.core.config import (
+    ai_workspace_dirname,
+    is_digital_society_manager,
+    user_workspace_dir,
+)
 
 MAX_AGENT_MD_BYTES = 32 * 1024
 DEFAULT_AGENT_MD = """# 工作区说明
@@ -26,12 +30,14 @@ def _workspace_root(user_id: int) -> Path:
 
 def _current_workspace(user_id: int, cfg) -> Path:
     root = _workspace_root(user_id)
+    if is_digital_society_manager(cfg.ai_role, cfg.digital_member_role):
+        return root
     name = ai_workspace_dirname(cfg.id, cfg.name, cfg.ai_role)
     return root / name
 
 
 def _candidate_paths(user_id: int, cfg) -> list[Path]:
-    """Return current and pre-rename ``<id>-slug`` locations safely."""
+    """Return current and legacy ``<id>-slug`` locations safely."""
     root = _workspace_root(user_id)
     current = _current_workspace(user_id, cfg)
     paths = [current / "agent.md"]
@@ -55,6 +61,21 @@ def _safe_regular_file(path: Path, root: Path) -> bool:
         return False
 
 
+def _copy_legacy_manager_instructions(source: Path, target: Path, root: Path) -> bool:
+    """Copy a legacy manager ``agent.md`` into the new root without deleting it."""
+    if not _safe_regular_file(source, root) or target.exists():
+        return False
+    try:
+        raw = source.read_bytes()
+        if len(raw) > MAX_AGENT_MD_BYTES:
+            return False
+        with target.open("xb") as handle:
+            handle.write(raw)
+        return True
+    except (FileExistsError, OSError):
+        return _safe_regular_file(target, root)
+
+
 def ensure_agent_md(user_id: int, cfg) -> str:
     """Create a default file once and return its path.
 
@@ -66,7 +87,12 @@ def ensure_agent_md(user_id: int, cfg) -> str:
         return ""
     current_dir.mkdir(parents=True, exist_ok=True)
     existing = next((p for p in _candidate_paths(user_id, cfg) if _safe_regular_file(p, root)), None)
-    target = existing or (current_dir / "agent.md")
+    target = current_dir / "agent.md"
+    if existing is not None and existing != target:
+        if not is_digital_society_manager(cfg.ai_role, cfg.digital_member_role):
+            return str(existing)
+        if not _copy_legacy_manager_instructions(existing, target, root):
+            return str(existing)
     if existing is None:
         try:
             with target.open("x", encoding="utf-8") as handle:
