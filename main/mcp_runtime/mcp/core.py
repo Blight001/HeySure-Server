@@ -17,11 +17,10 @@ from api.services.storage.workspace_visibility import workspace_tree
 from api.sio import sio
 
 logger = logging.getLogger(__name__)
-# Meta-tools are available before member/device bindings so external MCP
-# clients can discover capabilities and submit a bounded workflow. Nested
-# calls made by ``mcp.program`` still pass the normal per-tool eligibility
-# checks before execution.
-MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool", "mcp.program"}
+# The schema/introspection tool is available before member/device bindings.
+# ``mcp.program`` is a normal server-owned toolbox tool: its own call must
+# pass the toolbox binding gate, while each nested step is re-authorized too.
+MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
 
 def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
     """Resolve the working directory available to an AI.
@@ -200,8 +199,8 @@ def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Option
     """内置设备绑定门禁：图书馆工具需绑定图书馆；工具箱工具需绑定工具箱。
 
     没有 ``ai_config_id`` 视为核心 / 管理员直调，放行。仅服务端固定工具经
-    ``MCPRegistry.call``，故两类门禁均按确切设备绑定逐次校验；元工具始终
-    放行，避免外部客户端在尚未配置工具箱时无法发现/提交编排程序。
+    ``MCPRegistry.call``，故两类门禁均按确切设备绑定逐次校验；只有工具
+    说明自省入口始终放行，编排工具 ``mcp.program`` 仍属于工具箱门禁。
     """
     if not ai_config_id:
         return

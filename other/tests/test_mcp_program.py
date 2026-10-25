@@ -108,9 +108,15 @@ class McpProgramTests(unittest.TestCase):
                 "steps": [{"id": "nested", "tool": "mcp.program", "arguments": {}}]
             })
 
-    def test_meta_tools_bypass_toolbox_binding_gate(self):
+    def test_describe_meta_tool_bypasses_toolbox_binding_gate(self):
         from mcp_runtime.mcp import core
 
         with patch("tools.engine.enforce_toolbox_binding", side_effect=AssertionError):
-            core._enforce_workshop_binding("mcp.program", 7, 9)
             core._enforce_workshop_binding("mcp.describe+tool", 7, 9)
+
+    def test_program_uses_toolbox_binding_gate(self):
+        from mcp_runtime.mcp import core
+
+        with patch("tools.engine.enforce_toolbox_binding") as gate:
+            core._enforce_workshop_binding("mcp.program", 7, 9)
+        gate.assert_called_once_with("mcp.program", 7, 9)

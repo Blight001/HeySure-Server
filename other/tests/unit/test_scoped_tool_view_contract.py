@@ -60,7 +60,11 @@ def _patch_sources(monkeypatch):
         lambda *_args: {"browser.publish"},
     )
     monkeypatch.setattr(desktop_device_tools, "endpoint_bridge_tools_for_config", lambda *_args: set())
-    monkeypatch.setattr(desktop_device_tools, "toolbox_tools_for_config", lambda *_args: {"workspace.search"})
+    monkeypatch.setattr(
+        desktop_device_tools,
+        "toolbox_tools_for_config",
+        lambda *_args: {"workspace.search", "mcp.program"},
+    )
     monkeypatch.setattr(bindings, "device_ids_for_config", lambda *_args: {"browser-1"})
     monkeypatch.setattr(workshop_bindings, "config_bound_to_library", lambda *_args: False)
 
@@ -106,7 +110,6 @@ def test_selected_scope_only_narrows_and_preserves_introspection(monkeypatch):
 
     assert view.eligible_names == frozenset({
         "mcp.describe+tool",
-        "mcp.program",
         "browser.publish",
     })
 
@@ -130,7 +133,6 @@ def test_task_tool_hints_cannot_expand_device_authorization(monkeypatch):
 
     assert view.eligible_names == frozenset({
         "mcp.describe+tool",
-        "mcp.program",
         "workspace.search",
     })
 
