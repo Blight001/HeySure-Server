@@ -200,10 +200,12 @@ def _enforce_workshop_binding(tool_name: str, user_id: int, ai_config_id: Option
     """内置设备绑定门禁：图书馆工具需绑定图书馆；工具箱工具需绑定工具箱。
 
     没有 ``ai_config_id`` 视为核心 / 管理员直调，放行。仅服务端固定工具经
-    ``MCPRegistry.call``，故两类门禁均按确切设备
-    绑定逐次校验；自省工具（mcp.describe+tool）始终放行。
+    ``MCPRegistry.call``，故两类门禁均按确切设备绑定逐次校验；元工具始终
+    放行，避免外部客户端在尚未配置工具箱时无法发现/提交编排程序。
     """
     if not ai_config_id:
+        return
+    if tool_name in MCP_INTROSPECTION_TOOLS:
         return
     from .permissions import requires_library_binding
 
