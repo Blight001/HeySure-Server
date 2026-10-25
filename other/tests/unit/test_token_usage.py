@@ -7,6 +7,7 @@ from api.services.chat.token_usage import (
     canonical_message_total,
     canonical_token_counts,
     canonical_total_sql,
+    latest_context_total,
     normalize_usage,
 )
 
@@ -78,12 +79,18 @@ def test_compressed_rows_keep_accounting_usage_but_leave_active_context_total():
 
 def test_session_threshold_excludes_compressed_rows_but_keeps_active_usage():
     compressed = SimpleNamespace(
+        id=1,
+        role="assistant",
+        created_at=1,
         prompt_tokens=5_500_000,
         completion_tokens=30_000,
         total_tokens=0,
         tags="compressed_away",
     )
     active = SimpleNamespace(
+        id=2,
+        role="assistant",
+        created_at=2,
         prompt_tokens=40_000,
         completion_tokens=2_000,
         total_tokens=1,
@@ -107,7 +114,46 @@ def test_session_threshold_excludes_compressed_rows_but_keeps_active_usage():
 
     assert chat_runtime_helpers._session_total_tokens(
         Session(), 1, "assistant", "session", 4,
-    ) == 42_000
+    ) == 40_000
+
+
+def test_latest_context_snapshot_does_not_sum_repeated_provider_inputs():
+    rows = [
+        SimpleNamespace(
+            id=1, role="assistant", created_at=1,
+            prompt_tokens=12_000, completion_tokens=300, total_tokens=12_300,
+            tags="",
+        ),
+        SimpleNamespace(
+            id=2, role="assistant", created_at=2,
+            prompt_tokens=18_000, completion_tokens=500, total_tokens=18_500,
+            tags="mcp_assistant_call",
+        ),
+    ]
+
+    assert latest_context_total(rows) == 18_000
+
+
+def test_latest_context_snapshot_uses_fractional_timestamp_and_skips_compressed_rows():
+    rows = [
+        SimpleNamespace(
+            id=20, role="assistant", created_at=100.9,
+            prompt_tokens=21_000, completion_tokens=100, total_tokens=21_100,
+            tags="compressed_away",
+        ),
+        SimpleNamespace(
+            id=19, role="assistant", created_at=100.8,
+            prompt_tokens=17_000, completion_tokens=100, total_tokens=17_100,
+            tags="",
+        ),
+        SimpleNamespace(
+            id=18, role="assistant", created_at=100.7,
+            prompt_tokens=15_000, completion_tokens=100, total_tokens=15_100,
+            tags="",
+        ),
+    ]
+
+    assert latest_context_total(rows) == 17_000
 
 
 def test_sql_total_uses_components_before_legacy_total():

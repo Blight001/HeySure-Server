@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, Mapping
 
 from sqlalchemy import case, func
@@ -12,6 +13,14 @@ def nonnegative_token_count(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _ordering_value(value: Any) -> float:
+    """Parse a persisted ordering field without truncating timestamps."""
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def canonical_token_counts(
@@ -70,6 +79,76 @@ def active_context_message_total(message: Any) -> int:
         if tag.strip()
     }
     return 0 if "compressed_away" in tags else canonical_message_total(message)
+
+
+def context_snapshot_total(message: Any) -> int:
+    """Return the provider's latest input-context snapshot for one turn.
+
+    ``prompt_tokens`` is the size of the complete provider input for that
+    turn.  It must not be added to other turns when calculating the *current*
+    context: every MCP continuation resends the system prompt, history and
+    tool schemas, so summing these snapshots counts the same context repeatedly.
+    Legacy rows without a split usage payload fall back to their canonical
+    total.
+    """
+    prompt = nonnegative_token_count(getattr(message, "prompt_tokens", 0))
+    if prompt > 0:
+        return prompt
+    return canonical_message_total(message)
+
+
+def latest_context_total(messages: Iterable[Any]) -> int:
+    """Return the newest active assistant input-context snapshot.
+
+    Historical usage remains cumulative for billing/reporting.  This helper is
+    only for the live context bar and automatic-compression threshold.
+    """
+    candidates = []
+    for message in messages:
+        if str(getattr(message, "role", "") or "") != "assistant":
+            continue
+        tags = {
+            tag.strip()
+            for tag in str(getattr(message, "tags", "") or "").split(",")
+            if tag.strip()
+        }
+        if "compressed_away" in tags:
+            continue
+        if context_snapshot_total(message) <= 0:
+            continue
+        candidates.append(message)
+    if not candidates:
+        return 0
+    latest = max(
+        candidates,
+        key=lambda item: (
+            _ordering_value(getattr(item, "created_at", 0)),
+            nonnegative_token_count(getattr(item, "id", 0)),
+        ),
+    )
+    return context_snapshot_total(latest)
+
+
+def latest_context_totals_by_session(messages: Iterable[Any]) -> dict[tuple[Any, str], int]:
+    """Return the newest active context snapshot for each AI/session pair."""
+    latest_rows: dict[tuple[Any, str], Any] = {}
+    for message in messages:
+        if str(getattr(message, "role", "") or "") != "assistant":
+            continue
+        if "compressed_away" in str(getattr(message, "tags", "") or ""):
+            continue
+        snapshot = context_snapshot_total(message)
+        if snapshot <= 0:
+            continue
+        key = (getattr(message, "ai_config_id", None), str(getattr(message, "session_id", "") or ""))
+        previous = latest_rows.get(key)
+        if previous is None or (
+            _ordering_value(getattr(message, "created_at", 0)), nonnegative_token_count(getattr(message, "id", 0))
+        ) > (
+            _ordering_value(getattr(previous, "created_at", 0)), nonnegative_token_count(getattr(previous, "id", 0))
+        ):
+            latest_rows[key] = message
+    return {key: context_snapshot_total(message) for key, message in latest_rows.items()}
 
 
 def canonical_total_sql(model: Any):

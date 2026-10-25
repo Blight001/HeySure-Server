@@ -407,25 +407,39 @@ async def get_total_tokens(
     total_prompt_tokens, total_completion_tokens, total_all_tokens, message_count = (
         session.exec(agg_stmt).one()
     )
-    # ``total_tokens`` is an accounting value and intentionally includes rows
-    # that were compressed away.  The chat progress indicator needs the live
-    # context value instead; otherwise an old, compressed conversation keeps
-    # growing past the configured compression threshold forever.
-    active_stmt = select(
-        func.coalesce(func.sum(canonical_total_sql(ChatMessage)), 0),
+    # ``prompt_tokens`` on the newest assistant row is the provider's complete
+    # input-context snapshot for that turn.  Do not sum assistant rows here:
+    # every MCP continuation resends the system prompt, history and tool
+    # schemas, so a sum counts the same context repeatedly.
+    latest_stmt = select(
+        ChatMessage.prompt_tokens,
+        ChatMessage.completion_tokens,
+        ChatMessage.total_tokens,
     ).where(
         ChatMessage.user_id == user.id,
         ChatMessage.ai_kind == ai_kind,
+        ChatMessage.role == "assistant",
         or_(
             ChatMessage.tags.is_(None),
             ~ChatMessage.tags.contains("compressed_away"),
         ),
-    )
+    ).order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(1)
     if ai_config_id is not None:
-        active_stmt = active_stmt.where(ChatMessage.ai_config_id == ai_config_id)
+        latest_stmt = latest_stmt.where(ChatMessage.ai_config_id == ai_config_id)
     if session_id is not None:
-        active_stmt = active_stmt.where(ChatMessage.session_id == session_id)
-    active_persisted_total = int(session.exec(active_stmt).one() or 0)
+        latest_stmt = latest_stmt.where(ChatMessage.session_id == session_id)
+    latest_rows = session.exec(latest_stmt).all()
+    latest_row = latest_rows[0] if latest_rows else None
+    latest_context_total = 0
+    if latest_row is not None:
+        latest_prompt = max(0, int(latest_row[0] or 0))
+        latest_completion = max(0, int(latest_row[1] or 0))
+        latest_supplied_total = max(0, int(latest_row[2] or 0))
+        latest_context_total = (
+            latest_prompt
+            or (latest_prompt + latest_completion)
+            or latest_supplied_total
+        )
     pending = _live_pending_tokens_for(
         session,
         user_id=user.id,
@@ -444,6 +458,8 @@ async def get_total_tokens(
         "live_prompt_tokens": int(pending["prompt_tokens"]),
         "live_completion_tokens": int(pending["completion_tokens"]),
         "live_total_tokens": int(pending["total_tokens"]),
-        "context_total_tokens": int(active_persisted_total + pending["total_tokens"]),
+        "context_total_tokens": int(
+            pending["context_tokens"] or latest_context_total
+        ),
         "message_count": int(message_count or 0)
     }

@@ -108,6 +108,32 @@ def test_prepare_download_never_exposes_server_path(monkeypatch, tmp_path):
     assert "server_path" not in json.dumps(envelope)
 
 
+def test_http_get_streams_a_prepared_server_file(monkeypatch, tmp_path):
+    _sandbox(monkeypatch, tmp_path)
+    saved = workspace_files.save_workspace_bytes(
+        user_id=7,
+        ai_config_id=11,
+        data=b"download-me",
+        file_name="download.txt",
+    )
+    app = FastAPI()
+    app.include_router(router, prefix="/api")
+    client = TestClient(app)
+    prepared = member_transfer.prepare_download(
+        user_id=7,
+        ai_config_id=11,
+        file_ref=saved["file_ref"],
+        public_base_url="https://example.test",
+    )
+    path = prepared["transport"]["url"].split("/api", 1)[1]
+
+    response = client.get(f"/api{path}")
+
+    assert response.status_code == 200
+    assert response.content == b"download-me"
+    assert response.headers["x-heysure-transfer-id"] == prepared["transfer_id"]
+
+
 def test_http_put_stream_is_the_wire_transport(monkeypatch, tmp_path):
     _sandbox(monkeypatch, tmp_path)
     app = FastAPI()

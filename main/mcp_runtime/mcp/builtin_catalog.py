@@ -17,7 +17,6 @@ from tools.conversation import (
     CONVERSATION_MANAGE_SCHEMA,
 )
 from tools.workspace_contract import WORKSPACE_LIST_FILES_SCHEMA
-from tools.workspace_transfer import _workspace_transfer, WORKSPACE_TRANSFER_SCHEMA
 
 
 def _run_workspace_command(user_id, args, ai_config_id):
@@ -31,6 +30,18 @@ def _list_workspace_files(user_id, args, ai_config_id):
     from tools.workspace import _list_workspace_files as handler
 
     return handler(user_id, args, ai_config_id)
+
+
+def _workspace_transfer(user_id, args, ai_config_id):
+    from tools.workspace_transfer import _workspace_transfer as handler
+
+    return handler(user_id, args, ai_config_id)
+
+
+def _workspace_transfer_schema():
+    from tools.workspace_transfer import WORKSPACE_TRANSFER_SCHEMA
+
+    return WORKSPACE_TRANSFER_SCHEMA
 
 
 from tools.knowledge import _knowledge_manage, KNOWLEDGE_MANAGE_SCHEMA
@@ -163,14 +174,12 @@ BUILTIN_TOOLS = (
     MCPTool(
         name="workspace.transfer",
         description=(
-            "Canonical bidirectional byte transfer for every AI member and endpoint. "
-            "prepare_download returns a short-lived GET capability for a server workspace file; "
-            "prepare_upload returns a PUT capability, then commit verifies and registers the upload as file_ref. "
-            "Use status or abort for lifecycle control. Tool arguments and results contain only opaque references and "
-            "checksums; never send absolute paths or base64 through MCP. The returned transport URL is streamed by "
-            "console/device MCP, so large media does not enter the conversation context."
+            "服务器与端侧的双向字节传输。prepare_download 返回临时 GET 链接供设备下载；"
+            "prepare_upload 返回临时 PUT 链接，设备主动上传后用 commit 校验并登记为 file_ref；"
+            "status/abort 管理未完成传输。MCP 只传引用和校验信息，禁止绝对路径、端侧路径或 base64；"
+            "transport.url 必须由 console/device MCP 流式使用，文件字节不进入对话上下文。"
         ),
-        input_schema=WORKSPACE_TRANSFER_SCHEMA,
+        input_schema=_workspace_transfer_schema(),
         handler=_workspace_transfer,
         destructive=True,
     ),
@@ -183,8 +192,7 @@ BUILTIN_TOOLS = (
             "支持 PNG/JPEG/WebP/GIF，并将图片安全附加到下一轮模型输入；"
             "register 将相对工作区路径注册为不暴露服务器绝对路径的 file_ref；"
             "import_chat_media 可把 /api/chat/media/{media_id}/{token} 对话图片保存到成员工作区；"
-            "跨成员或端侧传输统一调用 workspace.transfer；prepare_download 返回流式 GET capability，"
-            "端侧 canvas_generation_import 只接收该 capability URL 加 object 元数据，不要传服务器绝对路径或 base64；"
+            "跨成员或端侧传输统一调用 workspace.transfer，不要传服务器绝对路径或 base64；"
             "info/list 查看引用；unregister 仅移除引用，不删除原文件。"
             "保存结果会返回可直接调用 message.send+to 的示例；只有服务器 AI 工作区文件才能按此流程直接发送给用户。"
         ),

@@ -41,6 +41,12 @@ def _empty_bot_statuses() -> Dict[str, Dict[int, Dict[str, str]]]:
     return {bot.channel: {} for bot in iter_bots()}
 
 
+def _latest_core_context_tokens(messages: List[ChatMessage]) -> Dict[tuple[Optional[int], str], int]:
+    from api.services.chat.token_usage import latest_context_totals_by_session
+
+    return latest_context_totals_by_session(messages)
+
+
 def _load_connector_runtime_bot_statuses() -> Tuple[Dict[str, Dict[int, Dict[str, str]]], Optional[str]]:
     """Fetch per-bot state from connector-runtime; fall back gracefully.
 
@@ -281,6 +287,7 @@ async def list_ai_cards(
         )
     ).all()
     core_session_tokens: Dict[tuple[Optional[int], str], int] = {}
+    core_session_context_tokens = _latest_core_context_tokens(core_messages)
     latest_task_assistant_by_session: Dict[tuple[int, str], ChatMessage] = {}
     for msg in core_messages:
         key = (msg.ai_config_id, msg.session_id)
@@ -454,7 +461,7 @@ async def list_ai_cards(
         if cfg.ai_role == "digital_member":
             latest_session = latest_core_session_by_cfg.get(int(cfg.id))
             if latest_session:
-                token_used = core_session_tokens.get((cfg.id, latest_session.session_id), 0)
+                token_used = core_session_context_tokens.get((cfg.id, latest_session.session_id), 0)
             else:
                 token_used = 0
         ai_kind = "core"

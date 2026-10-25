@@ -528,9 +528,12 @@ def _session_total_tokens(
     if ai_config_id is not None:
         stmt = stmt.where(ChatMessage.ai_config_id == ai_config_id)
     rows = session.exec(stmt).all()
-    from api.services.chat.token_usage import active_context_message_total
+    from api.services.chat.token_usage import latest_context_total
 
-    persisted_total = int(sum(active_context_message_total(row) for row in rows))
+    # Provider ``prompt_tokens`` is already the complete input-context size
+    # for the latest model turn.  Summing it across assistant rows double
+    # counts the system prompt, history and MCP schemas on every continuation.
+    persisted_total = int(latest_context_total(rows))
 
     active_runs = session.exec(
         select(ChatRun).where(
@@ -545,8 +548,13 @@ def _session_total_tokens(
         for run in active_runs:
             if ai_config_id is not None and run.ai_config_id != ai_config_id:
                 continue
-            pending_total += int((_RUN_LIVE_STATE.get(run.run_id) or {}).get("pending_total_tokens") or 0)
-    return int(persisted_total + pending_total)
+            live = _RUN_LIVE_STATE.get(run.run_id) or {}
+            pending_prompt = int(live.get("pending_prompt_tokens") or 0)
+            pending_total = max(
+                pending_total,
+                pending_prompt or int(live.get("pending_total_tokens") or 0),
+            )
+    return int(pending_total or persisted_total)
 
 def _live_pending_tokens_for(
     session: Session,
@@ -569,14 +577,22 @@ def _live_pending_tokens_for(
     prompt = 0
     completion = 0
     total = 0
+    context = 0
     with _RUN_STATE_LOCK:
         for run in runs:
             live = _RUN_LIVE_STATE.get(run.run_id) or {}
-            prompt += int(live.get("pending_prompt_tokens") or 0)
+            live_prompt = int(live.get("pending_prompt_tokens") or 0)
+            live_total = int(live.get("pending_total_tokens") or 0)
+            prompt += live_prompt
             completion += int(live.get("pending_completion_tokens") or 0)
-            total += int(live.get("pending_total_tokens") or 0)
+            total += live_total
+            # Multiple ChatRuns may be active for one AI/session.  Their
+            # provider prompts are alternative snapshots, not additive
+            # context, so the live context indicator must use the largest one.
+            context = max(context, live_prompt or live_total)
     return {
         "prompt_tokens": int(prompt),
         "completion_tokens": int(completion),
         "total_tokens": int(total),
+        "context_tokens": int(context),
     }
