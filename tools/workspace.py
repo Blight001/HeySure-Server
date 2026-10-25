@@ -11,7 +11,9 @@ from api.database import engine
 from api.devices.bindings import get_bindings
 from api.models import AIRuntimeStatus, AssistantAIConfig
 from api.sio import agents
+from api.services.storage.workspace_visibility import list_workspace_entries
 from mcp_runtime.mcp.core import generate_file_tree, get_project_root, safe_join
+from tools.workspace_contract import WORKSPACE_LIST_FILES_SCHEMA
 
 
 MAX_COMMAND_LENGTH = 8000
@@ -330,6 +332,27 @@ def _run_command(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]
         "stdout": stdout,
         "stderr": stderr,
         **base_result,
+    }
+
+
+def _list_workspace_files(user_id: int, args: Dict[str, Any], ai_config_id: Optional[int]) -> Dict[str, Any]:
+    """List relevant workspace paths without dumping runtime artifacts."""
+    project_root = get_project_root(user_id, ai_config_id)
+    listing = list_workspace_entries(
+        project_root,
+        path=str(args.get("path") or ""),
+        query=str(args.get("query") or ""),
+        include_generated=_truthy(args.get("include_generated")),
+        include_hidden=_truthy(args.get("include_hidden")),
+        max_depth=args.get("max_depth"),
+        max_entries=args.get("max_entries"),
+    )
+    return {
+        **listing,
+        "path": str(args.get("path") or "."),
+        "query": str(args.get("query") or ""),
+        "workspace_root": ".",
+        "hint": "默认已隐藏缓存、构建产物、日志、数据库和隐藏配置；需要时缩小 path/query，或明确 include_generated/include_hidden。",
     }
 
 def _parse_int(value: Any) -> Optional[int]:

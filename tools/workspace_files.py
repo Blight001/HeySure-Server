@@ -28,16 +28,14 @@ WORKSPACE_FILE_MANAGE_SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["register", "import_chat_media", "view_image", "info", "list", "unregister", "create_temporary_link", "revoke_temporary_link"],
-            "description": "仅操作服务器 AI 工作区：register 注册文件；view_image 将图片安全附加到下一轮模型输入；create_temporary_link 创建默认 5 分钟的公网临时下载链接；revoke_temporary_link 提前撤销；info/list 查看引用；unregister 仅删除引用、不删除原文件。端侧文件须先上传/同步到此工作区。",
+            "enum": ["register", "import_chat_media", "view_image", "info", "list", "unregister"],
+            "description": "仅操作服务器 AI 工作区：register 注册文件；view_image 将图片安全附加到下一轮模型输入；info/list 查看引用；unregister 仅删除引用、不删除原文件。跨成员或端侧字节传输必须使用 workspace.transfer，避免绝对路径和 base64。",
         },
         "workspace_path": {
             "type": "string",
             "description": "register 必填。相对 HeySure 服务器当前 AI 工作区的文件路径；拒绝绝对路径和越界路径，也不能填写用户电脑、端侧设备或宝塔主机路径。",
         },
         "file_ref": {"type": "string", "description": "view_image/info/unregister 可用，格式 file_...。"},
-        "grant_id": {"type": "string", "description": "revoke_temporary_link 必填，格式 fgrant_...。"},
-        "ttl_seconds": {"type": "integer", "minimum": 60, "maximum": 900, "description": "临时链接有效期，默认 300 秒，最长 900 秒。"},
         "file_name": {"type": "string", "description": "register 可选，对外发送时显示的文件名。"},
         "media_id": {"type": "integer", "description": "import_chat_media 必填，取自 /api/chat/media/{media_id}/{token}。"},
         "media_token": {"type": "string", "description": "import_chat_media 必填，取自同一对话媒体 URL。"},
@@ -59,6 +57,21 @@ def _with_send_example(result: Dict[str, Any]) -> Dict[str, Any]:
     result["send_example"] = {
         "tool": "message.send+to",
         "arguments": {"to": "user", "attachments": [{"file_ref": result["file_ref"]}]},
+    }
+    return result
+
+
+def _with_canvas_import_reference(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose a compact, non-path reference that an authorized canvas can pull."""
+    mime = str(result.get("mime_type") or "application/octet-stream").split(";", 1)[0].lower()
+    kind = mime.split("/", 1)[0] if "/" in mime else ""
+    if kind not in {"image", "video", "audio"}:
+        kind = ""
+    result["canvas_import_reference"] = {
+        "url": result["url"],
+        "name": result.get("file_name") or "remote_asset",
+        "mime": mime,
+        **({"kind": kind} if kind else {}),
     }
     return result
 
@@ -182,13 +195,23 @@ def _workspace_file_manage(
     if action == "create_temporary_link":
         if not ai_config_id:
             raise HTTPException(status_code=400, detail="ai_config_id is required for temporary links")
-        return create_temporary_file_link(
+        file_ref = str(args.get("file_ref") or "").strip()
+        if not file_ref:
+            registered = register_workspace_file(
+                user_id=user_id,
+                ai_config_id=ai_config_id,
+                workspace_path=str(args.get("workspace_path") or ""),
+                file_name=str(args.get("file_name") or ""),
+            )
+            file_ref = registered["file_ref"]
+        result = create_temporary_file_link(
             user_id=user_id,
             ai_config_id=ai_config_id,
-            file_ref=str(args.get("file_ref") or ""),
+            file_ref=file_ref,
             ttl_seconds=args.get("ttl_seconds") or 300,
             public_base_url=configured_public_base_url(),
         )
+        return _with_canvas_import_reference(result)
     if action == "revoke_temporary_link":
         if not ai_config_id:
             raise HTTPException(status_code=400, detail="ai_config_id is required for temporary links")

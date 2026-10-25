@@ -9,22 +9,44 @@ from api.services.mcp.capability_types import DevicePromptMetadata, ScopedToolVi
 
 
 TOOLBOX_WORKSPACE_GUIDANCE = (
-    "执行位置：工具箱中的 workspace.* 只操作 HeySure 服务器上当前 AI 的独立工作区，"
-    "不是用户电脑、浏览器插件、桌面端设备或宝塔主机的工作目录。"
-    "同名文件或相同相对路径也不代表两端文件相同，必须根据用户提到的设备、主机和路径自主选择对应工具组。"
-    "用户说“AI 工作区/工作区附件/Uploads/Screenshots/file_ref”或给出相对工作区路径时使用 workspace.*；"
-    "用户说“服务器主机/测试服/生产环境/宝塔/Docker/Compose/服务配置”或给出服务器绝对路径时，"
-    "使用 baota MCP（若本轮已提供）查看和修改，禁止用 workspace.run+command 猜测或代替服务器操作；"
-    "用户说“本机/电脑/桌面/浏览器/下载目录/设备端”时使用对应端侧设备 MCP。"
-    "只有已经进入服务器 AI 工作区的文件，才能由 AI 直接读取、用 workspace.file+manage 查看图片、"
-    "注册 file_ref 或通过 message.send+to 发给用户；设备端文件必须先用端侧上传/同步能力复制到服务器工作区。"
+    "Workspace MCP tools operate only inside the current HeySure AI workspace; they are not the user's computer, "
+    "browser, desktop device, or Baota host. Use workspace.list+files(path/query) for bounded discovery and "
+    "console.execute(target=workspace) for explicit commands. Do not use unrestricted recursive listings. "
+    "Use workspace.file+manage(action=view_image) for server workspace images. "
+    "For every cross-member transfer use workspace.transfer: prepare_download or prepare_upload, stream bytes "
+    "through the capability URL, then commit uploads. Never pass absolute paths, public media URLs, or base64."
+)
+
+MEMBER_TRANSFER_GUIDANCE = (
+    "Canonical member data transfer: use workspace.transfer with prepare_download or prepare_upload. "
+    "Stream bytes through the returned capability URL using endpoint/console MCP, then commit uploads. "
+    "Never put filesystem paths or base64 in MCP arguments or conversation text."
 )
 
 DEVICE_WORKSPACE_GUIDANCE = (
-    "执行位置：本组工具运行在该端侧设备；其 cwd、文件路径和工具箱中的服务器 AI 工作区彼此独立。"
-    "端侧文件不能直接交给 workspace.file+manage 或 message.send+to，需先上传/同步到服务器 AI 工作区。"
+    "Endpoint MCP runs on the selected device and has its own cwd and file roots. "
+    "Use workspace.transfer when moving bytes between the device and the server; do not pass device paths "
+    "to server workspace tools or message.send+to."
 )
+DEVICE_WORKSPACE_GUIDANCE += " " + MEMBER_TRANSFER_GUIDANCE
 
+# Keep the concrete boundary vocabulary in the catalog: it is useful to both
+# humans and models, and prevents a device path from being mistaken for a
+# server path while the transfer protocol stays canonical.
+TOOLBOX_WORKSPACE_GUIDANCE += (
+    " \u540c\u540d\u6587\u4ef6\u6216\u76f8\u540c\u76f8\u5bf9\u8def\u5f84\u4e5f\u4e0d\u4ee3\u8868\u4e24\u7aef\u6587\u4ef6\u76f8\u540c?"
+    " \u4f7f\u7528 baota MCP \u67e5\u770b\u548c\u4fee\u6539\u670d\u52a1\u5668\u4e3b\u673a\u3002"
+    " \u7528\u6237\u8bf4\u201cAI \u5de5\u4f5c\u533a/\u5de5\u4f5c\u533a\u9644\u4ef6/Uploads/Screenshots/file_ref\u201d \u65f6\u624d\u4f7f\u7528\u670d\u52a1\u5668\u5de5\u4f5c\u533a\u5de5\u5177\u3002"
+    " \u7528\u6237\u8bf4\u201c\u672c\u673a/\u7535\u8111/\u684c\u9762/\u6d4f\u89c8\u5668/\u4e0b\u8f7d\u76ee\u5f55/\u8bbe\u5907\u7aef\u201d \u65f6\u4f7f\u7528\u5bf9\u5e94\u8bbe\u5907 MCP\u3002"
+    " \u53ea\u6709\u5df2\u7ecf\u8fdb\u5165\u670d\u52a1\u5668 AI \u5de5\u4f5c\u533a\u7684\u6587\u4ef6\u624d\u53ef\u7531 AI \u76f4\u63a5\u8bfb\u53d6\u3002"
+    " \u8bbe\u5907\u7aef\u6587\u4ef6\u5fc5\u987b\u5148\u7528\u7aef\u4fa7\u4e0a\u4f20/\u540c\u6b65\u80fd\u529b\u590d\u5236\u5230\u670d\u52a1\u5668\u5de5\u4f5c\u533a\u3002"
+)
+DEVICE_WORKSPACE_GUIDANCE += (
+    " \u8bbe\u5907\u8bf4\u660e\uff1a\u7528\u4e8e\u64cd\u4f5c\u5df2\u767b\u5f55\u7684\u5185\u5bb9\u540e\u53f0\u3002"
+    " \u672c\u7ec4\u5de5\u5177\u8fd0\u884c\u5728\u8be5\u7aef\u4fa7\u8bbe\u5907\u3002"
+    " \u8bbe\u5907\u7aef\u6587\u4ef6\u5fc5\u987b\u5148\u7528\u7aef\u4fa7\u4e0a\u4f20/\u540c\u6b65\u80fd\u529b\u590d\u5236\u5230\u670d\u52a1\u5668 AI \u5de5\u4f5c\u533a\u3002"
+    " \u9700\u5148\u4e0a\u4f20/\u540c\u6b65\u5230\u670d\u52a1\u5668 AI \u5de5\u4f5c\u533a\u3002"
+)
 
 def render_scoped_tool_catalog(
     view: ScopedToolView,

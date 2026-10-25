@@ -2,7 +2,6 @@ from .core import MCPTool
 from tools.introspection import (
     _mcp_describe_tool,
 )
-from tools.workspace import _run_command
 from tools.console import _console_execute, CONSOLE_EXECUTE_SCHEMA
 from tools.workspace_files import _workspace_file_manage, WORKSPACE_FILE_MANAGE_SCHEMA
 from tools.members import _member_manage, MEMBER_MANAGE_SCHEMA
@@ -17,6 +16,23 @@ from tools.conversation import (
     _conversation_manage,
     CONVERSATION_MANAGE_SCHEMA,
 )
+from tools.workspace_contract import WORKSPACE_LIST_FILES_SCHEMA
+from tools.workspace_transfer import _workspace_transfer, WORKSPACE_TRANSFER_SCHEMA
+
+
+def _run_workspace_command(user_id, args, ai_config_id):
+    """Lazy-load workspace handlers to keep the MCP package import acyclic."""
+    from tools.workspace import _run_command
+
+    return _run_command(user_id, args, ai_config_id)
+
+
+def _list_workspace_files(user_id, args, ai_config_id):
+    from tools.workspace import _list_workspace_files as handler
+
+    return handler(user_id, args, ai_config_id)
+
+
 from tools.knowledge import _knowledge_manage, KNOWLEDGE_MANAGE_SCHEMA
 from tools.knowledge_search import _knowledge_search, KNOWLEDGE_SEARCH_SCHEMA
 from tools.web_search import _web_search
@@ -80,7 +96,7 @@ BUILTIN_TOOLS = (
             "默认 cwd 是当前 AI 可访问的服务器工作区目录，并使用正常进程环境运行。"
             "普通成员只能在自己的 AI 工作区目录内选择 cwd；管理者可使用更宽的用户工作区。"
             "支持显式 shell=cmd/powershell/pwsh，或用 argv + shell=none 绕过 shell 转义。"
-            "需要隔离环境时，设置 sandbox_env。"
+            "需要隔离环境时，设置 sandbox_env。调查文件时请优先使用 workspace.list+files，避免 dir /s /b 等不受限递归列举。"
         ),
         input_schema={
             "type": "object",
@@ -119,8 +135,18 @@ BUILTIN_TOOLS = (
             },
             "required": [],
         },
-        handler=_run_command,
+            handler=_run_workspace_command,
         destructive=True,
+    ),
+    MCPTool(
+        name="workspace.list+files",
+        description=(
+            "按当前 AI 工作区的统一可见性策略列出相关文件和目录，默认隐藏缓存、构建产物、日志、数据库、"
+            "临时目录和隐藏配置，且有深度/数量上限。优先用 path/query 精确调查，不要用 dir /s /b 把整个工作区塞进上下文；"
+            "需要查看生成物或隐藏文件时，必须由用户明确要求并设置 include_generated/include_hidden。"
+        ),
+        input_schema=WORKSPACE_LIST_FILES_SCHEMA,
+        handler=_list_workspace_files,
     ),
     MCPTool(
         name="console.execute",
@@ -134,6 +160,20 @@ BUILTIN_TOOLS = (
         destructive=True,
     ),
     MCPTool(
+        name="workspace.transfer",
+        description=(
+            "Canonical bidirectional byte transfer for every AI member and endpoint. "
+            "prepare_download returns a short-lived GET capability for a server workspace file; "
+            "prepare_upload returns a PUT capability, then commit verifies and registers the upload as file_ref. "
+            "Use status or abort for lifecycle control. Tool arguments and results contain only opaque references and "
+            "checksums; never send absolute paths or base64 through MCP. The returned transport URL is streamed by "
+            "console/device MCP, so large media does not enter the conversation context."
+        ),
+        input_schema=WORKSPACE_TRANSFER_SCHEMA,
+        handler=_workspace_transfer,
+        destructive=True,
+    ),
+    MCPTool(
         name="workspace.file+manage",
         description=(
             "只管理 HeySure 服务器上当前 AI 工作区里的文件，不能直接读取用户电脑、浏览器、桌面端设备或宝塔主机路径。"
@@ -142,8 +182,9 @@ BUILTIN_TOOLS = (
             "支持 PNG/JPEG/WebP/GIF，并将图片安全附加到下一轮模型输入；"
             "register 将相对工作区路径注册为不暴露服务器绝对路径的 file_ref；"
             "import_chat_media 可把 /api/chat/media/{media_id}/{token} 对话图片保存到成员工作区；"
-            "create_temporary_link 创建默认 5 分钟、最长 15 分钟的公网临时下载链接，供其它设备或命令行拉取；"
-            "revoke_temporary_link 可提前撤销；info/list 查看引用；unregister 仅移除引用，不删除原文件。"
+            "跨成员或端侧传输统一调用 workspace.transfer；prepare_download 返回流式 GET capability，"
+            "端侧 canvas_generation_import 只接收该 capability URL 加 object 元数据，不要传服务器绝对路径或 base64；"
+            "info/list 查看引用；unregister 仅移除引用，不删除原文件。"
             "保存结果会返回可直接调用 message.send+to 的示例；只有服务器 AI 工作区文件才能按此流程直接发送给用户。"
         ),
         input_schema=WORKSPACE_FILE_MANAGE_SCHEMA,

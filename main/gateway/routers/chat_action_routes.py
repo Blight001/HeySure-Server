@@ -25,6 +25,7 @@ from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMe
 from .auth import get_current_user
 from api.services.model_presets import resolve_model_preset
 from api.services.storage.agent_instructions import append_agent_md_prompt
+from api.services.storage.workspace_visibility import workspace_listing_paths, workspace_tree
 from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, router
@@ -537,28 +538,19 @@ def get_chat_message_media(
             "Content-Length": str(media.bytes or len(media.data or b"")),
         },
     )
-
 @router.get("/files")
 def list_files(
+    include_generated: bool = False,
+    include_hidden: bool = False,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
 ):
     user = get_current_user(authorization, session)
-    project_root = get_project_root(user.id, None)
-    all_paths = []
-    ignored_dirs = {".git", ".heysure", "__pycache__", "venv", "node_modules", ".aider", ".sandbox_home", ".sandbox_tmp", "_admins"}
-    for root, dirs, files in os.walk(project_root):
-        dirs[:] = [
-            d for d in dirs
-            if d not in ignored_dirs and not d.startswith(".sandbox")
-        ]
-        rel_root = os.path.relpath(root, project_root)
-        rel_root = "" if rel_root == "." else rel_root
-        for directory in dirs:
-            all_paths.append((os.path.join(rel_root, directory) if rel_root else directory).replace(os.sep, "/") + "/")
-        for filename in files:
-            all_paths.append((os.path.join(rel_root, filename) if rel_root else filename).replace(os.sep, "/"))
-    return sorted(set(all_paths))
+    return workspace_listing_paths(
+        get_project_root(user.id, None),
+        include_generated=include_generated,
+        include_hidden=include_hidden,
+    )
 
 
 @router.get("/files/read")
@@ -619,15 +611,22 @@ def raw_workspace_file(
 
 @router.get("/tree")
 async def get_tree(
+    include_generated: bool = False,
+    include_hidden: bool = False,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
 ):
     user = get_current_user(authorization, session)
-    result = await registry.call("workspace.run+command", user.id, {"command": "dir /s /b"})
+    project_root = get_project_root(user.id, None)
+    tree = workspace_tree(
+        project_root,
+        include_generated=include_generated,
+        include_hidden=include_hidden,
+    )
     return {
         "root": ".",
-        "tree": result["result"].get("output", ""),
-        "command": "dir /s /b",
+        "tree": tree,
+        "command": "workspace.list+files",
     }
 
 @router.get("/git-diff")

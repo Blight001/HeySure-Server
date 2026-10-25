@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from tools import workspace
+from tools import workspace_files
 
 
 class WorkspaceFileToolTests(unittest.TestCase):
@@ -122,6 +123,50 @@ class WorkspaceFileToolTests(unittest.TestCase):
         else:
             self.assertEqual(result["failure_type"], "shell_launch_failed")
             self.assertIn("stderr", result)
+
+    def test_temporary_link_exposes_canvas_reference_without_server_path(self):
+        payload = {
+            "url": "https://public.example/api/tmp-files/fgrant_x/token",
+            "file_name": "采集资料.png",
+            "mime_type": "image/png; charset=binary",
+            "server_path": "D:/must-not-leak/采集资料.png",
+        }
+        result = workspace_files._with_canvas_import_reference(payload)
+        self.assertEqual(result["canvas_import_reference"], {
+            "url": payload["url"],
+            "name": "采集资料.png",
+            "mime": "image/png",
+            "kind": "image",
+        })
+        self.assertNotIn("server_path", result["canvas_import_reference"])
+
+    def test_temporary_link_can_register_workspace_path_as_shortcut(self):
+        with patch.object(
+            workspace_files,
+            "register_workspace_file",
+            return_value={"file_ref": "file_shortcut"},
+        ) as register, patch.object(
+            workspace_files,
+            "create_temporary_file_link",
+            return_value={
+                "url": "https://public.example/api/tmp-files/fgrant/token",
+                "file_ref": "file_shortcut",
+                "file_name": "资料.png",
+                "mime_type": "image/png",
+            },
+        ) as create, patch.object(
+            workspace_files,
+            "configured_public_base_url",
+            return_value="https://public.example",
+        ):
+            result = workspace_files._workspace_file_manage(
+                7,
+                {"action": "create_temporary_link", "workspace_path": "collected/资料.png"},
+                11,
+            )
+        register.assert_called_once()
+        create.assert_called_once()
+        self.assertEqual(result["canvas_import_reference"]["kind"], "image")
 
 
 if __name__ == "__main__":

@@ -13,11 +13,11 @@ from sqlmodel import Session, select
 from api.database import engine
 from api.models import AIRuntimeStatus
 from api.services.storage.workspace_scope import member_workspace_dir
+from api.services.storage.workspace_visibility import workspace_tree
 from api.sio import sio
 
 logger = logging.getLogger(__name__)
 MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
-_IGNORED_WORKSPACE_DIRS = {".git", ".heysure", "__pycache__", "venv", "node_modules", ".aider"}
 
 def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
     """Resolve the working directory available to an AI.
@@ -46,26 +46,24 @@ def safe_join(root: str, *paths: str) -> str:
         raise HTTPException(status_code=403, detail="Access denied: path outside workspace")
     return joined
 
-def generate_file_tree(path: str, prefix: str = "") -> str:
-    tree_str = ""
-    try:
-        if not os.path.exists(path):
-            return "Path not found\n"
-        items = sorted(os.listdir(path))
-        items = [i for i in items if i not in _IGNORED_WORKSPACE_DIRS]
-
-        for i, item in enumerate(items):
-            is_last = i == len(items) - 1
-            connector = "└── " if is_last else "├── "
-            tree_str += f"{prefix}{connector}{item}\n"
-
-            full_path = os.path.join(path, item)
-            if os.path.isdir(full_path):
-                new_prefix = prefix + ("    " if is_last else "│   ")
-                tree_str += generate_file_tree(full_path, new_prefix)
-    except Exception as exc:
-        tree_str += f"{prefix}Error: {str(exc)}\n"
-    return tree_str
+def generate_file_tree(
+    path: str,
+    prefix: str = "",
+    *,
+    include_generated: bool = False,
+    include_hidden: bool = False,
+) -> str:
+    """Return a bounded tree using the shared curated workspace policy."""
+    if not os.path.exists(path):
+        return "Path not found\n"
+    tree = workspace_tree(
+        path,
+        include_generated=include_generated,
+        include_hidden=include_hidden,
+    )
+    if not prefix:
+        return tree
+    return "".join(f"{prefix}{line}" for line in tree.splitlines(keepends=True))
 
 @dataclass
 class MCPTool:
