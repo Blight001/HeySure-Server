@@ -24,6 +24,8 @@ class _Session:
         self.statements.append(statement)
         if len(self.statements) == 1:
             return _Result(one=(11, 7, 18, 2))
+        if len(self.statements) == 2:
+            return _Result(one=18)
         return _Result(all_rows=[])
 
 
@@ -48,7 +50,8 @@ def test_total_tokens_filters_persisted_and_live_usage_by_session(monkeypatch):
     ))
 
     assert result["total_tokens"] == 18
-    assert len(session.statements) == 2
+    assert result["context_total_tokens"] == 18
+    assert len(session.statements) == 3
     assert "session-selected" in _compiled_params(session.statements[0])
     assert "session-selected" in _compiled_params(session.statements[1])
 
@@ -70,8 +73,10 @@ def test_total_tokens_keeps_aggregate_mode_when_session_is_omitted(monkeypatch):
     ))
 
     persisted_sql = str(session.statements[0]).lower()
-    live_sql = str(session.statements[1]).lower()
+    active_sql = str(session.statements[1]).lower()
+    live_sql = str(session.statements[2]).lower()
     assert "chatmessage.session_id =" not in persisted_sql
+    assert "compressed_away" in _compiled_params(session.statements[1])
     assert "chatrun.session_id =" not in live_sql
 
 

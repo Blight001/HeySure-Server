@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 from sqlmodel import Session, select
 from api.database import engine
 from api.models import AIMessage, ChatRun
-from .ai_message_state import _pending_replies
+from .ai_message_state import _pending_replies, stable_peer_session_id
 from .ai_message_store import _row_to_dict
 
 def get_active_session_id(user_id: int, to_ai_config_id: int) -> Optional[str]:

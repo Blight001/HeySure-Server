@@ -7,6 +7,7 @@ IS_ROUTER_ENTRY = False
 import json
 import mimetypes
 import os
+import uuid
 import time
 from typing import List, Optional
 
@@ -41,6 +42,7 @@ from api.chat_runtime.chat_prompt_utils import (
     _clear_run_live_text,
     _strip_runtime_injected_sections,
 )
+from ai_runtime.worker import notify_queue
 from ai_runtime.inference.core import _raise_for_upstream_error
 
 
@@ -304,6 +306,71 @@ def stop_chat_run(
             pass
     _clear_run_live_text(run_id)
     return {"success": True, "run_id": run_id, "status": row.status, "stop_requested": True}
+
+
+@router.post("/run/{run_id}/resume")
+def resume_chat_run(
+    run_id: str,
+    session: Session = Depends(get_session),
+    authorization: str = Header(None),
+):
+    """Continue a stopped run without creating a synthetic user message.
+
+    The stopped run is retained as history (including any MCP result). A new
+    worker run then asks the model to continue from that persisted history.
+    """
+    user = get_current_user(authorization, session)
+    previous = session.exec(
+        select(ChatRun).where(ChatRun.run_id == run_id, ChatRun.user_id == user.id)
+    ).first()
+    if not previous:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if str(previous.status or "").strip() != "stopped":
+        raise HTTPException(status_code=409, detail="Only stopped runs can be resumed")
+    active = session.exec(select(ChatRun).where(
+        ChatRun.user_id == user.id,
+        ChatRun.ai_kind == previous.ai_kind,
+        ChatRun.session_id == previous.session_id,
+        ChatRun.ai_config_id == previous.ai_config_id,
+        ChatRun.status.in_(["queued", "running"]),
+    )).first()
+    if active:
+        raise HTTPException(status_code=409, detail="A run is already active in this session")
+
+    resumed_id = f"run_{uuid.uuid4().hex}"
+    resumed = ChatRun(
+        run_id=resumed_id,
+        user_id=previous.user_id,
+        ai_config_id=previous.ai_config_id,
+        ai_kind=previous.ai_kind,
+        session_id=previous.session_id,
+        session_name=previous.session_name,
+        status="queued",
+        stop_requested=False,
+        worker_kwargs_json=previous.worker_kwargs_json,
+    )
+    session.add(resumed)
+    session.commit()
+
+    if settings.ai_dispatch_mode == "remote":
+        notify_queue(resumed_id)
+    else:
+        from .chat_run_start_routes import _start_local_worker
+
+        try:
+            extras = json.loads(previous.worker_kwargs_json or "{}")
+        except (TypeError, ValueError):
+            extras = {}
+        if not isinstance(extras, dict):
+            extras = {}
+        context = {
+            "ai_config_id": previous.ai_config_id,
+            "ai_kind": previous.ai_kind,
+            "session_id": previous.session_id,
+            "session_name": previous.session_name or "未命名会话",
+        }
+        _start_local_worker(resumed_id, user, context, extras)
+    return {"success": True, "run_id": resumed_id, "status": "queued"}
 
 @router.post("/save", response_model=ChatMessage)
 def save_chat_message(

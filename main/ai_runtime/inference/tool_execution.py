@@ -61,6 +61,23 @@ async def call_mcp_or_endpoint_tool(
     ai_config_id: Optional[int],
 ) -> Dict[str, object]:
     arguments = normalize_automation_card_arguments(tool, arguments)
+    if tool == "console.execute" and str(arguments.get("target") or "workspace").strip().lower() == "device":
+        if ai_config_id is None:
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="ai_config_id is required for endpoint MCP tools")
+        from api.services.mcp.capability_view import ensure_tool_eligible
+        from tools.console import console_device_request
+
+        endpoint_tool, endpoint_args = console_device_request(arguments)
+        if not is_endpoint_agent_tool(endpoint_tool):
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=400, detail="console target tool is not an available endpoint MCP")
+        ensure_tool_eligible(user_id, ai_config_id, endpoint_tool)
+        return await call_mcp_or_endpoint_tool(
+            endpoint_tool, user_id, endpoint_args, ai_config_id
+        )
     # Server-owned names are reserved.  A device may accidentally advertise a
     # tool with the same name, but it must never shadow the toolbox contract.
     # Workshop tools are the only intentional endpoint-first namespace.

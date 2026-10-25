@@ -119,6 +119,76 @@ def test_call_routes_endpoint_tool_to_connector_runtime(monkeypatch):
     assert result["result"]["success"] is True
 
 
+def test_console_device_target_reuses_endpoint_broker(monkeypatch):
+    observed = {}
+
+    async def fake_dispatch(**kwargs):
+        tool = kwargs["tool"]
+        user_id = kwargs["user_id"]
+        arguments = kwargs["arguments"]
+        ai_config_id = kwargs["ai_config_id"]
+        observed["call"] = (tool, user_id, arguments, ai_config_id)
+        return {"success": True}
+
+    monkeypatch.setattr(tool_execution, "is_workshop_tool", lambda _tool: False)
+    monkeypatch.setattr(tool_execution, "is_endpoint_agent_tool", lambda name: name == "run_command")
+    monkeypatch.setattr(tool_execution.settings, "service_role", "connector")
+    monkeypatch.setattr(
+        "api.services.mcp.capability_view.ensure_tool_eligible",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(tool_execution, "dispatch_endpoint_in_process", fake_dispatch)
+    # Exercise the routing branch without requiring a live endpoint socket.
+    result = asyncio.run(
+        tool_execution.call_mcp_or_endpoint_tool(
+            "console.execute",
+            9,
+            {"target": "device", "command": "echo ok", "device_id": "desktop-1"},
+            42,
+        )
+    )
+
+    assert result["result"]["success"] is True
+    assert observed["call"] == ("run_command", 9, {"command": "echo ok"}, 42)
+
+
+def test_console_device_target_can_select_another_endpoint_tool(monkeypatch):
+    observed = {}
+
+    async def fake_dispatch(**kwargs):
+        observed.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr(tool_execution, "is_workshop_tool", lambda _tool: False)
+    monkeypatch.setattr(
+        tool_execution,
+        "is_endpoint_agent_tool",
+        lambda name: name == "desktop_screenshot",
+    )
+    monkeypatch.setattr(tool_execution.settings, "service_role", "connector")
+    monkeypatch.setattr(
+        "api.services.mcp.capability_view.ensure_tool_eligible",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(tool_execution, "dispatch_endpoint_in_process", fake_dispatch)
+
+    asyncio.run(
+        tool_execution.call_mcp_or_endpoint_tool(
+            "console.execute",
+            9,
+            {
+                "target": "device",
+                "tool": "desktop_screenshot",
+                "arguments": {"action": "full"},
+            },
+            42,
+        )
+    )
+
+    assert observed["tool"] == "desktop_screenshot"
+    assert observed["arguments"] == {"action": "full"}
+
+
 def test_call_normalizes_native_card_steps_before_connector_dispatch(monkeypatch):
     observed = {}
 
@@ -240,7 +310,7 @@ def test_execute_tool_call_uses_extended_endpoint_bridge_timeout(monkeypatch):
 
 def test_execute_tool_call_converts_bridge_exception_to_result(monkeypatch):
     async def fake_call(tool, user_id, arguments, ai_config_id):
-        return {"result": {"success": True}}
+        return {"success": True}
 
     def fail_bridge(awaitable, timeout=None):
         awaitable.close()

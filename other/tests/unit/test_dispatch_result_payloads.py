@@ -1,6 +1,8 @@
 import json
+from types import SimpleNamespace
 
 from connector_runtime.dispatch import result_payloads
+from connector_runtime.dispatch import dispatch_results
 
 
 def test_cookie_snapshot_is_persisted_but_removed_from_dispatch_result(tmp_path, monkeypatch):
@@ -31,3 +33,35 @@ def test_screenshot_bytes_are_replaced_with_size_marker():
 
     assert output["nested"]["dataUrl"].startswith("<image data URL omitted")
     assert output["server_path"] == "/safe/path"
+
+
+def test_screenshot_dispatch_persistence_never_writes_data_url(monkeypatch):
+    persisted = {}
+    monkeypatch.setattr(
+        dispatch_results,
+        "_dispatch_module",
+        lambda: SimpleNamespace(
+            _device_kind_label=lambda _device_id: "桌面端",
+            _update_agent_task_state=lambda *_args, **_kwargs: None,
+        ),
+    )
+    monkeypatch.setattr(
+        dispatch_results.repository,
+        "finalize_dispatch_row",
+        lambda task_id, **kwargs: persisted.update(kwargs),
+    )
+    envelope = dispatch_results.ResultEnvelope(
+        task_id="atask_1",
+        context={"suppress_session_message": True},
+        device_id="desktop-1",
+        success=True,
+        tool="desktop_screenshot",
+        summary="",
+        result={"dataUrl": "data:image/png;base64,AAAA", "file_ref": "file_" + "a" * 32},
+        screenshot=True,
+    )
+
+    dispatch_results._persist_result(envelope)
+
+    assert persisted["result"]["dataUrl"].startswith("<image data URL omitted")
+    assert persisted["result"]["file_ref"].startswith("file_")

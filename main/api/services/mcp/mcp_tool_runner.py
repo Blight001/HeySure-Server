@@ -390,6 +390,19 @@ def _parse_llm_tool_call(
     return combined_reply, tool_name, args
 
 
+def _inheritance_inputs(
+    input_schema: Optional[Dict[str, Any]],
+    parameters: Optional[List[Dict[str, Any]]],
+    implementation: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Any], Dict[str, Any], Optional[int]]:
+    implementation = dict(implementation or {})
+    return (
+        _build_tool_input_schema(input_schema=input_schema, parameters=parameters),
+        implementation,
+        implementation.pop("_heysure_ai_config_id", None),
+    )
+
+
 async def run_inheritance_mcp_test(
     *,
     user: User,
@@ -415,7 +428,7 @@ async def run_inheritance_mcp_test(
     base_url = preset["base_url"]
     model = preset["model"]
     native_name = _to_native_tool_name(tool_name)
-    schema = _build_tool_input_schema(input_schema=input_schema, parameters=parameters)
+    schema, implementation, ai_config_id = _inheritance_inputs(input_schema, parameters, implementation)
 
     system_prompt = _build_system_prompt(
         tool=tool_name,
@@ -473,7 +486,7 @@ async def run_inheritance_mcp_test(
     tool_result = await dispatch_task_to_agent(
         device_id=target_device_id,
         user_id=int(user.id),
-        ai_config_id=None,
+        ai_config_id=ai_config_id,
         ai_kind="inheritance_test",
         session_id=session_id,
         session_name="MCP 工具测试",

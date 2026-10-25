@@ -9,7 +9,7 @@ import time
 from typing import Dict, Optional
 
 from fastapi import Depends, Header, HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import defer
 from sqlmodel import Session, select
 
@@ -407,6 +407,25 @@ async def get_total_tokens(
     total_prompt_tokens, total_completion_tokens, total_all_tokens, message_count = (
         session.exec(agg_stmt).one()
     )
+    # ``total_tokens`` is an accounting value and intentionally includes rows
+    # that were compressed away.  The chat progress indicator needs the live
+    # context value instead; otherwise an old, compressed conversation keeps
+    # growing past the configured compression threshold forever.
+    active_stmt = select(
+        func.coalesce(func.sum(canonical_total_sql(ChatMessage)), 0),
+    ).where(
+        ChatMessage.user_id == user.id,
+        ChatMessage.ai_kind == ai_kind,
+        or_(
+            ChatMessage.tags.is_(None),
+            ~ChatMessage.tags.contains("compressed_away"),
+        ),
+    )
+    if ai_config_id is not None:
+        active_stmt = active_stmt.where(ChatMessage.ai_config_id == ai_config_id)
+    if session_id is not None:
+        active_stmt = active_stmt.where(ChatMessage.session_id == session_id)
+    active_persisted_total = int(session.exec(active_stmt).one() or 0)
     pending = _live_pending_tokens_for(
         session,
         user_id=user.id,
@@ -425,5 +444,6 @@ async def get_total_tokens(
         "live_prompt_tokens": int(pending["prompt_tokens"]),
         "live_completion_tokens": int(pending["completion_tokens"]),
         "live_total_tokens": int(pending["total_tokens"]),
+        "context_total_tokens": int(active_persisted_total + pending["total_tokens"]),
         "message_count": int(message_count or 0)
     }

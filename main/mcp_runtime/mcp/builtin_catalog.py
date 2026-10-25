@@ -3,6 +3,7 @@ from tools.introspection import (
     _mcp_describe_tool,
 )
 from tools.workspace import _run_command
+from tools.console import _console_execute, CONSOLE_EXECUTE_SCHEMA
 from tools.workspace_files import _workspace_file_manage, WORKSPACE_FILE_MANAGE_SCHEMA
 from tools.members import _member_manage, MEMBER_MANAGE_SCHEMA
 from tools.task_plan import (
@@ -119,6 +120,17 @@ BUILTIN_TOOLS = (
             "required": [],
         },
         handler=_run_command,
+        destructive=True,
+    ),
+    MCPTool(
+        name="console.execute",
+        description=(
+            "统一控制台入口。默认在当前 AI 的服务器工作区执行命令；target=device 时由 Tool Broker "
+            "转发到 arguments/tool 指定的已授权端侧 MCP（省略 tool 时为 run_command）。优先使用 argv + shell=none，避免 shell 转义；"
+            "工作区、设备和宝塔主机路径彼此隔离，不能用本工具越界。"
+        ),
+        input_schema=CONSOLE_EXECUTE_SCHEMA,
+        handler=_console_execute,
         destructive=True,
     ),
     MCPTool(

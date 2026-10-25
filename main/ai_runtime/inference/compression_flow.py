@@ -204,12 +204,11 @@ def maybe_auto_compress(
     turn_calls: List[Dict[str, Any]],
     task_is_finished: bool,
 ) -> CompressionDecision:
-    """Legacy threshold compressor kept for compatibility with old callers.
+    """Compress a digital-member context before the next model request.
 
-    The worker loop must not call this after a model turn: compression at that
-    boundary can discard pending tool calls or repeat a final response. The
-    request-boundary coordinator will replace this helper when V2 budgeting is
-    enabled.
+    This must run at a request boundary, before a turn emits tool calls. The
+    previous post-turn placement could discard pending calls or repeat a final
+    response.
     """
     if not _auto_compression_allowed(context, state, turn_calls, task_is_finished):
         return CompressionDecision(False, False, state)

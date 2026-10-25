@@ -165,6 +165,7 @@ def _persist_result(envelope: ResultEnvelope) -> None:
     dispatch = _dispatch_module()
     status = "成功" if envelope.success else "失败"
     display = omit_screenshot_bytes(envelope.result) if envelope.screenshot else envelope.result
+    persisted_result = display if envelope.screenshot else envelope.result
     result_text = envelope.result if isinstance(envelope.result, str) else _safe_dump(display)
     label = dispatch._device_kind_label(envelope.device_id)
     content = (
@@ -183,7 +184,7 @@ def _persist_result(envelope: ResultEnvelope) -> None:
         status="completed" if envelope.success else "error",
         success=envelope.success,
         summary=envelope.summary,
-        result=envelope.result,
+        result=persisted_result,
         error=None if envelope.success else envelope.summary or "agent reported failure",
     )
 

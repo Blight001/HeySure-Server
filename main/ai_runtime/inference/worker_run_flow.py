@@ -16,6 +16,7 @@ from api.runtime import run_context
 from api.services.chat.chat_persistence import _save_message
 from api.services.tasks import task_plan as plan_service
 from ai_runtime.inference import (
+    compression_flow,
     phase_context,
     worker_post_turn_flow,
     worker_setup,
@@ -178,6 +179,11 @@ class WorkerRunMachine:
             })
 
     def _run_step(self) -> WorkerRunStepAction:
+        # Compression belongs at the request boundary: the conversation can
+        # be rebuilt before a new model request, without dropping tool calls
+        # emitted by the previous response.
+        if self._compress_before_turn():
+            return WorkerRunStepAction.NEXT_TURN
         turn = self._run_model_turn()
         if turn.action is worker_turn_flow.WorkerTurnAction.STOP_RUN:
             return WorkerRunStepAction.STOP_RUN
@@ -192,6 +198,50 @@ class WorkerRunMachine:
             self.complete_run()
             return WorkerRunStepAction.STOP_RUN
         return self._run_tool_batch(turn)
+
+    def _compress_before_turn(self) -> bool:
+        request = self.request
+        state = self.state
+        setup = self.setup
+        task_status = str(getattr(state.task_job, "status", "") or "").lower()
+        task_finished = task_status in {"completed", "cancelled", "failed"}
+        context = compression_flow.CompressionContext(
+            session=self.session,
+            user=setup.user,
+            config=setup.config,
+            user_id=request.user_id,
+            ai_config_id=request.ai_config_id,
+            ai_kind=request.ai_kind,
+            session_id=request.session_id,
+            session_name=state.session_name,
+            model=setup.model,
+            api_key=setup.api_key,
+            base_url=setup.base_url,
+            system_prompt=setup.system_prompt,
+            compression_prompt=str(setup.auto_control.get("compression_prompt") or ""),
+            plan_state=state.plan_state,
+            reset_live_usage=self.reset_live_usage,
+            set_generating=lambda: self.set_live_phase("generating"),
+            inject_flow_directive=self.inject_flow_directive,
+        )
+        compression_state = compression_flow.CompressionState(
+            conversation=state.conversation,
+            compression_failed=state.compression_failed,
+            phase_start_convo_index=state.phase_start_conversation_index,
+            phase_started_at=state.phase_started_at,
+            phase_mcp_statuses=state.phase_mcp_statuses,
+        )
+        outcome = compression_flow.maybe_auto_compress(
+            context, compression_state, [], task_finished,
+        )
+        if not outcome.handled:
+            return False
+        state.conversation = outcome.state.conversation
+        state.compression_failed = outcome.state.compression_failed
+        state.phase_start_conversation_index = outcome.state.phase_start_convo_index
+        state.phase_started_at = outcome.state.phase_started_at
+        state.phase_mcp_statuses = outcome.state.phase_mcp_statuses
+        return outcome.continue_loop
 
     def _run_model_turn(self) -> worker_turn_flow.WorkerTurnOutcome:
         request = self.request

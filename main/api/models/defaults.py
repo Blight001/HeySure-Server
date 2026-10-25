@@ -63,7 +63,7 @@ DEFAULT_UI_BRAIN_VIEW_MODE = "sections"
 
 DEFAULT_MODEL_PRESETS = """[{"id":"deepseek-chat","name":"DeepSeek Chat","api_key":"sk-cb40bc0b0b894934919907913e337927","base_url":"https://api.deepseek.com/chat/completions","model":"deepseek-chat"}]"""
 
-DEFAULT_MCP_NAMESPACE_HINTS = """{"mcp":"MCP 自省入口。使用 mcp.describe+tool 发现工具并读取参数 schema。","member":"AI 数字成员管理。member.manage 查询、创建、编辑成员及其任务与设备绑定，需要绑定图书馆；成员删除只能由人在控制台确认。","todo":"统一计划管理。todo.manage(action=create/get/edit/delete) 创建、查看、推进或删除计划；edit 更新当前阶段状态，最后阶段更新后系统自动收尾。","workspace":"工作区。workspace.run+command 执行命令和文本文件操作；查看工作区图片必须调用 workspace.file+manage(action=view_image)，控制台列出路径不会把图片送入模型；该工具也可注册可安全发送的 file_ref；联网查询用 workspace.search。","device_mcp":"设备清单、设备 MCP 使用范围与动态工具管理（图书馆工具，需绑定图书馆）。","conversation":"会话管理。","knowledge":"knowledge.search 检索知识；knowledge.manage 管理图书馆内容（需绑定图书馆）。","ai":"AI 间通信。","user":"用户通知。","web":"联网搜索。","memory":"长期记忆。","project":"项目管理。"}"""
+DEFAULT_MCP_NAMESPACE_HINTS = """{"mcp":"MCP 自省入口。使用 mcp.describe+tool 发现工具并读取参数 schema。","member":"AI 数字成员管理。member.manage 查询、创建、编辑成员及其任务与设备绑定，需要绑定图书馆；成员删除只能由人在控制台确认。","todo":"统一计划管理。todo.manage(action=create/get/edit/delete) 创建、查看、推进或删除计划；edit 更新当前阶段状态，最后阶段更新后系统自动收尾。","workspace":"工作区。优先使用统一控制台 console.execute(target=workspace) 执行命令和文本文件操作，也兼容 workspace.run+command；查看工作区图片必须调用 workspace.file+manage(action=view_image)，控制台列出路径不会把图片送入模型；该工具也可注册可安全发送的 file_ref；联网查询用 workspace.search。","device_mcp":"设备清单、设备 MCP 使用范围与动态工具管理（图书馆工具，需绑定图书馆）。","conversation":"会话管理。","knowledge":"knowledge.search 检索知识；knowledge.manage 管理图书馆内容（需绑定图书馆）。","ai":"AI 间通信。","user":"用户通知。","web":"联网搜索。","memory":"长期记忆。","project":"项目管理。"}"""
 
 DEFAULT_MCP_DYNAMIC_RULE = """工具目录由运行时按当前 AI 的真实权限动态注入系统提示，并显示在前置 Prompt 预览中；不要把工具说明附加到用户消息。已暴露参数 schema 的工具应直接调用；只有目标工具未暴露 schema 或参数确实不明确时，才用 mcp.describe+tool（支持 tool 单个、tools 批量或 query 关键词搜索）发现工具或补充 schema。不要在任务开始时枚举、摸底全部 MCP；describe 成功返回的目标工具会在随后轮次直接可调用，无需为了启用工具而创建 Todo。
 
@@ -84,7 +84,7 @@ Rules:
 - If the user asks for any real operation (inspect/read/search/create/update/delete/run/click/open/send/check/verify), the next assistant step must include an actual <mcp-call>. Plain text is allowed only for clarification, refusal, or final summary after tool results.
 - Never narrate an action as completed without a successful MCP result. If no suitable tool is known, use mcp.describe+tool with a focused tool/tools/query request; do not enumerate the whole MCP catalog.
 - Do not assume tool arguments. The [动态 MCP 说明] section in the system prompt lists the callable tools. Call tools whose schema is already exposed directly; use mcp.describe+tool (tool / tools / query) only when the target schema is unavailable or genuinely unclear.
-- Use workspace.run+command for all workspace file operations (reading, listing, writing, editing, deleting) as well as command execution and diagnostics — run the appropriate shell commands (e.g. type/cat, dir/ls, redirection or scripts to write and edit files).
+- Prefer console.execute for command execution: target=workspace uses the current AI workspace, target=device uses only an authorized endpoint MCP. workspace.run+command remains compatible for server-workspace file operations and diagnostics.
 - Use admin.* tools when managing connected agents.
 - Only fall back to legacy File/Create File/Delete File/Run Command formats if MCP is unavailable."""
 

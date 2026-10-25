@@ -74,3 +74,21 @@ def test_send_to_reply_paths_record_reply_time(monkeypatch, explicit_message_id)
     assert result["reply_content"] == "done"
     assert isinstance(result["replied_at"], float)
     assert result["waiter_resolved"] is True
+
+
+def test_new_sender_session_uses_stable_peer_route(monkeypatch):
+    monkeypatch.setattr(ai_message_routing, "Session", lambda _engine: _Session(None))
+
+    result = ai_message_routing.find_corresponding_target_session_id(
+        user_id=1,
+        from_ai_config_id=2,
+        to_ai_config_id=3,
+        from_session_id="session_1",
+    )
+
+    assert result == ai_message_routing.stable_peer_session_id(
+        user_id=1,
+        from_ai_config_id=2,
+        to_ai_config_id=3,
+        from_session_id="session_1",
+    )
