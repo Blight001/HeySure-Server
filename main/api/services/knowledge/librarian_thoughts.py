@@ -42,6 +42,50 @@ from ...integrations import clawhub
 logger = logging.getLogger(__name__)
 
 
+def _inheritance_entry_allowed(entry: Dict[str, Any], thought_paths: set[str]) -> bool:
+    path = str(entry.get("file_path") or "").strip().replace("\\", "/")
+    memory_id = str(entry.get("memory_id") or "").strip()
+    return bool(path and path not in thought_paths and memory_id and
+                str(entry.get("status") or "active") == "active")
+
+
+def _inheritance_entry_kind_fields(
+    entry: Dict[str, Any], *, workspace: bool, path: str
+) -> Dict[str, Any]:
+    if not workspace:
+        return {"ownerHandle": "", "source": "topic", "endpoint_kind": "any", "kind": "knowledge"}
+    return {
+        "ownerHandle": str(entry.get("owner_handle") or ""),
+        "source": "workspace",
+        "endpoint_kind": str(entry.get("endpoint_kind") or "any"),
+        "scope": str(entry.get("scope") or "ai"),
+        "scope_target": entry.get("scope_target"),
+        "owner_ai_config_id": entry.get("source_ai_config_id"),
+        "kind": "workspace",
+    }
+
+
+def _inheritance_entry_row(entry: Dict[str, Any]) -> Dict[str, Any]:
+    memory_id = str(entry.get("memory_id") or "").strip()
+    path = str(entry.get("file_path") or "").strip().replace("\\", "/")
+    installed_at = float(entry.get("created_at") or entry.get("updated_at") or 0)
+    workspace = str(entry.get("kind") or "") == "workspace"
+    row = {
+        "slug": memory_id,
+        "memory_id": memory_id,
+        "displayName": str(entry.get("title") or memory_id),
+        "summary": str(entry.get("summary") or ""),
+        "triggers": entry.get("triggers") or [],
+        "version": None,
+        "path": path,
+        "installed_at": installed_at,
+        "auto_enabled": False,
+        "present": True,
+    }
+    row.update(_inheritance_entry_kind_fields(entry, workspace=workspace, path=path))
+    return row
+
+
 def _inheritance_thoughts_payload(user_id: int) -> Dict[str, Any]:
     installed = _clawhub_installed_items(user_id)
     thought_paths = {
@@ -49,52 +93,11 @@ def _inheritance_thoughts_payload(user_id: int) -> Dict[str, Any]:
         for item in installed
         if str(item.get("path") or "").strip()
     }
-    for entry in _load_user_knowledge_entries(user_id):
-        path = str(entry.get("file_path") or "").strip().replace("\\", "/")
-        if not path or path in thought_paths:
-            continue
-        if str(entry.get("status") or "active") != "active":
-            continue
-        memory_id = str(entry.get("memory_id") or "").strip()
-        if not memory_id:
-            continue
-        if str(entry.get("kind") or "") == "workspace":
-            installed.append({
-                "slug": memory_id,
-                "memory_id": memory_id,
-                "displayName": str(entry.get("title") or memory_id),
-                "summary": str(entry.get("summary") or ""),
-                "triggers": entry.get("triggers") or [],
-                "version": None,
-                "ownerHandle": str(entry.get("owner_handle") or ""),
-                "source": "workspace",
-                "path": str(entry.get("file_path") or ""),
-                "installed_at": float(entry.get("created_at") or entry.get("updated_at") or 0),
-                "auto_enabled": False,
-                "endpoint_kind": str(entry.get("endpoint_kind") or "any"),
-                "scope": str(entry.get("scope") or "ai"),
-                "scope_target": entry.get("scope_target"),
-                "owner_ai_config_id": entry.get("source_ai_config_id"),
-                "present": True,
-                "kind": "workspace",
-            })
-            continue
-        installed.append({
-            "slug": memory_id,
-            "memory_id": memory_id,
-            "displayName": str(entry.get("title") or memory_id),
-            "summary": str(entry.get("summary") or ""),
-            "triggers": entry.get("triggers") or [],
-            "version": None,
-            "ownerHandle": "",
-            "source": "topic",
-            "path": path,
-            "installed_at": float(entry.get("created_at") or entry.get("updated_at") or 0),
-            "auto_enabled": False,
-            "endpoint_kind": "any",
-            "present": True,
-            "kind": "knowledge",
-        })
+    installed.extend(
+        _inheritance_entry_row(entry)
+        for entry in _load_user_knowledge_entries(user_id)
+        if _inheritance_entry_allowed(entry, thought_paths)
+    )
     installed.sort(key=lambda item: float(item.get("installed_at") or 0), reverse=True)
     return {
         "description": "传承知识与 Skill 以本地文件为真相源：KnowledgeBase/topics/ 下的共享条目，以及每个 AI 工作区 skills/*/SKILL.md；可由 AI 主动创建或从 ClawHub / npx skills 安装。",

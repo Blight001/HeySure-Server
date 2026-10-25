@@ -144,14 +144,7 @@ def _candidate_cards(root: str) -> Iterable[Tuple[str, str]]:
         yield child.name, card
 
 
-def _build_item(
-    *,
-    user_id: int,
-    ai_config_id: int,
-    ai_name: str,
-    directory_name: str,
-    card_path: str,
-) -> Optional[Dict[str, Any]]:
+def _read_skill_card(card_path: str):
     try:
         stat = os.stat(card_path, follow_symlinks=False)
         if stat.st_size <= 0 or stat.st_size > MAX_WORKSPACE_SKILL_CARD_BYTES:
@@ -162,6 +155,10 @@ def _build_item(
         return None
     if len(raw.encode("utf-8")) > MAX_WORKSPACE_SKILL_CARD_BYTES:
         return None
+    return stat, raw
+
+
+def _skill_card_metadata(raw: str, directory_name: str) -> Optional[Dict[str, Any]]:
     meta_raw, body = _split_frontmatter(raw)
     meta = {str(key): _unquote(value) for key, value in meta_raw.items()}
     fallback_name = _first_heading_or_text(body, directory_name)
@@ -174,6 +171,29 @@ def _build_item(
     scope = str(meta.get("scope") or "ai").strip().lower()
     if scope != "global":
         scope = "ai"
+    return {"meta": meta, "name": name, "summary": summary, "triggers": triggers, "scope": scope}
+
+
+def _build_item(
+    *,
+    user_id: int,
+    ai_config_id: int,
+    ai_name: str,
+    directory_name: str,
+    card_path: str,
+) -> Optional[Dict[str, Any]]:
+    card = _read_skill_card(card_path)
+    if card is None:
+        return None
+    stat, raw = card
+    metadata = _skill_card_metadata(raw, directory_name)
+    if metadata is None:
+        return None
+    name = metadata["name"]
+    summary = metadata["summary"]
+    triggers = metadata["triggers"]
+    scope = metadata["scope"]
+    meta = metadata["meta"]
     owner_id = int(ai_config_id)
     scope_target = None if scope == "global" else str(owner_id)
     try:

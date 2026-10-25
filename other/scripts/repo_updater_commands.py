@@ -34,12 +34,19 @@ def run_command(
 
 def _kill_process_group(process: subprocess.Popen[str]) -> None:
     if os.name == "nt":
+        # Terminate the direct process first.  ``taskkill /T`` can wait for a
+        # detached child longer than the caller's command deadline on Windows.
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
         try:
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=10,
+                timeout=1,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
@@ -51,10 +58,10 @@ def _kill_process_group(process: subprocess.Popen[str]) -> None:
         except ProcessLookupError:
             pass
     try:
-        process.wait(timeout=10)
+        process.wait(timeout=1)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=1)
 
 
 def run_streaming(

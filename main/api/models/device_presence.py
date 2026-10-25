@@ -24,6 +24,7 @@ from sqlmodel import Field, SQLModel
 # Compatibility re-export for the dependency-capped public ``api.models``
 # aggregator. The durable model implementation remains in its own module.
 from .remote_controller_template import RemoteControllerTemplate
+from .codex import CodexEvent, CodexSession
 
 
 class DevicePresence(SQLModel, table=True):

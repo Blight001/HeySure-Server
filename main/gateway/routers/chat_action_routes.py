@@ -7,7 +7,6 @@ IS_ROUTER_ENTRY = False
 import json
 import mimetypes
 import os
-import uuid
 import time
 from typing import List, Optional
 
@@ -42,7 +41,6 @@ from api.chat_runtime.chat_prompt_utils import (
     _clear_run_live_text,
     _strip_runtime_injected_sections,
 )
-from ai_runtime.worker import notify_queue
 from ai_runtime.inference.core import _raise_for_upstream_error
 
 
@@ -319,6 +317,9 @@ def resume_chat_run(
     The stopped run is retained as history (including any MCP result). A new
     worker run then asks the model to continue from that persisted history.
     """
+    import uuid
+    from ai_runtime.worker import notify_queue
+
     user = get_current_user(authorization, session)
     previous = session.exec(
         select(ChatRun).where(ChatRun.run_id == run_id, ChatRun.user_id == user.id)

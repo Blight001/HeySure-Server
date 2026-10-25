@@ -305,18 +305,8 @@ def _bot_runtime_statuses() -> Dict[str, Any]:
     return payload
 
 
-def create_app() -> FastAPI:
-    fastapi_app = _new_fastapi_app()
 
-    router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
-    _register_dispatch_cancel_route(router)
-    _register_control_routes(router)
-
-    from api.runtime.health import build_health_router
-    from connector_runtime.health_detail import connector_health_detail
-
-    router.include_router(build_health_router("connector", detail_provider=connector_health_detail))
-
+def _register_codex_routes(router: APIRouter) -> None:
     @router.post("/codex/start")
     async def codex_start(req: CodexStartRequest) -> Dict[str, Any]:
         from connector_runtime.codex_bridge import send_to_device
@@ -334,9 +324,6 @@ def create_app() -> FastAPI:
         row = get_session(req.user_id, req.session_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Codex session not found")
-        # The Windows bridge currently runs a supervised ``codex exec --json``
-        # turn.  Keep requestId stable as the persisted session id so inbound
-        # JSONL events can be journaled without a second in-memory map.
         payload = {
             "requestId": req.session_id,
             "sessionId": req.session_id,
@@ -359,11 +346,15 @@ def create_app() -> FastAPI:
         row = get_session(req.user_id, req.session_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Codex session not found")
-        result = await send_to_device(device_id=row.device_id, event="codex:interrupt", payload=req.model_dump())
+        result = await send_to_device(
+            device_id=row.device_id, event="codex:interrupt", payload=req.model_dump()
+        )
         if not result.get("ok"):
             raise HTTPException(status_code=503, detail="Codex device is offline")
         return result
 
+
+def _register_device_status_routes(router: APIRouter) -> None:
     @router.post("/device-updates/broadcast")
     async def broadcast_device_update(req: DeviceUpdateBroadcastRequest) -> Dict[str, Any]:
         await sio.emit("device:update-available", req.model_dump())
@@ -371,20 +362,25 @@ def create_app() -> FastAPI:
 
     @router.get("/bot/statuses")
     def bot_statuses() -> Dict[str, Any]:
-        """Return ``{<channel>_statuses: {config_id: state}}`` for every bot.
-
-        api-gateway's bot status route consumes this; the shape stays
-        ``"<channel>_statuses"`` so existing clients keep working but the
-        set of keys grows automatically when new bots register.
-        """
         return _bot_runtime_statuses()
 
+
+def _dispatch_row(task_id: str):
+    from sqlmodel import Session, select
+    from api.database import engine
+    from api.models import AgentDispatchTask
+
+    with Session(engine) as session:
+        return session.exec(
+            select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
+        ).first()
+
+
+def _register_dispatch_routes(router: APIRouter) -> None:
     @router.post("/agent/dispatch")
     async def device_dispatch(req: DeviceDispatchRequest) -> Dict[str, Any]:
-        # Non-blocking: emit task:dispatch to the agent + persist a pending
-        # row. The caller polls /agent/dispatch/result/{task_id} for the
-        # outcome so connector-runtime restarts don't strand the request.
         from connector_runtime.dispatch.device_dispatch import dispatch_endpoint_tool
+
         try:
             task_id = await dispatch_endpoint_tool(
                 user_id=req.user_id,
@@ -397,25 +393,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"dispatch failed: {exc}")
         if not task_id:
             raise HTTPException(status_code=503, detail="no agent connected for this tool")
-        from sqlmodel import Session, select
-        from api.database import engine
-        from api.models import AgentDispatchTask
-        with Session(engine) as session:
-            row = session.exec(
-                select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
-            ).first()
+        row = _dispatch_row(task_id)
         return {"ok": True, "task_id": task_id, "status": row.status if row else "pending"}
 
     @router.get("/agent/dispatch/result/{task_id}")
     def device_dispatch_result(task_id: str) -> Dict[str, Any]:
-        # DB-backed lookup so connector-runtime restarts don't lose state.
-        from sqlmodel import Session, select
-        from api.database import engine
-        from api.models import AgentDispatchTask
-        with Session(engine) as session:
-            row = session.exec(
-                select(AgentDispatchTask).where(AgentDispatchTask.task_id == task_id)
-            ).first()
+        row = _dispatch_row(task_id)
         if not row:
             raise HTTPException(status_code=404, detail="task not found")
         payload: Dict[str, Any] = {
@@ -440,12 +423,6 @@ def create_app() -> FastAPI:
     async def device_dispatch_expire(
         task_id: str, req: Optional[DeviceDispatchExpireRequest] = None
     ) -> Dict[str, Any]:
-        """Finalize a dispatch whose remote caller stopped waiting.
-
-        AI Runtime polls Connector Runtime directly in split deployments, so
-        the expire endpoint must live beside the dispatch/result endpoints.
-        The Gateway mirror alone cannot unblock Connector's device queue.
-        """
         from connector_runtime.dispatch.device_dispatch import expire_dispatch
 
         expired = await expire_dispatch(
@@ -454,10 +431,10 @@ def create_app() -> FastAPI:
         )
         return {"ok": True, "expired": expired}
 
+
+def _register_feishu_routes(router: APIRouter) -> None:
     @router.post("/feishu/send")
     def feishu_send(req: FeishuSendRequest) -> Dict[str, Any]:
-        # Lark-oapi is loaded lazily inside the adapter so processes that
-        # never send outbound Feishu traffic don't pull it in at import time.
         from connector_runtime.bots.messaging import dispatcher
 
         try:
@@ -475,9 +452,20 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"feishu send failed: {exc}")
         return {"ok": True, "result": delivery.detail}
 
-    fastapi_app.include_router(router)
 
-    # Combine FastAPI + Socket.IO on one ASGI app so they share a single
-    # external port. ``sio`` is the real Socket.IO server because this
-    # process runs with HEYSURE_SERVICE_ROLE=connector (see api.sio).
+def create_app() -> FastAPI:
+    fastapi_app = _new_fastapi_app()
+    router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal_token)])
+    _register_dispatch_cancel_route(router)
+    _register_control_routes(router)
+    _register_codex_routes(router)
+    _register_device_status_routes(router)
+    _register_dispatch_routes(router)
+    _register_feishu_routes(router)
+
+    from api.runtime.health import build_health_router
+    from connector_runtime.health_detail import connector_health_detail
+
+    router.include_router(build_health_router("connector", detail_provider=connector_health_detail))
+    fastapi_app.include_router(router)
     return socketio.ASGIApp(sio, other_asgi_app=fastapi_app)

@@ -376,44 +376,6 @@ def _unquote_scalar(value: Any) -> Any:
     return s
 
 
-def _thought_meta_to_row(meta: Dict[str, Any], rel_path: str) -> Dict[str, Any]:
-    """把一条传承思想 .md 的 frontmatter 还原成 installed-row 形状。"""
-    version = meta.get("version")
-    if isinstance(version, str) and version.strip().lower() in ("", "null", "none"):
-        version = None
-    try:
-        installed_at = float(meta.get("installed_at") or 0)
-    except (TypeError, ValueError):
-        installed_at = 0.0
-    try:
-        owner_ai_config_id = int(meta.get("owner_ai_config_id")) if meta.get("owner_ai_config_id") not in (None, "", "null") else None
-    except (TypeError, ValueError):
-        owner_ai_config_id = None
-    auto_enabled = str(meta.get("auto_enabled") or "").strip().lower() in ("true", "1", "yes")
-    row: Dict[str, Any] = {
-        "slug": str(meta.get("slug") or "").strip(),
-        "displayName": str(meta.get("name") or meta.get("title") or meta.get("slug") or ""),
-        "summary": str(meta.get("description") or meta.get("summary") or ""),
-        "triggers": _parse_triggers_field(meta.get("triggers") or meta.get("keywords") or meta.get("tags") or ""),
-        "version": version,
-        "ownerHandle": str(meta.get("owner") or meta.get("ownerHandle") or ""),
-        "source": str(meta.get("source") or "manual"),
-        "path": rel_path,
-        "installed_at": installed_at,
-        "auto_enabled": auto_enabled,
-        "endpoint_kind": _normalize_endpoint(meta.get("endpoint_kind")),
-        "scope": str(meta.get("scope") or "global"),
-        "scope_target": str(meta.get("scope_target") or "").strip() or None,
-        "owner_ai_config_id": owner_ai_config_id,
-        "source_plan_id": str(meta.get("source_plan_id") or "").strip() or None,
-        "trust": {"verdict": str(meta.get("trust_verdict") or "")},
-    }
-    reg = str(meta.get("registry_url") or "").strip()
-    if reg:
-        row["registry_url"] = reg
-    return row
-
-
 def _iter_thought_files(user_id: int):
     """遍历 topics/ 下带传承思想标记的 .md，产出 (rel_path, abs_path, meta, body)。"""
     d = os.path.join(_kb_root(user_id), _TOPICS_DIR)
@@ -453,36 +415,6 @@ def _thought_filename(slug: str, display: str) -> str:
     base = _slugify(display or str(slug).split("/")[-1]) or "skill"
     suffix = hashlib.sha1(str(slug).encode("utf-8")).hexdigest()[:8]
     return f"{base}-{suffix}.md"
-
-
-def _render_thought_md(row: Dict[str, Any], body: str) -> str:
-    """把 installed-row + 正文渲染成单文件 .md（合并为单块 frontmatter）。"""
-    trust = row.get("trust") if isinstance(row.get("trust"), dict) else {}
-    triggers = row.get("triggers")
-    triggers = triggers if isinstance(triggers, list) else _parse_triggers_field(triggers)
-    fm: Dict[str, Any] = {
-        "name": str(row.get("displayName") or row.get("slug") or ""),
-        "description": str(row.get("summary") or ""),
-        "triggers": triggers,
-        _THOUGHT_MARKER_KEY: True,
-        "slug": str(row.get("slug") or ""),
-        "source": str(row.get("source") or "manual"),
-        "endpoint_kind": _normalize_endpoint(row.get("endpoint_kind")),
-        "scope": str(row.get("scope") or "global"),
-        "scope_target": row.get("scope_target"),
-        "owner_ai_config_id": row.get("owner_ai_config_id"),
-        "source_plan_id": row.get("source_plan_id"),
-        "evolved_at": row.get("evolved_at"),
-        "version": row.get("version"),
-        "owner": str(row.get("ownerHandle") or ""),
-        "installed_at": float(row.get("installed_at") or time.time()),
-        "auto_enabled": bool(row.get("auto_enabled")),
-        "trust_verdict": str(trust.get("verdict") or row.get("trust_verdict") or ""),
-    }
-    reg = str(row.get("registry_url") or "").strip()
-    if reg:
-        fm["registry_url"] = reg
-    return _yaml_frontmatter(fm) + "\n\n" + str(body or "").strip() + "\n"
 
 
 def _upsert_thought(user_id: int, row: Dict[str, Any], body: Optional[str] = None) -> Dict[str, Any]:
@@ -542,163 +474,27 @@ def _clawhub_installed_items(user_id: int) -> List[Dict[str, Any]]:
     return items
 
 
+def _entry_source(name: str):
+    from . import librarian_entry_sources
+
+    return getattr(librarian_entry_sources, name)
+
+
+def _thought_meta_to_row(meta: Dict[str, Any], rel_path: str) -> Dict[str, Any]:
+    return _entry_source("_thought_meta_to_row")(meta, rel_path)
+
+
+def _render_thought_md(row: Dict[str, Any], body: str) -> str:
+    return _entry_source("_render_thought_md")(row, body)
+
+
 def _load_user_knowledge_entries(user_id: int) -> List[Dict[str, Any]]:
-    """Scan KnowledgeBase/topics/*.md and installed SKILL.md to produce entry dicts.
-
-    Pure file scan for listing/reading (KnowledgeEntry table removed).
-    File is the source of truth. Scope/status parsed from frontmatter when present.
-    """
-    entries: List[Dict[str, Any]] = []
-    root = _kb_root(user_id)
-
-    # topics/ procedural knowledge
-    topics_dir = os.path.join(root, _TOPICS_DIR)
-    if os.path.isdir(topics_dir):
-        try:
-            for fname in os.listdir(topics_dir):
-                if not fname.lower().endswith(".md"):
-                    continue
-                rel = f"{_TOPICS_DIR}/{fname}".replace("\\", "/")
-                p = _topic_path(user_id, rel)
-                raw = _read_text(p)
-                if not raw:
-                    continue
-                meta, body = _split_frontmatter(raw)
-                meta = {k: _unquote_scalar(v) for k, v in meta.items()}
-                # 传承思想（单文件 .md，带 heysure_thought 标记）由下方 skills 段统一处理，topics 段跳过避免重复
-                if str(meta.get(_THOUGHT_MARKER_KEY) or "").strip().lower() in ("true", "1", "yes"):
-                    continue
-                memory_id = str(meta.get("memory_id") or "").strip()
-                if not memory_id:
-                    slug = os.path.splitext(fname)[0]
-                    memory_id = f"topic:{slug}"
-                title = str(meta.get("title") or os.path.splitext(fname)[0])
-                triggers = _parse_triggers_field(meta.get("triggers") or meta.get("keywords") or "")
-                status = str(meta.get("status") or "active")
-                scope = str(meta.get("scope") or "global")
-                summary = str(meta.get("summary") or (body or "")[:200]).strip()
-                try:
-                    mtime = os.path.getmtime(p)
-                except OSError:
-                    mtime = time.time()
-                entries.append({
-                    "memory_id": memory_id,
-                    "title": title,
-                    "triggers": triggers,
-                    "scope": scope,
-                    "scope_target": meta.get("scope_target"),
-                    "status": status,
-                    "confidence": float(meta.get("confidence") or 1.0),
-                    "use_count": 0,
-                    "last_used_at": None,
-                    "file_path": rel,
-                    "summary": summary,
-                    "source_job_id": meta.get("source_job_id"),
-                    "source_generation": meta.get("source_generation"),
-                    "source_ai_config_id": meta.get("source_ai_config_id"),
-                    "source_message_id": meta.get("source_message_id"),
-                    "created_at": float(meta.get("created_at") or mtime),
-                    "updated_at": float(meta.get("updated_at") or mtime),
-                })
-        except Exception as exc:
-            logger.info(f"_load_user_knowledge_entries topics failed user={user_id}: {exc}")
-
-    # skills under topics/ (via clawhub state)
-    try:
-        installed = _clawhub_installed_items(user_id)
-        for item in installed:
-            slug = str(item.get("slug") or "").strip()
-            if not slug:
-                continue
-            skill_rel = str(item.get("path") or "").strip().replace("\\", "/")
-            if not skill_rel:
-                continue
-            skill_abs = _topic_path(user_id, skill_rel)
-            if not os.path.exists(skill_abs):
-                continue
-            memory_id = f"skill:{slug}"
-            name = str(item.get("displayName") or slug)
-            summary = str(item.get("summary") or item.get("description") or "")
-            installed_at = float(item.get("installed_at") or 0)
-            entries.append({
-                "memory_id": memory_id,
-                "title": name,
-                "triggers": item.get("triggers") or [],
-                "scope": str(item.get("scope") or "global"),
-                "scope_target": item.get("scope_target") or item.get("owner_ai_config_id"),
-                "status": "active",
-                "confidence": 1.0,
-                "use_count": 0,
-                "last_used_at": None,
-                "file_path": skill_rel,
-                "summary": summary,
-                "source_job_id": item.get("source_plan_id"),
-                "source_generation": None,
-                "source_ai_config_id": None,
-                "source_message_id": None,
-                "created_at": installed_at or time.time(),
-                "updated_at": installed_at or time.time(),
-            })
-    except Exception as exc:
-        logger.info(f"_load_user_knowledge_entries skills failed user={user_id}: {exc}")
-
-    # AI-member workspace Skills are a first-class, file-backed source too.
-    # Import lazily to keep this low-level module independent from the
-    # workspace scanner's metadata helpers.
-    try:
-        from .workspace_skills import list_workspace_skills
-
-        for item in list_workspace_skills(int(user_id)):
-            installed_at = float(item.get("installed_at") or time.time())
-            entries.append({
-                "memory_id": item["slug"],
-                "title": item.get("displayName") or item["slug"],
-                "triggers": item.get("triggers") or [],
-                "scope": item.get("scope") or "ai",
-                "scope_target": item.get("scope_target"),
-                "status": "active",
-                "confidence": 1.0,
-                "use_count": 0,
-                "last_used_at": None,
-                "file_path": item.get("file_path") or "",
-                "summary": item.get("summary") or "",
-                "source_job_id": None,
-                "source_generation": None,
-                "source_ai_config_id": item.get("owner_ai_config_id"),
-                "source_message_id": None,
-                "created_at": installed_at,
-                "updated_at": installed_at,
-                "source": "workspace",
-                "kind": "workspace",
-                "endpoint_kind": item.get("endpoint_kind") or "any",
-                "owner_handle": item.get("ownerHandle") or "",
-                "_absolute_path": item.get("_absolute_path"),
-            })
-    except Exception as exc:
-        logger.info(f"_load_user_knowledge_entries workspace skills failed user={user_id}: {exc}")
-
-    return entries
+    return _entry_source("_load_user_knowledge_entries")(user_id)
 
 
-def _entry_dict_from_file_entry(e: Dict[str, Any], *, with_body: bool = False, user_id: Optional[int] = None) -> Dict[str, Any]:
-    """Convert internal file entry to API shape (add body if requested)."""
-    out = {k: e.get(k) for k in [
-        "memory_id", "title", "triggers", "scope", "scope_target", "status",
-        "confidence", "use_count", "last_used_at", "file_path", "summary",
-        "source_job_id", "source_generation", "source_ai_config_id", "source_message_id",
-        "created_at", "updated_at"
-    ]}
-    if with_body and user_id is not None:
-        try:
-            absolute = e.get("_absolute_path")
-            raw = _read_text(str(absolute)) if absolute else None
-            if raw is None:
-                fp = e.get("file_path") or ""
-                if fp:
-                    raw = _read_text(_topic_path(user_id, fp))
-            if raw is not None:
-                _m, body = _split_frontmatter(raw)
-                out["body"] = body
-        except Exception:
-            out["body"] = ""
-    return out
+def _entry_dict_from_file_entry(
+    entry: Dict[str, Any], *, with_body: bool = False, user_id: Optional[int] = None
+) -> Dict[str, Any]:
+    return _entry_source("_entry_dict_from_file_entry")(
+        entry, with_body=with_body, user_id=user_id
+    )

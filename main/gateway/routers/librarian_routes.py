@@ -56,6 +56,38 @@ class InheritanceThoughtEndpointBody(BaseModel):
     endpoint_kind: str = "any"
 
 
+def _skill_visible(item: Dict[str, Any], ai_config_id: Optional[int]) -> bool:
+    if str(item.get("kind") or "") == "knowledge" or item.get("present") is False:
+        return False
+    scope = str(item.get("scope") or "global").strip().lower()
+    target = str(item.get("scope_target") or item.get("owner_ai_config_id") or "").strip()
+    return scope != "ai" or (ai_config_id is not None and target == str(int(ai_config_id)))
+
+
+def _skill_match(item: Dict[str, Any], query: str) -> bool:
+    slug = str(item.get("slug") or "").strip()
+    name = str(item.get("displayName") or slug).strip()
+    summary = str(item.get("summary") or "").strip()
+    searchable = " ".join(
+        (slug, name, summary, " ".join(str(x) for x in item.get("triggers") or []))
+    ).casefold()
+    return bool(slug and (not query or query in searchable))
+
+
+def _skill_mention(item: Dict[str, Any]) -> Dict[str, Any]:
+    slug = str(item.get("slug") or "").strip()
+    return {
+        "slug": slug,
+        "name": str(item.get("displayName") or slug).strip(),
+        "summary": str(item.get("summary") or "").strip()[:240],
+        "triggers": item.get("triggers") or [],
+        "scope": item.get("scope") or "global",
+        "risk": item.get("risk") or "unknown",
+        "version": item.get("version"),
+        "endpoint_kind": item.get("endpoint_kind") or "any",
+    }
+
+
 @router.get("/skills")
 def list_skill_mentions(
     q: str = "",
@@ -73,32 +105,11 @@ def list_skill_mentions(
     query = str(q or "").strip().casefold()
     bounded_limit = max(1, min(int(limit or 20), 100))
     payload = librarian_service._inheritance_thoughts_payload(int(user.id))
-    items = []
-    for item in payload.get("installed") or []:
-        if str(item.get("kind") or "") == "knowledge":
-            continue
-        if item.get("present") is False:
-            continue
-        scope = str(item.get("scope") or "global").strip().lower()
-        target = str(item.get("scope_target") or item.get("owner_ai_config_id") or "").strip()
-        if scope == "ai" and (ai_config_id is None or target != str(int(ai_config_id))):
-            continue
-        slug = str(item.get("slug") or "").strip()
-        name = str(item.get("displayName") or slug).strip()
-        summary = str(item.get("summary") or "").strip()
-        searchable = " ".join((slug, name, summary, " ".join(str(x) for x in item.get("triggers") or []))).casefold()
-        if not slug or (query and query not in searchable):
-            continue
-        items.append({
-            "slug": slug,
-            "name": name,
-            "summary": summary[:240],
-            "triggers": item.get("triggers") or [],
-            "scope": item.get("scope") or "global",
-            "risk": item.get("risk") or "unknown",
-            "version": item.get("version"),
-            "endpoint_kind": item.get("endpoint_kind") or "any",
-        })
+    items = [
+        _skill_mention(item)
+        for item in payload.get("installed") or []
+        if _skill_visible(item, ai_config_id) and _skill_match(item, query)
+    ]
     items.sort(key=lambda row: (row["name"].casefold(), row["slug"]))
     return {"items": items[:bounded_limit], "total": len(items)}
 
