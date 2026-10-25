@@ -42,6 +42,7 @@ from tools.automation import (
     AUTOMATION_MANAGE_SCHEMA,
     _automation_manage,
 )
+from tools.program import _mcp_program, MCP_PROGRAM_SCHEMA
 BUILTIN_TOOLS = (
     MCPTool(
         name="mcp.describe+tool",
@@ -391,6 +392,19 @@ BUILTIN_TOOLS = (
         ),
         input_schema=DEVICE_MCP_MANAGE_SCHEMA,
         handler=_device_mcp_manage,
+        destructive=True,
+    ),
+
+    MCPTool(
+        name="mcp.program",
+        description=(
+            "受限的 MCP 编排工具。通过 JSON workflow 执行多个已授权 MCP，支持依赖、变量引用、"
+            "foreach 批量调用和有界并发。先用 action=validate 校验，再用 action=run 执行；"
+            "mode=async 返回 run_id，随后用 action=get/cancel 查询或取消；不允许嵌套 mcp.program，"
+            "也不允许脚本直接访问网络、文件系统或进程。"
+        ),
+        input_schema=MCP_PROGRAM_SCHEMA,
+        handler=_mcp_program,
         destructive=True,
     ),
 

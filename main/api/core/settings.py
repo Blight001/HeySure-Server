@@ -281,6 +281,19 @@ class Settings(BaseSettings):
     workflow_max_argument_bytes: int = Field(default=256 * 1024)
     workflow_max_result_bytes: int = Field(default=10 * 1024 * 1024)
     workflow_result_retention_seconds: int = Field(default=60 * 60 * 24 * 30)
+    # ---- MCP program orchestrator ------------------------------------------
+    # Phase one uses a bounded JSON workflow.  A sandboxed JavaScript frontend
+    # can compile to this contract later without changing MCP clients.
+    mcp_program_enabled: bool = Field(default=True)
+    mcp_program_max_steps: int = Field(default=100, ge=1, le=1000)
+    mcp_program_max_fanout: int = Field(default=50, ge=1, le=1000)
+    mcp_program_max_concurrency: int = Field(default=8, ge=1, le=64)
+    mcp_program_max_argument_bytes: int = Field(default=256 * 1024, ge=1024, le=10 * 1024 * 1024)
+    mcp_program_max_result_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=50 * 1024 * 1024)
+    mcp_program_max_runtime_seconds: int = Field(default=15 * 60, ge=1, le=24 * 60 * 60)
+    mcp_program_async_enabled: bool = Field(default=True)
+    mcp_program_worker_poll_seconds: float = Field(default=1.0, ge=0.1, le=60.0)
+    mcp_program_lease_seconds: int = Field(default=30 * 60, ge=60, le=24 * 60 * 60)
     # ---- Auth / Socket.IO ----------------------------------------------------
 
     jwt_secret: str = Field(

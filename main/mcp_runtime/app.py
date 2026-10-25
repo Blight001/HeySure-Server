@@ -13,6 +13,7 @@ substitute for the acting AI config.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
@@ -25,6 +26,7 @@ from mcp_runtime.mcp import registry
 from mcp_runtime.mcp.loader import reload_registry
 from api.runtime.internal_http import require_internal_token
 from api.runtime.health import build_health_router, state_for
+from api.core.settings import settings
 
 
 logger = logging.getLogger(__name__)
@@ -58,9 +60,22 @@ async def _lifespan(app: FastAPI):
     from mcp_runtime.mcp import registry as _mcp_registry
     logger.info(f"ready: {len(_mcp_registry._tools)} tools (version {_mcp_registry.version})")
     health.mark_ready()
+    worker_stop = asyncio.Event()
+    worker_task = None
+    if settings.mcp_program_enabled and settings.mcp_program_async_enabled:
+        from mcp_runtime.mcp.program_jobs import program_worker_loop
+
+        worker_task = asyncio.create_task(program_worker_loop(worker_stop), name="mcp-program-worker")
     try:
         yield
     finally:
+        if worker_task is not None:
+            worker_stop.set()
+            try:
+                await asyncio.wait_for(worker_task, timeout=10)
+            except asyncio.TimeoutError:
+                worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
         health.begin_draining()
 
 

@@ -69,6 +69,7 @@ from .mcp_call_stat import (
     ExternalMcpCallAudit,
     ExternalMcpCredential,
     McpFailureEvent,
+    McpProgramRun,
     McpToolStat,
 )
 from .bot_session_route import BotConnection, BotContact, BotSessionRoute, BotUserCursor
@@ -132,6 +133,7 @@ __all__ = [
     "McpFailureEvent",
     "ExternalMcpCallAudit",
     "ExternalMcpCredential",
+    "McpProgramRun",
     "WorkshopAiBinding",
     # chat
     "ChatMessage",

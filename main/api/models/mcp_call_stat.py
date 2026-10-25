@@ -9,6 +9,7 @@ located in chat and the responsible tool iterated.
 import time
 from typing import Optional
 
+from sqlalchemy import Index
 from sqlmodel import Field, SQLModel
 
 
@@ -67,3 +68,33 @@ class ExternalMcpCallAudit(SQLModel, table=True):
     error_code: str = Field(default="", max_length=80)
     duration_ms: int = Field(default=0)
     created_at: float = Field(default_factory=time.time, index=True)
+
+
+class McpProgramRun(SQLModel, table=True):
+    """Durable owner-scoped execution record for asynchronous MCP programs."""
+
+    __table_args__ = (
+        Index("ix_mcpprogramrun_user_status", "user_id", "status"),
+        Index("ix_mcpprogramrun_status_lease", "status", "lease_until"),
+    )
+
+    id: str = Field(primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    ai_config_id: Optional[int] = Field(default=None, index=True)
+    status: str = Field(default="queued", index=True)
+    # Program, input and context are encrypted envelopes; results are encrypted
+    # too because a successful tool can contain user content or credentials.
+    program_json: str
+    input_json: str = Field(default="")
+    allowed_tools_json: str = Field(default="[]")
+    session_context_json: str = Field(default="")
+    output_json: Optional[str] = None
+    error_json: Optional[str] = None
+    owner: str = Field(default="", index=True)
+    lease_until: Optional[float] = Field(default=None, index=True)
+    deadline_at: float = Field(index=True)
+    cancel_requested: bool = Field(default=False, index=True)
+    created_at: float = Field(default_factory=time.time, index=True)
+    updated_at: float = Field(default_factory=time.time, index=True)
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
