@@ -7,7 +7,6 @@ IS_ROUTER_ENTRY = False
 import json
 import mimetypes
 import os
-import time
 from typing import List, Optional
 
 from fastapi import Depends, Header, HTTPException, Response
@@ -268,12 +267,9 @@ def stop_chat_run(
             "stop_requested": bool(row.stop_requested),
             "already_finished": True,
         }
-    row.stop_requested = True
-    now = time.time()
-    if str(row.status or "").strip() in {"queued", "running"}:
-        from api.chat_runtime.chat_run_state import set_status
+    from api.services.chat.chat_run_control import request_stop
 
-        set_status(row, "stopped", now=now, finished=True)
+    request_stop(row)
     session.add(row)
     session.commit()
     codex_session = session.get(CodexSession, run_id)
@@ -324,17 +320,9 @@ def resume_chat_run(
         raise HTTPException(status_code=409, detail="A run is already active in this session")
 
     resumed_id = f"run_{uuid.uuid4().hex}"
-    resumed = ChatRun(
-        run_id=resumed_id,
-        user_id=previous.user_id,
-        ai_config_id=previous.ai_config_id,
-        ai_kind=previous.ai_kind,
-        session_id=previous.session_id,
-        session_name=previous.session_name,
-        status="queued",
-        stop_requested=False,
-        worker_kwargs_json=previous.worker_kwargs_json,
-    )
+    from api.services.chat.chat_run_control import build_resumed_run
+
+    resumed = build_resumed_run(previous, resumed_id)
     session.add(resumed)
     session.commit()
 
