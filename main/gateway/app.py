@@ -129,6 +129,12 @@ async def lifespan(app: FastAPI):
                 # Repo auto-update: cheap eligibility check (~every 30s); the
                 # actual fetch/pull/restart runs on a background thread when due.
                 try:
+                    # A host-side rebuild can finish after the remote /check
+                    # response has returned.  Mirror its terminal state before
+                    # checking the local running flag, otherwise the gateway
+                    # can remain stuck in "running" and suppress all future
+                    # automatic checks until an admin status request arrives.
+                    repo_update.sync_remote_update_state()
                     repo_update.maybe_auto_check()
                 except Exception:
                     logger.exception("repo-update auto check failed")
