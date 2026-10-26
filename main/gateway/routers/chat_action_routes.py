@@ -259,7 +259,7 @@ def stop_chat_run(
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="Run not found")
-    if str(row.status or "").strip() in {"completed", "error", "stopped"}:
+    if str(row.status or "").strip() in {"completed", "error", "stopped", "failed"}:
         _clear_run_live_text(run_id)
         return {
             "success": True,
@@ -271,10 +271,9 @@ def stop_chat_run(
     row.stop_requested = True
     now = time.time()
     if str(row.status or "").strip() in {"queued", "running"}:
-        row.status = "stopped"
-        if row.finished_at is None:
-            row.finished_at = now
-    row.updated_at = now
+        from api.chat_runtime.chat_run_state import set_status
+
+        set_status(row, "stopped", now=now, finished=True)
     session.add(row)
     session.commit()
     codex_session = session.get(CodexSession, run_id)

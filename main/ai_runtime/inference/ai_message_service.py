@@ -30,6 +30,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AIMessage, AssistantAIConfig, ChatMessageCreate, ChatRun, ChatSession, User
+from api.chat_runtime.chat_run_state import set_status
 from api.services.chat.chat_persistence import _save_message
 import logging
 
@@ -357,10 +358,7 @@ def _get_live_active_run(
             return row
         if row.status == "queued" and now - float(row.created_at or now) < 5:
             return row
-        row.status = "failed"
-        row.error_message = "stale active run without live worker thread"
-        row.finished_at = now
-        row.updated_at = now
+        set_status(row, "error", now=now, error_message="stale active run without live worker thread", finished=True)
         session.add(row)
     if rows:
         session.commit()
@@ -392,10 +390,13 @@ def _clear_live_run_state(run_id: str) -> None:
 def _mark_run_interrupted(session: Session, row: ChatRun, message_id: str) -> Dict[str, Any]:
     now = time.time()
     row.stop_requested = True
-    row.status = "stopped"
-    row.error_message = f"interrupted by AI message {message_id}"
-    row.finished_at = row.finished_at or now
-    row.updated_at = now
+    set_status(
+        row,
+        "stopped",
+        now=now,
+        error_message=f"interrupted by AI message {message_id}",
+        finished=True,
+    )
     session.add(row)
     _clear_live_run_state(str(row.run_id or ""))
     return {

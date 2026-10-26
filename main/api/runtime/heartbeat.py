@@ -18,6 +18,7 @@ from sqlmodel import Session, select
 from ..database import engine
 from ..models import ChatRun
 from ..core.settings import settings
+from ..chat_runtime.chat_run_state import set_status
 
 
 # A worker must call ``tick`` at least every TICK_INTERVAL_SECONDS while a
@@ -64,13 +65,12 @@ def reap_stale_runs() -> List[str]:
                 legacy_last is None or legacy_last < now - STALE_AFTER_SECONDS
             )
             if lease_expired or legacy_stale:
-                row.status = "queued"
+                set_status(row, "queued", now=now)
                 row.error_message = None
                 row.finished_at = None
                 row.heartbeat_at = None
                 row.worker_instance_id = None
                 row.lease_expires_at = None
-                row.updated_at = now
                 session.add(row)
                 reaped.append(row.run_id)
         if reaped:

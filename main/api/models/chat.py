@@ -149,6 +149,7 @@ class ChatRun(SQLModel, table=True):
     ai_kind: str = Field(default="assistant", index=True)
     session_id: str = Field(default="default", index=True)
     session_name: Optional[str] = None
+    # Lifecycle edges are centralized in api.chat_runtime.chat_run_state.
     status: str = Field(default="queued", index=True)  # queued/running/completed/error/stopped
     stop_requested: bool = Field(default=False)
     error_message: Optional[str] = None

@@ -18,6 +18,7 @@ from api.common.value_utils import safe_json_obj
 from api.services.model_presets import resolve_model_preset, session_model_preset_entry
 from api.services.tasks.task_system import with_workspace_read_by_name_compat
 from .run_state import _RUN_LIVE_STATE, _RUN_STATE_LOCK
+from .chat_run_state import set_status
 from .chat_prompt_utils import (
     _append_prompt_section,
     _clear_run_live_text,
@@ -483,13 +484,14 @@ def _run_set_status(run_id: str, status: str, error_message: Optional[str] = Non
             status = "stopped"
             error_message = row.error_message or error_message
             finished = True
-        row.status = status
-        row.error_message = error_message
-        row.updated_at = time.time()
-        if row.started_at is None and status == "running":
-            row.started_at = time.time()
-        if finished:
-            row.finished_at = time.time()
+        changed = set_status(
+            row,
+            status,
+            error_message=error_message,
+            finished=finished,
+        )
+        if not changed:
+            return
         bg.add(row)
         bg.commit()
         # Snapshot the fields the terminal event needs while the row is loaded;

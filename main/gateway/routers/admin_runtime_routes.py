@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from api.database import get_session
 from api.models import ChatRun, User
+from api.chat_runtime.chat_run_state import set_status
 from gateway.routers.admin import _record_audit, require_admin_user
 from gateway.routers.admin_services import (
     ServiceRequestError,
@@ -128,9 +129,7 @@ def stop_task(
     now = time.time()
     run.stop_requested = True
     if run.status in ("queued", "running"):
-        run.status = "stopped"
-        run.finished_at = run.finished_at or now
-    run.updated_at = now
+        set_status(run, "stopped", now=now, finished=True)
     session.add(run)
     session.commit()
     _record_audit(

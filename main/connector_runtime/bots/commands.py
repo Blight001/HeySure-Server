@@ -18,6 +18,7 @@ from api.chat_runtime.chat_runtime_helpers import (
     _resolve_ai_runtime,
     build_runtime_system_prompt_and_tools,
 )
+from api.chat_runtime.chat_run_state import set_status
 from api.models import (
     AssistantAIConfig,
     BotSessionRoute,
@@ -407,9 +408,7 @@ def handle_bot_command(
         now = time.time()
         for run in runs:
             run.stop_requested = True
-            run.status = "stopped"
-            run.finished_at = run.finished_at or now
-            run.updated_at = now
+            set_status(run, "stopped", now=now, finished=True)
             session.add(run)
         session.commit()
         return BotCommandResult(command, f"已发送停止请求，共停止 {len(runs)} 个运行。")

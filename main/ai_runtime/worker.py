@@ -24,6 +24,7 @@ from sqlmodel import Session, select
 from api.core.settings import settings
 from api.database import engine
 from api.models import ChatRun
+from api.chat_runtime.chat_run_state import set_status
 from api.runtime import heartbeat
 from api.runtime.health import state_for
 from api.runtime.log_context import bind as bind_log_context
@@ -123,7 +124,7 @@ def requeue_runs(run_ids: list[str]) -> list[str]:
             )
         ).all()
         for row in rows:
-            row.status = "queued"
+            set_status(row, "queued", now=now)
             row.error_message = None
             row.finished_at = None
             row.heartbeat_at = None
@@ -176,8 +177,7 @@ def _claim_one_queued_run() -> Optional[ChatRun]:
         if run is None:
             return None
         now = time.time()
-        run.status = "running"
-        run.started_at = run.started_at or now
+        set_status(run, "running", now=now)
         run.heartbeat_at = now
         run.worker_instance_id = WORKER_INSTANCE_ID
         run.lease_expires_at = now + max(10, settings.ai_run_lease_seconds)
@@ -264,10 +264,12 @@ def _execute_run(run: ChatRun) -> None:
         with Session(engine) as session:
             row = session.get(ChatRun, run.id)
             if row:
-                row.status = "error"
-                row.error_message = f"worker setup failed: {exc}"
-                row.finished_at = time.time()
-                row.updated_at = time.time()
+                set_status(
+                    row,
+                    "error",
+                    error_message=f"worker setup failed: {exc}",
+                    finished=True,
+                )
                 session.add(row)
                 session.commit()
         return
@@ -279,10 +281,12 @@ def _execute_run(run: ChatRun) -> None:
         with Session(engine) as session:
             row = session.get(ChatRun, run.id)
             if row and row.status not in {"completed", "stopped", "error"}:
-                row.status = "error"
-                row.error_message = f"_run_worker crashed: {exc}"
-                row.finished_at = time.time()
-                row.updated_at = time.time()
+                set_status(
+                    row,
+                    "error",
+                    error_message=f"_run_worker crashed: {exc}",
+                    finished=True,
+                )
                 session.add(row)
                 session.commit()
 
