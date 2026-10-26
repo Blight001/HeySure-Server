@@ -56,3 +56,19 @@ def test_workspace_list_tool_uses_current_ai_workspace(monkeypatch, tmp_path):
     assert result["count"] == 1
     assert result["entries"][0]["path"] == "src/main.py"
 
+
+def test_workspace_file_scope_can_be_selected_per_ai_member(monkeypatch, tmp_path):
+    member_root = tmp_path / "member"
+    _write(member_root / "docs" / "guide.md")
+    _write(tmp_path / "other.txt")
+    monkeypatch.setattr(
+        workspace,
+        "get_project_root",
+        lambda _user, config_id: str(member_root if config_id == 42 else tmp_path),
+    )
+
+    result = workspace._list_workspace_files(7, {}, 42)
+
+    assert result["workspace_root"] == "."
+    assert {entry["path"] for entry in result["entries"]} == {"docs", "docs/guide.md"}
+

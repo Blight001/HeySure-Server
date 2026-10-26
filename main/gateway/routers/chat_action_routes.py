@@ -25,7 +25,7 @@ from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMe
 from .auth import get_current_user
 from api.services.model_presets import resolve_model_preset
 from api.services.storage.agent_instructions import append_agent_md_prompt
-from api.services.storage.workspace_visibility import workspace_listing_paths, workspace_tree
+from api.services.storage.workspace_visibility import safe_workspace_path, workspace_listing_paths, workspace_rel_path, workspace_tree
 from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, router
@@ -54,21 +54,6 @@ WORKSPACE_TEXT_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".html", ".htm", ".css", ".scss",
     ".bat", ".cmd", ".ps1", ".sh", ".sql",
 }
-
-
-def _safe_user_workspace_path(user_id: int, rel: str) -> str:
-    root = os.path.realpath(get_project_root(user_id, None))
-    clean = str(rel or "").strip().replace("\\", "/").lstrip("/")
-    full = os.path.realpath(os.path.join(root, clean))
-    if full != root and not full.startswith(root + os.sep):
-        raise HTTPException(status_code=400, detail="非法的文件路径")
-    return full
-
-
-def _workspace_rel_path(user_id: int, full: str) -> str:
-    root = os.path.realpath(get_project_root(user_id, None))
-    rel = os.path.relpath(full, root).replace(os.sep, "/")
-    return "" if rel == "." else rel
 
 
 def _workspace_file_kind(name: str) -> str:
@@ -540,34 +525,41 @@ def get_chat_message_media(
     )
 @router.get("/files")
 def list_files(
+    ai_config_id: Optional[int] = None,
     include_generated: bool = False,
     include_hidden: bool = False,
+    max_depth: int = 32,
+    max_entries: int = 2000,
     session: Session = Depends(get_session),
     authorization: str = Header(None)
 ):
     user = get_current_user(authorization, session)
     return workspace_listing_paths(
-        get_project_root(user.id, None),
+        get_project_root(user.id, ai_config_id),
         include_generated=include_generated,
         include_hidden=include_hidden,
+        max_depth=max_depth,
+        max_entries=max_entries,
     )
 
 
 @router.get("/files/read")
 def read_workspace_file(
     path: str,
+    ai_config_id: Optional[int] = None,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    full = _safe_user_workspace_path(user.id, path)
+    root = get_project_root(user.id, ai_config_id)
+    full = safe_workspace_path(root, path)
     if not os.path.isfile(full):
         raise HTTPException(status_code=404, detail="文件不存在")
     size = os.path.getsize(full)
     kind = _workspace_file_kind(os.path.basename(full))
     if size > MAX_WORKSPACE_PREVIEW_BYTES:
         return {
-            "path": _workspace_rel_path(user.id, full),
+            "path": workspace_rel_path(root, full),
             "size": size,
             "binary": False,
             "too_large": True,
@@ -578,7 +570,7 @@ def read_workspace_file(
         data = handle.read()
     if not _is_probably_text(data):
         return {
-            "path": _workspace_rel_path(user.id, full),
+            "path": workspace_rel_path(root, full),
             "size": size,
             "binary": True,
             "too_large": False,
@@ -586,7 +578,7 @@ def read_workspace_file(
             "kind": kind,
         }
     return {
-        "path": _workspace_rel_path(user.id, full),
+        "path": workspace_rel_path(root, full),
         "size": size,
         "binary": False,
         "too_large": False,
@@ -598,11 +590,13 @@ def read_workspace_file(
 @router.get("/files/raw")
 def raw_workspace_file(
     path: str,
+    ai_config_id: Optional[int] = None,
     session: Session = Depends(get_session),
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    full = _safe_user_workspace_path(user.id, path)
+    root = get_project_root(user.id, ai_config_id)
+    full = safe_workspace_path(root, path)
     if not os.path.isfile(full):
         raise HTTPException(status_code=404, detail="文件不存在")
     media_type, _ = mimetypes.guess_type(full)

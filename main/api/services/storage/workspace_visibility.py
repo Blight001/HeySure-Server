@@ -9,8 +9,11 @@ surface uses the same defaults.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Dict, Iterator
+
+from fastapi import HTTPException
 
 
 IGNORED_DIRECTORY_NAMES = frozenset({
@@ -27,6 +30,20 @@ DEFAULT_MAX_DEPTH = 8
 DEFAULT_MAX_ENTRIES = 300
 MAX_MAX_DEPTH = 32
 MAX_MAX_ENTRIES = 2000
+
+
+def safe_workspace_path(root: str, rel: str) -> str:
+    root_real = os.path.realpath(root)
+    clean = str(rel or "").strip().replace("\\", "/").lstrip("/")
+    full = os.path.realpath(os.path.join(root_real, clean))
+    if full != root_real and not full.startswith(root_real + os.sep):
+        raise HTTPException(status_code=400, detail="非法的文件路径")
+    return full
+
+
+def workspace_rel_path(root: str, full: str) -> str:
+    rel = os.path.relpath(full, os.path.realpath(root)).replace(os.sep, "/")
+    return "" if rel == "." else rel
 
 
 def _part_is_hidden(name: str) -> bool:
