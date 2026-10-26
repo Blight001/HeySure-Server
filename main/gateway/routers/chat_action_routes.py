@@ -25,7 +25,7 @@ from api.models import AssistantAIConfig, ChatMessage, ChatMessageCreate, ChatMe
 from .auth import get_current_user
 from api.services.model_presets import resolve_model_preset
 from api.services.storage.agent_instructions import append_agent_md_prompt
-from api.services.storage.workspace_visibility import safe_workspace_path, workspace_listing_paths, workspace_rel_path, workspace_tree
+from api.services.storage.workspace_visibility import resolve_workspace_scope, safe_workspace_path, workspace_listing_paths, workspace_rel_path, workspace_tree
 from api.services.chat import chat_inject
 from api.services.chat.chat_media import delete_message_media, get_message_media
 from .chat_base import _RUN_LIVE_STATE, _RUN_STATE_LOCK, router
@@ -535,7 +535,7 @@ def list_files(
 ):
     user = get_current_user(authorization, session)
     return workspace_listing_paths(
-        get_project_root(user.id, ai_config_id),
+        resolve_workspace_scope(user.id, ai_config_id, create=True).root,
         include_generated=include_generated,
         include_hidden=include_hidden,
         max_depth=max_depth,
@@ -551,7 +551,7 @@ def read_workspace_file(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    root = get_project_root(user.id, ai_config_id)
+    root = resolve_workspace_scope(user.id, ai_config_id, create=True).root
     full = safe_workspace_path(root, path)
     if not os.path.isfile(full):
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -595,7 +595,7 @@ def raw_workspace_file(
     authorization: str = Header(None),
 ):
     user = get_current_user(authorization, session)
-    root = get_project_root(user.id, ai_config_id)
+    root = resolve_workspace_scope(user.id, ai_config_id, create=True).root
     full = safe_workspace_path(root, path)
     if not os.path.isfile(full):
         raise HTTPException(status_code=404, detail="文件不存在")

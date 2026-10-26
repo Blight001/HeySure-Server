@@ -12,7 +12,7 @@ from sqlmodel import Session, select
 
 from api.database import engine
 from api.models import AIRuntimeStatus
-from api.services.storage.workspace_scope import member_workspace_dir
+from api.services.storage.workspace_scope import resolve_workspace_scope
 from api.services.storage.workspace_visibility import workspace_tree
 from api.sio import sio
 
@@ -22,22 +22,10 @@ logger = logging.getLogger(__name__)
 # pass the toolbox binding gate, while each nested step is re-authorized too.
 MCP_INTROSPECTION_TOOLS = {"mcp.describe+tool"}
 
-def _resolve_ai_workspace(user_id: int, ai_config_id: Optional[int]) -> str:
-    """Resolve the working directory available to an AI.
-
-    The digital-society manager uses the user root; ordinary AI members use
-    their own ``<id>-<slug>`` subdirectory. Callers that pass no
-    ``ai_config_id`` also get the user root.
-
-    Note: the shared knowledge base is resolved separately
-    (``user_shared_knowledge_dir``) so it stays one-per-user across AIs.
-    """
-    return member_workspace_dir(user_id, ai_config_id)
-
 def get_project_root(user_id: int, ai_config_id: Optional[int] = None) -> str:
-    workspace_dir = _resolve_ai_workspace(user_id, ai_config_id)
-    os.makedirs(workspace_dir, exist_ok=True)
-    return workspace_dir
+    """Return the AI-scoped workspace, creating it when first accessed."""
+    scope = resolve_workspace_scope(user_id, ai_config_id, create=True)
+    return scope.root
 
 def safe_join(root: str, *paths: str) -> str:
     abs_root = os.path.abspath(root)

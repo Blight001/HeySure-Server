@@ -1,6 +1,7 @@
 """Resolve the filesystem workspace owned by one AI member."""
 
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlmodel import Session, select
@@ -14,19 +15,34 @@ from api.database import engine
 from api.models import AssistantAIConfig
 
 
-def member_workspace_dir(
+@dataclass(frozen=True)
+class WorkspaceScope:
+    """Canonical filesystem scope shared by REST, MCP and file services."""
+
+    user_id: int
+    ai_config_id: Optional[int]
+    root: str
+
+    def resolve_path(self, relative_path: object = "") -> str:
+        root = os.path.realpath(self.root)
+        clean = str(relative_path or "").strip().replace("\\", "/").lstrip("/")
+        full = os.path.realpath(os.path.join(root, clean))
+        if full != root and not full.startswith(root + os.sep):
+            raise ValueError("path outside workspace")
+        return full
+
+    def relative_path(self, full_path: str) -> str:
+        relative = os.path.relpath(full_path, os.path.realpath(self.root))
+        return "" if relative == "." else relative.replace(os.sep, "/")
+
+
+def resolve_workspace_scope(
     user_id: int,
     ai_config_id: Optional[int],
     *,
     create: bool = False,
-) -> str:
-    """Return the existing workspace scope used by MCP and persisted files.
-
-    The digital-society manager owns the user workspace root. Ordinary digital
-    members remain isolated in their own named subdirectories. An unknown AI
-    id keeps the historical ``<id>-ai`` fallback and never widens access.
-    """
-
+) -> WorkspaceScope:
+    """Resolve one AI member's workspace without widening user access."""
     user_root = os.path.abspath(user_workspace_dir(int(user_id)))
     root = user_root
     if ai_config_id:
@@ -49,4 +65,20 @@ def member_workspace_dir(
     root = os.path.abspath(root)
     if create:
         os.makedirs(root, exist_ok=True)
-    return root
+    return WorkspaceScope(int(user_id), ai_config_id, root)
+
+
+def member_workspace_dir(
+    user_id: int,
+    ai_config_id: Optional[int],
+    *,
+    create: bool = False,
+) -> str:
+    """Return the existing workspace scope used by MCP and persisted files.
+
+    The digital-society manager owns the user workspace root. Ordinary digital
+    members remain isolated in their own named subdirectories. An unknown AI
+    id keeps the historical ``<id>-ai`` fallback and never widens access.
+    """
+
+    return resolve_workspace_scope(user_id, ai_config_id, create=create).root

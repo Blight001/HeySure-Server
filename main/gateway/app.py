@@ -49,6 +49,7 @@ register_restart_command([sys.executable, "-m", "gateway.main"])
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from api.runtime.gateway_periodic import GatewayPeriodicJobs
     from api.runtime.health import state_for
 
     health = state_for("gateway")
@@ -93,51 +94,31 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=_run_alignment, daemon=True, name="token-align").start()
     stop_event = asyncio.Event()
 
-    watchdog_counter = {"ticks": 0}
     # In split deployments the dedicated connector-runtime owns every bot's
     # long-connection client so api-gateway restarts don't drop upstream.
     _bots_owned_by_gateway = not settings.connector_runtime_url
 
+    def _start_gateway_bots() -> None:
+        if not _bots_owned_by_gateway:
+            return
+        for bot in iter_bots():
+            try:
+                bot.start_long_connections()
+            except Exception:
+                logger.exception("start %s long_connections failed", bot.channel)
+
+    periodic_jobs = GatewayPeriodicJobs(
+        start_bot_connections=_start_gateway_bots,
+        process_task_scheduler=process_task_scheduler,
+        reap_stale_runs=heartbeat_module.reap_stale_runs,
+        cleanup_temp_images=cleanup_expired_temp_images,
+        sync_remote_update_state=repo_update.sync_remote_update_state,
+        auto_check_repo_update=repo_update.maybe_auto_check,
+    )
+
     async def periodic_scan():
         while not stop_event.is_set():
-            if _bots_owned_by_gateway:
-                for bot in iter_bots():
-                    try:
-                        bot.start_long_connections()
-                    except Exception:
-                        logger.exception(f"start {bot.channel} long_connections failed")
-            try:
-                process_task_scheduler()
-            except Exception:
-                logger.exception("process_task_scheduler failed")
-            # Reap stale ChatRun heartbeats every ~30s to avoid scanning
-            # the table on every 3s tick.
-            watchdog_counter["ticks"] += 1
-            if watchdog_counter["ticks"] % 10 == 0:
-                try:
-                    reaped = heartbeat_module.reap_stale_runs()
-                    if reaped:
-                        logger.warning(f"watchdog reaped stale runs: {reaped}")
-                except Exception:
-                    logger.exception("watchdog reap failed")
-                try:
-                    removed = cleanup_expired_temp_images()
-                    if removed:
-                        logger.info(f"removed expired temporary images: {removed}")
-                except Exception:
-                    logger.exception("temporary image cleanup failed")
-                # Repo auto-update: cheap eligibility check (~every 30s); the
-                # actual fetch/pull/restart runs on a background thread when due.
-                try:
-                    # A host-side rebuild can finish after the remote /check
-                    # response has returned.  Mirror its terminal state before
-                    # checking the local running flag, otherwise the gateway
-                    # can remain stuck in "running" and suppress all future
-                    # automatic checks until an admin status request arrives.
-                    repo_update.sync_remote_update_state()
-                    repo_update.maybe_auto_check()
-                except Exception:
-                    logger.exception("repo-update auto check failed")
+            periodic_jobs.run_once()
             await asyncio.sleep(3)
 
     task = asyncio.create_task(periodic_scan())

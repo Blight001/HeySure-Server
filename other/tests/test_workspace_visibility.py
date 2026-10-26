@@ -1,6 +1,8 @@
 from pathlib import Path
+import pytest
 
 from api.services.storage.workspace_visibility import list_workspace_entries
+from api.services.storage.workspace_scope import WorkspaceScope
 # Initialise the MCP package before importing a handler module; the package
 # registry owns the builtin catalog and intentionally imports that handler.
 import mcp_runtime.mcp  # noqa: F401
@@ -71,4 +73,13 @@ def test_workspace_file_scope_can_be_selected_per_ai_member(monkeypatch, tmp_pat
 
     assert result["workspace_root"] == "."
     assert {entry["path"] for entry in result["entries"]} == {"docs", "docs/guide.md"}
+
+
+def test_workspace_scope_round_trips_relative_paths_and_rejects_escape(tmp_path):
+    scope = WorkspaceScope(user_id=7, ai_config_id=42, root=str(tmp_path))
+    nested = scope.resolve_path("docs/guide.md")
+
+    assert scope.relative_path(nested) == "docs/guide.md"
+    with pytest.raises(ValueError, match="outside workspace"):
+        scope.resolve_path("../secret.txt")
 
